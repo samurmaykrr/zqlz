@@ -239,6 +239,93 @@ impl MultiColumnSort {
     }
 }
 
+/// Order two decimals held as text.
+///
+/// Compares digit by digit rather than converting to `f64`, so values wider than
+/// a double still order correctly. Falls back to `f64` for exponent notation and
+/// to text for anything that is not a number.
+fn compare_decimal_text(a: &str, b: &str) -> Ordering {
+    if let (Some(left), Some(right)) = (split_decimal(a), split_decimal(b)) {
+        return compare_split_decimals(left, right);
+    }
+
+    match (a.parse::<f64>(), b.parse::<f64>()) {
+        (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+        _ => a.cmp(b),
+    }
+}
+
+/// Split a plain decimal into its sign, integer digits and fraction digits.
+/// Returns `None` for anything else, including exponent notation.
+fn split_decimal(text: &str) -> Option<(bool, &str, &str)> {
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+
+    let (integer, fraction) = match digits.find('.') {
+        Some(index) => (&digits[..index], &digits[index + 1..]),
+        None => (digits, ""),
+    };
+
+    if integer.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !integer.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    Some((negative, integer, fraction))
+}
+
+fn compare_split_decimals(left: (bool, &str, &str), right: (bool, &str, &str)) -> Ordering {
+    let (left_signed, left_integer, left_fraction) = left;
+    let (right_signed, right_integer, right_fraction) = right;
+
+    let is_zero = |integer: &str, fraction: &str| {
+        integer.bytes().all(|byte| byte == b'0') && fraction.bytes().all(|byte| byte == b'0')
+    };
+
+    // "-0" and "0" denote the same number, so neither counts as negative.
+    let left_negative = left_signed && !is_zero(left_integer, left_fraction);
+    let right_negative = right_signed && !is_zero(right_integer, right_fraction);
+
+    match (left_negative, right_negative) {
+        (false, true) => return Ordering::Greater,
+        (true, false) => return Ordering::Less,
+        _ => {}
+    }
+
+    let left_whole = left_integer.trim_start_matches('0');
+    let right_whole = right_integer.trim_start_matches('0');
+
+    let width = left_fraction.len().max(right_fraction.len());
+    let magnitude = left_whole
+        .len()
+        .cmp(&right_whole.len())
+        .then_with(|| left_whole.cmp(right_whole))
+        .then_with(|| {
+            let pad = |fraction: &str| {
+                fraction
+                    .bytes()
+                    .chain(std::iter::repeat(b'0'))
+                    .take(width)
+                    .collect::<Vec<u8>>()
+            };
+            pad(left_fraction).cmp(&pad(right_fraction))
+        });
+
+    if left_negative {
+        magnitude.reverse()
+    } else {
+        magnitude
+    }
+}
+
 /// Compare two non-null values
 #[allow(dead_code)]
 fn compare_non_null_values(a: &Value, b: &Value) -> Ordering {
@@ -258,7 +345,11 @@ fn compare_non_null_values(a: &Value, b: &Value) -> Ordering {
 
         // String comparisons
         (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Decimal(a), Value::Decimal(b)) => a.cmp(b),
+
+        // Decimals hold their digits as text to preserve precision, so they must
+        // be compared numerically — ordering them as strings would put "10"
+        // before "9". Falls back to text only when a side is not a number.
+        (Value::Decimal(a), Value::Decimal(b)) => compare_decimal_text(a, b),
 
         // UUID comparison
         (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
@@ -315,6 +406,62 @@ fn compare_non_null_values(a: &Value, b: &Value) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decimals are stored as text, so a plain string comparison would order
+    /// "10" before "9".
+    #[test]
+    fn decimals_order_numerically_not_lexicographically() {
+        let decimal = |text: &str| Value::Decimal(text.to_string());
+
+        assert_eq!(
+            compare_non_null_values(&decimal("9"), &decimal("10")),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_non_null_values(&decimal("2.10"), &decimal("2.9")),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_non_null_values(&decimal("-6.0000"), &decimal("-6.00001")),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_non_null_values(&decimal("-1"), &decimal("1")),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn decimals_compare_equal_across_padding_and_signed_zero() {
+        let decimal = |text: &str| Value::Decimal(text.to_string());
+
+        assert_eq!(
+            compare_non_null_values(&decimal("1.50"), &decimal("1.5")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_non_null_values(&decimal("007"), &decimal("7")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_non_null_values(&decimal("-0"), &decimal("0")),
+            Ordering::Equal
+        );
+    }
+
+    /// Values too wide for f64 must still order correctly.
+    #[test]
+    fn decimals_beyond_double_precision_still_order() {
+        let decimal = |text: &str| Value::Decimal(text.to_string());
+
+        assert_eq!(
+            compare_non_null_values(
+                &decimal("20000000000000000001"),
+                &decimal("20000000000000000002")
+            ),
+            Ordering::Less
+        );
+    }
 
     #[test]
     fn test_single_column_sort_ascending() {

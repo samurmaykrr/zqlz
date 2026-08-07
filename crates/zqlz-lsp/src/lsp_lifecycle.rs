@@ -1,13 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use uuid::Uuid;
 use zqlz_core::Connection;
-use zqlz_services::SchemaService;
+use zqlz_services::{SchemaService, TableColumnSummary, TableDetails};
 
 use crate::{
-    CompletionCache, ContextAnalyzer, FuzzyMatcher, SchemaCache, SchemaValidator, SqlDiagnostics,
-    SqlDialect, SqlLsp, TableInfo, schema_fetch,
+    CompletionCache, ContextAnalyzer, DatabaseObject, FuzzyMatcher, SchemaCache, SchemaValidator,
+    SqlDiagnostics, SqlDialect, SqlLsp, TableInfo, schema_fetch,
 };
 
 impl SqlLsp {
@@ -152,6 +153,125 @@ impl SqlLsp {
                     table_type: zqlz_core::TableType::Table,
                 });
         }
+    }
+
+    /// Merges one table's columns and foreign keys into the cache without a full refetch.
+    ///
+    /// Called when something else in the app (the sidebar, the table viewer) has just
+    /// loaded a table's details, so `alias.` completions for that table work immediately
+    /// instead of waiting for the next whole-schema refresh. Unlike `pre_populate_tables`
+    /// this is not gated on `schema_loading` — the data is authoritative either way.
+    pub fn merge_table_columns(&mut self, table_name: &str, details: &TableDetails) {
+        self.drop_cached_columns(std::slice::from_ref(&table_name.to_string()));
+        self.insert_table_details(table_name, details);
+    }
+
+    /// Merges many tables' details in one pass.
+    ///
+    /// Equivalent to calling [`Self::merge_table_columns`] per table, but the stale-object
+    /// sweep runs once for the whole batch instead of once per table — the per-table form
+    /// is O(tables × objects), which is a visible stall on the UI thread for a schema with
+    /// dozens of tables.
+    pub fn merge_table_details_batch(&mut self, details: &HashMap<String, TableDetails>) {
+        if details.is_empty() {
+            return;
+        }
+
+        let table_names: Vec<String> = details.keys().cloned().collect();
+        self.drop_cached_columns(&table_names);
+
+        for (table_name, table_details) in details {
+            self.insert_table_details(table_name, table_details);
+        }
+    }
+
+    /// Bulk form for the connect-time warm-up, which fetches only what completions
+    /// need rather than full table details.
+    pub fn merge_table_columns_batch(&mut self, summaries: &HashMap<String, TableColumnSummary>) {
+        if summaries.is_empty() {
+            return;
+        }
+
+        let table_names: Vec<String> = summaries.keys().cloned().collect();
+        self.drop_cached_columns(&table_names);
+
+        for (table_name, summary) in summaries {
+            self.insert_table_columns(table_name, &summary.columns, &summary.foreign_keys);
+        }
+    }
+
+    /// Removes the cached column state for `table_names` so a merge replaces rather
+    /// than appends — otherwise a re-merge after `ALTER TABLE` leaves dropped columns
+    /// completing forever.
+    fn drop_cached_columns(&mut self, table_names: &[String]) {
+        self.pre_populate_tables(table_names);
+
+        let canonical: Vec<String> = table_names
+            .iter()
+            .map(|table_name| self.canonical_table_name(table_name))
+            .collect();
+        let is_stale = |name: &str| {
+            canonical
+                .iter()
+                .any(|table_name| table_name.eq_ignore_ascii_case(name))
+        };
+
+        self.schema_cache.objects.retain(|object| match object {
+            DatabaseObject::Column(column) => !is_stale(&column.table_name),
+            _ => true,
+        });
+        for reverse in self.schema_cache.reverse_foreign_keys.values_mut() {
+            reverse.retain(|(source_table, _)| !is_stale(source_table));
+        }
+    }
+
+    fn insert_table_details(&mut self, table_name: &str, details: &TableDetails) {
+        self.insert_table_columns(table_name, &details.columns, &details.foreign_keys);
+    }
+
+    fn insert_table_columns(
+        &mut self,
+        table_name: &str,
+        columns: &[zqlz_services::ColumnInfo],
+        foreign_keys: &[zqlz_core::ForeignKeyInfo],
+    ) {
+        let canonical = self.canonical_table_name(table_name);
+        let column_infos = schema_fetch::columns_from_parts(&canonical, columns, foreign_keys);
+
+        for column in &column_infos {
+            self.schema_cache
+                .objects
+                .push(DatabaseObject::Column(column.clone()));
+        }
+        self.schema_cache
+            .columns_by_table
+            .insert(canonical.clone(), column_infos);
+
+        if !foreign_keys.is_empty() {
+            self.schema_cache
+                .foreign_keys_by_table
+                .insert(canonical.clone(), foreign_keys.to_vec());
+
+            for foreign_key in foreign_keys {
+                self.schema_cache
+                    .reverse_foreign_keys
+                    .entry(foreign_key.referenced_table.clone())
+                    .or_default()
+                    .push((canonical.clone(), foreign_key.clone()));
+            }
+        }
+    }
+
+    /// Returns the cache's existing spelling of `table_name`, so merging `USERS`
+    /// updates the `users` entry instead of creating a second one.
+    fn canonical_table_name(&self, table_name: &str) -> String {
+        self.schema_cache
+            .columns_by_table
+            .keys()
+            .chain(self.schema_cache.tables.keys())
+            .find(|name| name.eq_ignore_ascii_case(table_name))
+            .cloned()
+            .unwrap_or_else(|| table_name.to_string())
     }
 
     /// Returns the active connection ID, if any.

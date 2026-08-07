@@ -5,18 +5,18 @@ use parking_lot::Mutex;
 use rusqlite::{Connection as RusqliteConnection, InterruptHandle, OpenFlags, params_from_iter};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use zqlz_core::{
-    BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnInfo, ColumnMeta,
-    Connection, ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
-    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
-    ForeignKeyAction, ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities,
-    IndexInfo, ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef,
-    ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle, QueryResult,
-    ResolvedConnectionScope, Result, Row, RowIdentifier, SchemaInfo, SchemaIntrospection,
-    SequenceInfo, SqlObjectName, StatementResult, TableDetails, TableInfo, TableType, Transaction,
-    TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
+    BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnMeta, Connection,
+    ConnectionScope, DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig,
+    ExplainParserKind, ForeignKeyChecksSql, ImportIndexCapabilities, QueryCancelHandle, QueryResult,
+    ResolvedConnectionScope, Result, Row, RowIdentifier, SchemaIntrospection, SingleRowDmlScope,
+    SqlObjectName, StatementResult, TableType, Transaction, Value, ZqlzError,
 };
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::SqliteCatalog;
 
 fn strip_pg_casts(expr: &str) -> String {
     let mut result = expr.to_owned();
@@ -61,6 +61,8 @@ impl QueryCancelHandle for SqliteCancelHandle {
 pub struct SqliteConnection {
     conn: Arc<Mutex<RusqliteConnection>>,
     interrupt_handle: Arc<InterruptHandle>,
+    schema_engine: SchemaEngine,
+    closed: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,105 +120,6 @@ impl SqliteConnection {
 
     fn sqlite_string_literal(value: &str) -> String {
         value.replace('\'', "''")
-    }
-
-    fn classify_sqlite_table_type(create_sql: Option<&str>) -> TableType {
-        let Some(create_sql) = create_sql else {
-            return TableType::Table;
-        };
-
-        if create_sql
-            .trim_start()
-            .to_ascii_uppercase()
-            .starts_with("CREATE VIRTUAL TABLE")
-        {
-            TableType::VirtualTable
-        } else {
-            TableType::Table
-        }
-    }
-
-    async fn resolve_catalog_table_name(&self, requested_name: &str) -> Result<String> {
-        let tables = self.list_tables(None).await?;
-        if tables.iter().any(|table| table.name == requested_name) {
-            return Ok(requested_name.to_string());
-        }
-
-        if let Some((schema_name, relation_name)) = requested_name.split_once('.')
-            && schema_name != "main"
-            && tables.iter().any(|table| table.name == relation_name)
-        {
-            return Ok(relation_name.to_string());
-        }
-
-        Ok(requested_name.to_string())
-    }
-
-    async fn sqlite_table_row_estimates(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let sqlite_stat1_missing = self
-            .query(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1' LIMIT 1",
-                &[],
-            )
-            .await?
-            .rows
-            .is_empty();
-
-        if sqlite_stat1_missing {
-            return Ok(std::collections::HashMap::new());
-        }
-
-        let result = self
-            .query(
-                "SELECT tbl, MAX(CAST(substr(stat, 1, instr(stat || ' ', ' ') - 1) AS INTEGER))
-                 FROM sqlite_stat1
-                 GROUP BY tbl",
-                &[],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .filter_map(|row| Some((row.get(0)?.as_str()?.to_string(), row.get(1)?.as_i64()?)))
-            .collect())
-    }
-
-    async fn sqlite_index_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let result = self
-            .query(
-                "SELECT tbl_name, COUNT(*)
-                 FROM sqlite_master
-                 WHERE type = 'index'
-                   AND name NOT LIKE 'sqlite_autoindex_%'
-                 GROUP BY tbl_name",
-                &[],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .filter_map(|row| Some((row.get(0)?.as_str()?.to_string(), row.get(1)?.as_i64()?)))
-            .collect())
-    }
-
-    async fn sqlite_trigger_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let result = self
-            .query(
-                "SELECT tbl_name, COUNT(*)
-                 FROM sqlite_master
-                 WHERE type = 'trigger'
-                 GROUP BY tbl_name",
-                &[],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .filter_map(|row| Some((row.get(0)?.as_str()?.to_string(), row.get(1)?.as_i64()?)))
-            .collect())
     }
 
     /// Open a SQLite database
@@ -305,9 +208,16 @@ impl SqliteConnection {
         let interrupt_handle = Arc::new(conn.get_interrupt_handle());
 
         tracing::info!(path = %expanded_path, "SQLite database connection established");
+        let conn = Arc::new(Mutex::new(conn));
+        let schema_engine = SchemaEngine::new(
+            Arc::new(SqliteCatalog::new(conn.clone())),
+            Arc::new(DefaultDialect),
+        );
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn,
             interrupt_handle,
+            schema_engine,
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -910,24 +820,41 @@ impl Connection for SqliteConnection {
 
         let table_name = self.quote_identifier(&request.table_name);
         let column_name = self.quote_identifier(&request.column_name);
+        let scope = match &request.row_identifier {
+            RowIdentifier::FullRow(_) => self.single_row_dml_scope(&table_name, &where_clause),
+            _ => SingleRowDmlScope::Unsupported,
+        };
+        let (where_clause, statement_suffix) = scope.apply(&where_clause);
         let sql = if let Some(new_value) = &request.new_value {
             params.insert(0, new_value.clone());
             format!(
-                "UPDATE {} SET {} = {} WHERE {}",
+                "UPDATE {} SET {} = {} WHERE {}{}",
                 table_name,
                 column_name,
                 self.format_bind_placeholder(0),
-                where_clause
+                where_clause,
+                statement_suffix
             )
         } else {
             format!(
-                "UPDATE {} SET {} = NULL WHERE {}",
-                table_name, column_name, where_clause
+                "UPDATE {} SET {} = NULL WHERE {}{}",
+                table_name, column_name, where_clause, statement_suffix
             )
         };
 
         let result = self.execute(&sql, &params).await?;
         Ok(result.affected_rows)
+    }
+
+    /// SQLite tables without a key still have a `rowid`, and the only tables
+    /// that lack one (`WITHOUT ROWID`) are required to declare a primary key,
+    /// so they never reach a keyless statement.
+    fn single_row_dml_scope(
+        &self,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::by_row_identity("rowid", qualified_table, where_clause)
     }
 
     async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
@@ -973,80 +900,7 @@ impl Connection for SqliteConnection {
 
     #[tracing::instrument(skip(self, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>()))]
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
-        let start_time = std::time::Instant::now();
-
-        let conn = self.conn.lock();
-        let rusqlite_params = values_to_rusqlite(params);
-
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| ZqlzError::Query(format!("Failed to prepare query: {}", e)))?;
-
-        // Get column count and names before executing
-        let column_count = stmt.column_count();
-        let mut column_names: Vec<String> = Vec::with_capacity(column_count);
-        let mut columns: Vec<ColumnMeta> = Vec::with_capacity(column_count);
-
-        // Use stmt.columns() to get column info including declared types
-        let stmt_columns = stmt.columns();
-        for (idx, col) in stmt_columns.iter().enumerate() {
-            let name = col.name().to_string();
-            // Get the declared column type from the schema if available
-            // This uses sqlite3_column_decltype which returns the type from CREATE TABLE
-            let data_type = col.decl_type().unwrap_or("DYNAMIC").to_string();
-
-            column_names.push(name.clone());
-            columns.push(ColumnMeta {
-                name,
-                data_type,
-                nullable: true,
-                ordinal: idx,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            });
-        }
-
-        // Execute query and collect rows
-        let mut rows = Vec::new();
-        let mut query_rows = stmt
-            .query(params_from_iter(rusqlite_params.iter()))
-            .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
-
-        while let Some(row) = query_rows
-            .next()
-            .map_err(|e| ZqlzError::Query(format!("Failed to fetch row: {}", e)))?
-        {
-            let mut values = Vec::with_capacity(columns.len());
-            for i in 0..columns.len() {
-                let value = rusqlite_to_value(row, i)?;
-                values.push(value);
-            }
-            rows.push(Row::new(column_names.clone(), values));
-        }
-
-        let execution_time_ms = start_time.elapsed().as_millis() as u64;
-        let total_rows = rows.len();
-
-        tracing::debug!(
-            row_count = total_rows,
-            execution_time_ms = execution_time_ms,
-            "query executed successfully"
-        );
-        Ok(QueryResult {
-            id: uuid::Uuid::new_v4(),
-            columns,
-            rows,
-            total_rows: Some(total_rows as u64),
-            is_estimated_total: false,
-            affected_rows: 0,
-            execution_time_ms,
-            warnings: Vec::new(),
-        })
+        run_sqlite_query(&self.conn, sql, params)
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
@@ -1068,542 +922,26 @@ impl Connection for SqliteConnection {
 
     async fn close(&self) -> Result<()> {
         tracing::info!("closing SQLite connection");
+        self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn requires_heartbeat(&self) -> bool {
         false
     }
 
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
-        Some(self)
+        Some(&self.schema_engine)
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn QueryCancelHandle>> {
         Some(Arc::new(SqliteCancelHandle {
             interrupt_handle: self.interrupt_handle.clone(),
         }))
-    }
-}
-
-#[async_trait]
-impl SchemaIntrospection for SqliteConnection {
-    #[tracing::instrument(skip(self))]
-    async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        Ok(vec![DatabaseInfo {
-            name: "main".to_string(),
-            owner: None,
-            encoding: Some("UTF-8".to_string()),
-            size_bytes: None,
-            comment: None,
-        }])
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn list_schemas(&self) -> Result<Vec<SchemaInfo>> {
-        Ok(vec![SchemaInfo {
-            name: "main".to_string(),
-            owner: None,
-            comment: None,
-        }])
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<TableInfo>> {
-        tracing::debug!("listing tables from sqlite_master");
-        let result = self
-            .query(
-                "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-                &[],
-            )
-            .await?;
-
-        let mut tables = Vec::new();
-        let row_estimates = self.sqlite_table_row_estimates().await.unwrap_or_default();
-        let index_counts = self.sqlite_index_counts().await.unwrap_or_default();
-        let trigger_counts = self.sqlite_trigger_counts().await.unwrap_or_default();
-
-        for row in &result.rows {
-            let name = row
-                .get(0)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let table_type =
-                Self::classify_sqlite_table_type(row.get(1).and_then(|value| value.as_str()));
-
-            tables.push(TableInfo {
-                name: name.clone(),
-                schema: Some("main".to_string()),
-                table_type,
-                owner: None,
-                row_count: row_estimates.get(&name).copied(),
-                size_bytes: None,
-                comment: None,
-                index_count: index_counts.get(&name).copied(),
-                trigger_count: trigger_counts.get(&name).copied(),
-                key_value_info: None,
-            });
-        }
-
-        tracing::debug!(table_count = tables.len(), "tables listed");
-        Ok(tables)
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn list_views(&self, _schema: Option<&str>) -> Result<Vec<ViewInfo>> {
-        let result = self
-            .query(
-                "SELECT name, sql FROM sqlite_master WHERE type = 'view' ORDER BY name",
-                &[],
-            )
-            .await?;
-
-        let views = result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                ViewInfo {
-                    name,
-                    schema: Some("main".to_string()),
-                    is_materialized: false,
-                    definition,
-                    owner: None,
-                    comment: None,
-                }
-            })
-            .collect();
-
-        Ok(views)
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_table(&self, _schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let name = self.resolve_catalog_table_name(name).await?;
-        let tables = self.list_tables(None).await?;
-        let info = tables
-            .into_iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-
-        let columns = self.get_columns(None, &name).await?;
-        let indexes = self.get_indexes(None, &name).await?;
-        let foreign_keys = self.get_foreign_keys(None, &name).await?;
-        let primary_key = self.get_primary_key(None, &name).await?;
-
-        Ok(TableDetails {
-            info,
-            columns,
-            primary_key,
-            foreign_keys,
-            indexes,
-            constraints: Vec::new(),
-            triggers: Vec::new(),
-        })
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_columns(&self, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let table = self.resolve_catalog_table_name(table).await?;
-        tracing::trace!(table = %table, "fetching column information");
-        let result = self
-            .query(
-                &format!(
-                    "PRAGMA table_info('{}')",
-                    Self::sqlite_string_literal(&table)
-                ),
-                &[],
-            )
-            .await?;
-
-        let columns = result
-            .rows
-            .iter()
-            .map(|row| {
-                let ordinal = row.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                let name = row
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let data_type = row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("TEXT")
-                    .to_string();
-                let nullable = row.get(3).and_then(|v| v.as_i64()).unwrap_or(0) == 0;
-                let default_value = row.get(4).and_then(|v| {
-                    if v.is_null() {
-                        None
-                    } else {
-                        Some(v.to_string())
-                    }
-                });
-                let is_primary_key = row.get(5).and_then(|v| v.as_i64()).unwrap_or(0) > 0;
-
-                ColumnInfo {
-                    name,
-                    ordinal,
-                    data_type: data_type.clone(),
-                    nullable,
-                    default_value,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    is_primary_key,
-                    is_auto_increment: is_primary_key && data_type.to_uppercase() == "INTEGER",
-                    is_unique: false,
-                    foreign_key: None,
-                    comment: None,
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        Ok(columns)
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_indexes(&self, _schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let table = self.resolve_catalog_table_name(table).await?;
-        tracing::trace!(table = %table, "fetching index information");
-        let result = self
-            .query(
-                &format!(
-                    "PRAGMA index_list('{}')",
-                    Self::sqlite_string_literal(&table)
-                ),
-                &[],
-            )
-            .await?;
-
-        let mut indexes = Vec::new();
-        for row in &result.rows {
-            let name = match row.get(1).and_then(|v| v.as_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            let is_unique = row.get(2).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
-
-            // Get columns for this index
-            let cols_result = self
-                .query(
-                    &format!(
-                        "PRAGMA index_info('{}')",
-                        Self::sqlite_string_literal(&name)
-                    ),
-                    &[],
-                )
-                .await?;
-
-            let columns: Vec<String> = cols_result
-                .rows
-                .iter()
-                .filter_map(|r| r.get(2).and_then(|v| v.as_str()).map(|s| s.to_string()))
-                .collect();
-
-            indexes.push(IndexInfo {
-                name,
-                columns,
-                is_unique,
-                is_primary: false,
-                index_type: "btree".to_string(),
-                comment: None,
-                ..Default::default()
-            });
-        }
-
-        Ok(indexes)
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn get_foreign_keys(
-        &self,
-        _schema: Option<&str>,
-        table: &str,
-    ) -> Result<Vec<ForeignKeyInfo>> {
-        let table = self.resolve_catalog_table_name(table).await?;
-        tracing::trace!(table = %table, "fetching foreign key information");
-        let result = self
-            .query(
-                &format!(
-                    "PRAGMA foreign_key_list('{}')",
-                    Self::sqlite_string_literal(&table)
-                ),
-                &[],
-            )
-            .await?;
-
-        let fks = result
-            .rows
-            .iter()
-            .map(|row| {
-                let ref_table = row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let from_col = row
-                    .get(3)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let to_col = row
-                    .get(4)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let on_update_str = row.get(5).and_then(|v| v.as_str()).unwrap_or("NO ACTION");
-                let on_delete_str = row.get(6).and_then(|v| v.as_str()).unwrap_or("NO ACTION");
-
-                ForeignKeyInfo {
-                    name: format!("fk_{}_{}", table, ref_table),
-                    columns: vec![from_col],
-                    referenced_table: ref_table,
-                    referenced_schema: Some("main".to_string()),
-                    referenced_columns: vec![to_col],
-                    on_update: parse_fk_action(on_update_str),
-                    on_delete: parse_fk_action(on_delete_str),
-                    is_deferrable: false,
-                    initially_deferred: false,
-                }
-            })
-            .collect();
-
-        Ok(fks)
-    }
-
-    async fn get_primary_key(
-        &self,
-        _schema: Option<&str>,
-        table: &str,
-    ) -> Result<Option<PrimaryKeyInfo>> {
-        let columns = self.get_columns(None, table).await?;
-        let pk_columns: Vec<String> = columns
-            .iter()
-            .filter(|c| c.is_primary_key)
-            .map(|c| c.name.clone())
-            .collect();
-
-        if pk_columns.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(PrimaryKeyInfo {
-                name: None,
-                columns: pk_columns,
-            }))
-        }
-    }
-
-    async fn get_constraints(
-        &self,
-        _schema: Option<&str>,
-        _table: &str,
-    ) -> Result<Vec<ConstraintInfo>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_functions(&self, _schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_procedures(&self, _schema: Option<&str>) -> Result<Vec<ProcedureInfo>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_triggers(
-        &self,
-        _schema: Option<&str>,
-        table: Option<&str>,
-    ) -> Result<Vec<TriggerInfo>> {
-        let sql = if let Some(tbl) = table {
-            format!(
-                "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '{}' ORDER BY name",
-                tbl
-            )
-        } else {
-            "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
-                .to_string()
-        };
-
-        let result = self.query(&sql, &[]).await?;
-
-        let triggers = result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let table_name = row
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                TriggerInfo {
-                    name,
-                    schema: Some("main".to_string()),
-                    table_name,
-                    timing: zqlz_core::TriggerTiming::After,
-                    events: vec![zqlz_core::TriggerEvent::Insert],
-                    for_each: zqlz_core::TriggerForEach::Row,
-                    definition,
-                    enabled: true,
-                    comment: None,
-                }
-            })
-            .collect();
-
-        Ok(triggers)
-    }
-
-    async fn list_sequences(&self, _schema: Option<&str>) -> Result<Vec<SequenceInfo>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_types(&self, _schema: Option<&str>) -> Result<Vec<TypeInfo>> {
-        Ok(Vec::new())
-    }
-
-    async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
-        let sqlite_object_type = object_type_to_sqlite(&object.object_type)?;
-        let object_name = if matches!(
-            object.object_type,
-            ObjectType::Table | ObjectType::View | ObjectType::MaterializedView
-        ) {
-            self.resolve_catalog_table_name(&object.name).await?
-        } else {
-            object.name.clone()
-        };
-        let result = self
-            .query(
-                "SELECT sql FROM sqlite_master WHERE name = ? AND type = ?",
-                &[
-                    Value::String(object_name.clone()),
-                    Value::String(sqlite_object_type.to_string()),
-                ],
-            )
-            .await?;
-
-        result
-            .rows
-            .first()
-            .and_then(|row| row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .ok_or_else(|| ZqlzError::NotFound(format!("DDL not found for '{}'", object_name)))
-    }
-
-    async fn get_dependencies(&self, _object: &DatabaseObject) -> Result<Vec<Dependency>> {
-        Ok(Vec::new())
-    }
-
-    #[tracing::instrument(skip(self))]
-    async fn list_tables_extended(&self, _schema: Option<&str>) -> Result<ObjectsPanelData> {
-        let result = self
-            .query(
-                "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
-                &[],
-            )
-            .await?;
-
-        let columns = vec![
-            ObjectsPanelColumn::new("name", "Name")
-                .width(400.0)
-                .min_width(150.0)
-                .resizable(true)
-                .sortable(),
-            ObjectsPanelColumn::new("row_count", "Rows")
-                .width(80.0)
-                .min_width(50.0)
-                .resizable(true)
-                .sortable()
-                .text_right(),
-            ObjectsPanelColumn::new("index_count", "Indexes")
-                .width(80.0)
-                .min_width(60.0)
-                .resizable(true)
-                .sortable()
-                .text_right(),
-            ObjectsPanelColumn::new("trigger_count", "Triggers")
-                .width(80.0)
-                .min_width(60.0)
-                .resizable(true)
-                .sortable()
-                .text_right(),
-        ];
-
-        let mut rows = Vec::new();
-        let row_estimates = self.sqlite_table_row_estimates().await.unwrap_or_default();
-        let index_counts = self.sqlite_index_counts().await.unwrap_or_default();
-        let trigger_counts = self.sqlite_trigger_counts().await.unwrap_or_default();
-
-        for row in &result.rows {
-            let name = row
-                .get(0)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let obj_type = row
-                .get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("table")
-                .to_string();
-            let table_type = if obj_type == "table" {
-                Self::classify_sqlite_table_type(row.get(2).and_then(|value| value.as_str()))
-            } else {
-                TableType::View
-            };
-
-            let mut values = std::collections::BTreeMap::new();
-            values.insert("name".to_string(), name.clone());
-            values.insert(
-                "row_count".to_string(),
-                row_estimates
-                    .get(&name)
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "-".to_string()),
-            );
-            values.insert(
-                "index_count".to_string(),
-                index_counts
-                    .get(&name)
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "0".to_string()),
-            );
-            values.insert(
-                "trigger_count".to_string(),
-                trigger_counts
-                    .get(&name)
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "0".to_string()),
-            );
-            if matches!(table_type, TableType::VirtualTable) {
-                values.insert("type".to_string(), table_type.display_name().to_string());
-            }
-
-            rows.push(ObjectsPanelRow {
-                name: name.clone(),
-                schema: None,
-                object_type: obj_type.clone(),
-                object_ref: Some(ObjectsPanelObjectRef::new(obj_type, name)),
-                values,
-                redis_database_index: None,
-                key_value_info: None,
-            });
-        }
-
-        Ok(ObjectsPanelData { columns, rows })
     }
 }
 
@@ -1763,17 +1101,81 @@ impl Transaction for SqliteTransaction {
     }
 }
 
-fn parse_fk_action(action: &str) -> ForeignKeyAction {
-    match action.to_uppercase().as_str() {
-        "CASCADE" => ForeignKeyAction::Cascade,
-        "SET NULL" => ForeignKeyAction::SetNull,
-        "SET DEFAULT" => ForeignKeyAction::SetDefault,
-        "RESTRICT" => ForeignKeyAction::Restrict,
-        _ => ForeignKeyAction::NoAction,
+/// Execute a read query against a shared SQLite connection and collect the
+/// result. Shared by [`SqliteConnection`] and the schema-introspection adapter
+/// so the rusqlite glue lives in one place.
+pub(crate) fn run_sqlite_query(
+    conn: &Arc<Mutex<RusqliteConnection>>,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let start_time = std::time::Instant::now();
+
+    let conn = conn.lock();
+    let rusqlite_params = values_to_rusqlite(params);
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| ZqlzError::Query(format!("Failed to prepare query: {}", e)))?;
+
+    let column_count = stmt.column_count();
+    let mut column_names: Vec<String> = Vec::with_capacity(column_count);
+    let mut columns: Vec<ColumnMeta> = Vec::with_capacity(column_count);
+
+    let stmt_columns = stmt.columns();
+    for (idx, col) in stmt_columns.iter().enumerate() {
+        let name = col.name().to_string();
+        let data_type = col.decl_type().unwrap_or("DYNAMIC").to_string();
+
+        column_names.push(name.clone());
+        columns.push(ColumnMeta {
+            name,
+            data_type,
+            nullable: true,
+            ordinal: idx,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        });
     }
+
+    let mut rows = Vec::new();
+    let mut query_rows = stmt
+        .query(params_from_iter(rusqlite_params.iter()))
+        .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
+
+    while let Some(row) = query_rows
+        .next()
+        .map_err(|e| ZqlzError::Query(format!("Failed to fetch row: {}", e)))?
+    {
+        let mut values = Vec::with_capacity(columns.len());
+        for i in 0..columns.len() {
+            let value = rusqlite_to_value(row, i)?;
+            values.push(value);
+        }
+        rows.push(Row::new(column_names.clone(), values));
+    }
+
+    let execution_time_ms = start_time.elapsed().as_millis() as u64;
+    let total_rows = rows.len();
+
+    Ok(QueryResult {
+        id: uuid::Uuid::new_v4(),
+        columns,
+        rows,
+        total_rows: Some(total_rows as u64),
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms,
+        warnings: Vec::new(),
+    })
 }
 
-fn object_type_to_sqlite(obj_type: &zqlz_core::ObjectType) -> Result<&'static str> {
+pub(crate) fn object_type_to_sqlite(obj_type: &zqlz_core::ObjectType) -> Result<&'static str> {
     match obj_type {
         zqlz_core::ObjectType::Table => Ok("table"),
         zqlz_core::ObjectType::View => Ok("view"),
@@ -1846,7 +1248,7 @@ fn rusqlite_to_value(row: &rusqlite::Row, idx: usize) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::{SqliteConnection, object_type_to_sqlite, value_to_rusqlite};
-    use zqlz_core::{Connection, ObjectType, SchemaIntrospection, Value, ZqlzError};
+    use zqlz_core::{Connection, ObjectType, Value, ZqlzError};
 
     #[test]
     fn object_type_to_sqlite_maps_supported_types() {
@@ -1915,6 +1317,8 @@ mod tests {
             .expect("insert users");
 
         let data = connection
+            .as_schema_introspection()
+            .expect("sqlite exposes schema introspection")
             .list_tables_extended(None)
             .await
             .expect("list sqlite objects panel data");

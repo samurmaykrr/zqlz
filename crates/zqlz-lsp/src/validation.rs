@@ -10,10 +10,16 @@ pub(crate) fn validate_sql(
     driver_type: &str,
     dialect: SqlDialect,
     dialect_name: &str,
+    cursor_offset: Option<usize>,
 ) -> Vec<Diagnostic> {
     let dialect_config_owned = validation_dialect_config(driver_type, dialect, dialect_name);
 
-    diagnostics.analyze_with_dialect(text, Some(schema_cache), dialect_config_owned.as_ref())
+    diagnostics.analyze_with_dialect_at_cursor(
+        text,
+        Some(schema_cache),
+        dialect_config_owned.as_ref(),
+        cursor_offset,
+    )
 }
 
 fn validation_dialect_config(

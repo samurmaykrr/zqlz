@@ -1,5 +1,6 @@
 //! MySQL schema introspection implementation
 
+use std::collections::HashMap;
 use async_trait::async_trait;
 use zqlz_core::{
     ColumnInfo, Connection, ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject,
@@ -14,6 +15,625 @@ use zqlz_core::{
 };
 
 use crate::MySqlConnection;
+
+/// Read a value as text, tolerating MySQL `GROUP_CONCAT`/blob results that come
+/// back as raw bytes rather than a string.
+fn mysql_text(value: Option<&zqlz_core::Value>) -> Option<String> {
+    match value? {
+        zqlz_core::Value::String(text) => Some(text.clone()),
+        zqlz_core::Value::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+        _ => None,
+    }
+}
+
+/// MySQL implementation of the raw-catalog port. Provides the per-table fetches
+/// the shared engine composes; MySQL's listing, objects-panel, object-form, and
+/// DDL logic remain on `MySqlConnection`.
+pub struct MySqlCatalog {
+    pool: mysql_async::Pool,
+    database_name: Option<String>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    capabilities: zqlz_core::CatalogCapabilities,
+    in_flight: crate::connection::InFlight,
+}
+
+impl MySqlCatalog {
+    pub fn new(
+        pool: mysql_async::Pool,
+        database_name: Option<String>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        in_flight: crate::connection::InFlight,
+    ) -> Self {
+        let capabilities = zqlz_core::CatalogCapabilities {
+            driver_id: "mysql".to_string(),
+            server_version: None,
+            namespaces: zqlz_core::NamespaceModel::DatabasesOnly,
+            objects: zqlz_core::ObjectKindSupport::ALL_RELATIONAL,
+            auto_increment: zqlz_core::AutoIncrementRules::default(),
+            stored_source: Vec::new(),
+            deferrable_constraints: false,
+            panel_extras: Vec::new(),
+        };
+        Self {
+            pool,
+            database_name,
+            cancelled,
+            capabilities,
+            in_flight,
+        }
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[zqlz_core::Value],
+    ) -> Result<zqlz_core::QueryResult> {
+        crate::connection::run_mysql_query(
+            self.pool.clone(),
+            self.cancelled.clone(),
+            self.in_flight.clone(),
+            sql,
+            params,
+        )
+        .await
+    }
+
+    fn resolved_schema(&self, schema: Option<&str>) -> Option<String> {
+        schema
+            .map(ToString::to_string)
+            .or_else(|| self.database_name.clone())
+    }
+}
+
+/// Column query for one relation or for a whole schema.
+///
+/// `TABLE_NAME` is appended after the original projection so both variants share
+/// one row decoder. The schema filter must mirror `resolved_schema`: when it is
+/// `None` the query uses `DATABASE()` and takes **no** parameters.
+fn mysql_columns_sql(schema: Option<&str>, single_relation: bool) -> String {
+    let schema_filter = schema.map(|_| "= ?").unwrap_or("= DATABASE()");
+    let relation_filter = if single_relation {
+        "AND TABLE_NAME = ?"
+    } else {
+        ""
+    };
+    let order = if single_relation {
+        "ORDER BY ORDINAL_POSITION"
+    } else {
+        "ORDER BY TABLE_NAME, ORDINAL_POSITION"
+    };
+
+    format!(
+        "SELECT COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
+                CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, COLUMN_TYPE,
+                COLUMN_KEY, EXTRA, COLUMN_COMMENT, GENERATION_EXPRESSION,
+                CHARACTER_SET_NAME, COLLATION_NAME, TABLE_NAME
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA {schema_filter} {relation_filter}
+         {order}"
+    )
+}
+
+fn mysql_column_row(row: &zqlz_core::Row) -> zqlz_core::RawColumnRow {
+    let data_type = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let column_type = row.get(8).and_then(|v| v.as_str()).unwrap_or("");
+    let column_key = row.get(9).and_then(|v| v.as_str()).unwrap_or("");
+    let extra = row.get(10).and_then(|v| v.as_str()).unwrap_or("");
+    let lower_data_type = data_type.to_lowercase();
+    let enum_values = if lower_data_type == "enum" || lower_data_type == "set" {
+        parse_mysql_enum_values(column_type)
+    } else {
+        None
+    };
+    let normalized_type = if column_type.is_empty() {
+        data_type.clone()
+    } else {
+        column_type.to_string()
+    };
+
+    zqlz_core::RawColumnRow {
+        name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        ordinal: row.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
+        data_type: normalized_type,
+        is_nullable: row.get(3).and_then(|v| v.as_str()).unwrap_or("NO") == "YES",
+        default_value: row.get(4).and_then(|v| v.as_str()).map(ToString::to_string),
+        max_length: row.get(5).and_then(|v| v.as_i64()),
+        precision: row.get(6).and_then(|v| v.as_i64()).map(|i| i as i32),
+        scale: row.get(7).and_then(|v| v.as_i64()).map(|i| i as i32),
+        identity: if extra.contains("auto_increment") {
+            zqlz_core::RawIdentity::Declared
+        } else {
+            zqlz_core::RawIdentity::None
+        },
+        primary_key_ordinal: (column_key == "PRI").then_some(1),
+        enum_values,
+        comment: row
+            .get(11)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        charset: row
+            .get(13)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        collation: row
+            .get(14)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        generation_expression: row
+            .get(12)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        is_generated_stored: extra.to_ascii_lowercase().contains("stored generated"),
+    }
+}
+
+#[async_trait]
+impl zqlz_core::CatalogSource for MySqlCatalog {
+    fn capabilities(&self) -> &zqlz_core::CatalogCapabilities {
+        &self.capabilities
+    }
+
+    async fn fetch_relations(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<zqlz_core::RawRelationRow>> {
+        let schema = self.resolved_schema(schema);
+        let schema_filter = schema
+            .as_deref()
+            .map(|_| "= ?")
+            .unwrap_or("= DATABASE()");
+
+        let tables_sql = format!(
+            "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH, TABLE_COMMENT
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA {schema_filter}
+               AND TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VIEW')
+             ORDER BY TABLE_NAME"
+        );
+        let params: Vec<zqlz_core::Value> = schema
+            .as_deref()
+            .map(|s| vec![zqlz_core::Value::String(s.to_string())])
+            .unwrap_or_default();
+        let tables = self.query(&tables_sql, &params).await?;
+        let mut relations: Vec<zqlz_core::RawRelationRow> = tables
+            .rows
+            .iter()
+            .map(|row| {
+                let table_type = match row.get(1).and_then(|v| v.as_str()).unwrap_or("BASE TABLE") {
+                    "SYSTEM VIEW" => zqlz_core::TableType::System,
+                    "VIEW" => zqlz_core::TableType::View,
+                    _ => zqlz_core::TableType::Table,
+                };
+                let mut relation = zqlz_core::RawRelationRow::new(
+                    row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    table_type,
+                );
+                relation.schema = schema.clone();
+                relation.row_estimate = row.get(2).and_then(|v| v.as_i64());
+                relation.size_bytes = row.get(3).and_then(|v| v.as_i64());
+                relation.comment = row
+                    .get(4)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                relation
+            })
+            .collect();
+
+        let views_sql = format!(
+            "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS
+             WHERE TABLE_SCHEMA {schema_filter} ORDER BY TABLE_NAME"
+        );
+        let views = self.query(&views_sql, &params).await?;
+        relations.extend(views.rows.iter().map(|row| {
+            let mut relation = zqlz_core::RawRelationRow::new(
+                row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                zqlz_core::TableType::View,
+            );
+            relation.schema = schema.clone();
+            relation.view_definition = row.get(1).and_then(|v| v.as_str()).map(ToString::to_string);
+            relation
+        }));
+
+        Ok(relations)
+    }
+
+    async fn fetch_columns(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawColumnRow>> {
+        let schema = self.resolved_schema(relation.schema.as_deref());
+        let mut params: Vec<zqlz_core::Value> = Vec::new();
+        if let Some(s) = schema.as_deref() {
+            params.push(zqlz_core::Value::String(s.to_string()));
+        }
+        params.push(zqlz_core::Value::String(relation.name.clone()));
+        let result = self
+            .query(&mysql_columns_sql(schema.as_deref(), true), &params)
+            .await?;
+
+        Ok(result.rows.iter().map(mysql_column_row).collect())
+    }
+
+    async fn fetch_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<zqlz_core::RawColumnRow>>>> {
+        let schema = self.resolved_schema(schema);
+        let params: Vec<zqlz_core::Value> = schema
+            .as_deref()
+            .map(|s| vec![zqlz_core::Value::String(s.to_string())])
+            .unwrap_or_default();
+        let result = self
+            .query(&mysql_columns_sql(schema.as_deref(), false), &params)
+            .await?;
+
+        let mut columns_by_relation: HashMap<String, Vec<zqlz_core::RawColumnRow>> = HashMap::new();
+        for row in &result.rows {
+            let Some(relation) = row.get(15).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            columns_by_relation
+                .entry(relation.to_string())
+                .or_default()
+                .push(mysql_column_row(row));
+        }
+
+        Ok(Some(columns_by_relation))
+    }
+
+    async fn fetch_indexes(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawIndexRow>> {
+        let schema = self.resolved_schema(relation.schema.as_deref());
+        let schema_filter = schema.as_deref().map(|_| "= ?").unwrap_or("= DATABASE()");
+        let sql = format!(
+            "SELECT INDEX_NAME, NON_UNIQUE,
+                    GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX),
+                    INDEX_TYPE,
+                    GROUP_CONCAT(COALESCE(COLLATION, '') ORDER BY SEQ_IN_INDEX),
+                    GROUP_CONCAT(COALESCE(SUB_PART, '') ORDER BY SEQ_IN_INDEX),
+                    MAX(COALESCE(COMMENT, ''))
+             FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA {schema_filter} AND TABLE_NAME = ?
+             GROUP BY INDEX_NAME, NON_UNIQUE, INDEX_TYPE
+             ORDER BY INDEX_NAME"
+        );
+        let mut params: Vec<zqlz_core::Value> = Vec::new();
+        if let Some(s) = schema.as_deref() {
+            params.push(zqlz_core::Value::String(s.to_string()));
+        }
+        params.push(zqlz_core::Value::String(relation.name.clone()));
+        let result = self.query(&sql, &params).await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let name = mysql_text(row.get(0))?;
+                let columns: Vec<String> = mysql_text(row.get(2))
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                let column_descending = mysql_text(row.get(4))
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|value| value.eq_ignore_ascii_case("D"))
+                    .collect();
+                let include_columns = mysql_text(row.get(5))
+                    .unwrap_or_default()
+                    .split(',')
+                    .enumerate()
+                    .filter_map(|(index, value)| {
+                        let value = value.trim();
+                        if value.is_empty() {
+                            None
+                        } else {
+                            columns.get(index).map(|column| format!("{column}({value})"))
+                        }
+                    })
+                    .collect();
+                Some(zqlz_core::RawIndexRow {
+                    is_unique: row.get(1).and_then(|v| v.as_i64()).unwrap_or(1) == 0,
+                    is_primary: name == "PRIMARY",
+                    method: row.get(3).and_then(|v| v.as_str()).map(ToString::to_string),
+                    comment: mysql_text(row.get(6)).filter(|s| !s.is_empty()),
+                    column_descending,
+                    include_columns,
+                    columns,
+                    name,
+                    where_clause: None,
+                })
+            })
+            .collect())
+    }
+
+    async fn fetch_foreign_keys(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawForeignKeyRow>> {
+        let schema = self.resolved_schema(relation.schema.as_deref());
+        let schema_filter = schema.as_deref().map(|_| "= ?").unwrap_or("= DATABASE()");
+        let sql = format!(
+            "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+             FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA {schema_filter} AND TABLE_NAME = ?
+               AND REFERENCED_TABLE_NAME IS NOT NULL
+             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION"
+        );
+        let mut params: Vec<zqlz_core::Value> = Vec::new();
+        if let Some(s) = schema.as_deref() {
+            params.push(zqlz_core::Value::String(s.to_string()));
+        }
+        params.push(zqlz_core::Value::String(relation.name.clone()));
+        let result = self.query(&sql, &params).await?;
+
+        let mut order: Vec<String> = Vec::new();
+        let mut map: std::collections::HashMap<String, zqlz_core::RawForeignKeyRow> =
+            std::collections::HashMap::new();
+        for row in &result.rows {
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let column = row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_table = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_column = row.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !map.contains_key(&name) {
+                order.push(name.clone());
+                map.insert(
+                    name.clone(),
+                    zqlz_core::RawForeignKeyRow {
+                        name: name.clone(),
+                        referenced_schema: schema.clone(),
+                        referenced_table: ref_table,
+                        ..Default::default()
+                    },
+                );
+            }
+            let entry = map.get_mut(&name).expect("entry just inserted");
+            entry.columns.push(column);
+            entry.referenced_columns.push(ref_column);
+        }
+
+        // Attach ON UPDATE / ON DELETE rules.
+        let rules_sql = format!(
+            "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE
+             FROM information_schema.REFERENTIAL_CONSTRAINTS
+             WHERE CONSTRAINT_SCHEMA {schema_filter} AND TABLE_NAME = ?"
+        );
+        if let Ok(rules) = self.query(&rules_sql, &params).await {
+            for row in &rules.rows {
+                let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(entry) = map.get_mut(name) {
+                    entry.on_update = row.get(1).and_then(|v| v.as_str()).map(ToString::to_string);
+                    entry.on_delete = row.get(2).and_then(|v| v.as_str()).map(ToString::to_string);
+                }
+            }
+        }
+
+        Ok(order.into_iter().filter_map(|name| map.remove(&name)).collect())
+    }
+
+    async fn fetch_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<zqlz_core::RawForeignKeyRow>>>> {
+        let schema = self.resolved_schema(schema);
+        let schema_filter = schema.as_deref().map(|_| "= ?").unwrap_or("= DATABASE()");
+        let params: Vec<zqlz_core::Value> = schema
+            .as_deref()
+            .map(|s| vec![zqlz_core::Value::String(s.to_string())])
+            .unwrap_or_default();
+
+        let result = self
+            .query(
+                &format!(
+                    "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME,
+                            REFERENCED_COLUMN_NAME, TABLE_NAME
+                     FROM information_schema.KEY_COLUMN_USAGE
+                     WHERE TABLE_SCHEMA {schema_filter}
+                       AND REFERENCED_TABLE_NAME IS NOT NULL
+                     ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
+                ),
+                &params,
+            )
+            .await?;
+
+        // Keyed by (table, constraint): MySQL constraint names are only unique
+        // within a table, so grouping on the name alone merges unrelated keys.
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut map: HashMap<(String, String), zqlz_core::RawForeignKeyRow> = HashMap::new();
+        for row in &result.rows {
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let table = row.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let key = (table, name.clone());
+
+            let entry = map.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                zqlz_core::RawForeignKeyRow {
+                    name,
+                    referenced_schema: schema.clone(),
+                    referenced_table: row
+                        .get(2)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    ..Default::default()
+                }
+            });
+            entry
+                .columns
+                .push(row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string());
+            entry
+                .referenced_columns
+                .push(row.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string());
+        }
+
+        let rules = self
+            .query(
+                &format!(
+                    "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE, TABLE_NAME
+                     FROM information_schema.REFERENTIAL_CONSTRAINTS
+                     WHERE CONSTRAINT_SCHEMA {schema_filter}"
+                ),
+                &params,
+            )
+            .await;
+        match rules {
+            Ok(rules) => {
+                for row in &rules.rows {
+                    let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let table = row.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if let Some(entry) = map.get_mut(&(table, name)) {
+                        entry.on_update =
+                            row.get(1).and_then(|v| v.as_str()).map(ToString::to_string);
+                        entry.on_delete =
+                            row.get(2).and_then(|v| v.as_str()).map(ToString::to_string);
+                    }
+                }
+            }
+            // Referential rules are decoration; losing them must not lose the keys.
+            Err(error) => {
+                tracing::warn!(%error, "Failed to load MySQL referential constraint rules");
+            }
+        }
+
+        let mut foreign_keys_by_relation: HashMap<String, Vec<zqlz_core::RawForeignKeyRow>> =
+            HashMap::new();
+        for key in order {
+            if let Some(foreign_key) = map.remove(&key) {
+                foreign_keys_by_relation
+                    .entry(key.0)
+                    .or_default()
+                    .push(foreign_key);
+            }
+        }
+
+        Ok(Some(foreign_keys_by_relation))
+    }
+
+    async fn fetch_constraints(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawConstraintRow>> {
+        let schema = self.resolved_schema(relation.schema.as_deref());
+        let schema_filter = schema.as_deref().map(|_| "= ?").unwrap_or("= DATABASE()");
+        let mut params: Vec<zqlz_core::Value> = Vec::new();
+        if let Some(s) = schema.as_deref() {
+            params.push(zqlz_core::Value::String(s.to_string()));
+        }
+        params.push(zqlz_core::Value::String(relation.name.clone()));
+
+        let mut constraints = Vec::new();
+
+        let check_sql = format!(
+            "SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE
+             FROM information_schema.CHECK_CONSTRAINTS cc
+             JOIN information_schema.TABLE_CONSTRAINTS tc
+               ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+               AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+             WHERE tc.TABLE_SCHEMA {schema_filter} AND tc.TABLE_NAME = ?
+               AND tc.CONSTRAINT_TYPE = 'CHECK'
+             ORDER BY cc.CONSTRAINT_NAME"
+        );
+        if let Ok(result) = self.query(&check_sql, &params).await {
+            for row in &result.rows {
+                let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if name.ends_with("_chk") || !name.contains("chk") {
+                    constraints.push(zqlz_core::RawConstraintRow {
+                        name,
+                        kind: "CHECK".to_string(),
+                        columns: Vec::new(),
+                        definition: row.get(1).and_then(|v| v.as_str()).map(ToString::to_string),
+                    });
+                }
+            }
+        }
+
+        let unique_sql = format!(
+            "SELECT tc.CONSTRAINT_NAME,
+                    GROUP_CONCAT(kcu.COLUMN_NAME ORDER BY kcu.ORDINAL_POSITION)
+             FROM information_schema.TABLE_CONSTRAINTS tc
+             JOIN information_schema.KEY_COLUMN_USAGE kcu
+               ON tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+               AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+               AND tc.TABLE_NAME = kcu.TABLE_NAME
+             WHERE tc.TABLE_SCHEMA {schema_filter} AND tc.TABLE_NAME = ?
+               AND tc.CONSTRAINT_TYPE = 'UNIQUE'
+             GROUP BY tc.CONSTRAINT_NAME
+             ORDER BY tc.CONSTRAINT_NAME"
+        );
+        if let Ok(result) = self.query(&unique_sql, &params).await {
+            for row in &result.rows {
+                let columns: Vec<String> = mysql_text(row.get(1))
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                constraints.push(zqlz_core::RawConstraintRow {
+                    name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    kind: "UNIQUE".to_string(),
+                    columns,
+                    definition: None,
+                });
+            }
+        }
+
+        Ok(constraints)
+    }
+
+    async fn fetch_triggers(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<zqlz_core::RawTriggerRow>> {
+        let schema = self.resolved_schema(schema);
+        let schema_filter = schema.as_deref().map(|_| "= ?").unwrap_or("= DATABASE()");
+        let mut params: Vec<zqlz_core::Value> = Vec::new();
+        if let Some(s) = schema.as_deref() {
+            params.push(zqlz_core::Value::String(s.to_string()));
+        }
+        let table_filter = match table {
+            Some(table) => {
+                params.push(zqlz_core::Value::String(table.to_string()));
+                "AND EVENT_OBJECT_TABLE = ?"
+            }
+            None => "",
+        };
+        let sql = format!(
+            "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT
+             FROM information_schema.TRIGGERS
+             WHERE TRIGGER_SCHEMA {schema_filter} {table_filter}
+             ORDER BY TRIGGER_NAME"
+        );
+        let result = self.query(&sql, &params).await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| zqlz_core::RawTriggerRow {
+                schema: schema.clone(),
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                table_name: row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                timing: row.get(2).and_then(|v| v.as_str()).map(ToString::to_string),
+                events: row
+                    .get(3)
+                    .and_then(|v| v.as_str())
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default(),
+                for_each: None,
+                definition: row.get(4).and_then(|v| v.as_str()).map(ToString::to_string),
+                enabled: true,
+            })
+            .collect())
+    }
+}
 
 fn parse_mysql_enum_values(column_type: &str) -> Option<Vec<String>> {
     let open_paren = column_type.find('(')?;
@@ -2717,400 +3337,37 @@ impl SchemaIntrospection for MySqlConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let schema = schema.or(self.default_database());
-        let tables = self.list_tables(schema).await?;
-        let info = tables
-            .into_iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-
-        let columns = self.get_columns(schema, name).await?;
-        let indexes = self.get_indexes(schema, name).await?;
-        let foreign_keys = self.get_foreign_keys(schema, name).await?;
-        let primary_key = self.get_primary_key(schema, name).await?;
-        let constraints = self.get_constraints(schema, name).await?;
-        let triggers = self.list_triggers(schema, Some(name)).await?;
-
-        Ok(TableDetails {
-            info,
-            columns,
-            primary_key,
-            foreign_keys,
-            indexes,
-            constraints,
-            triggers,
-        })
+        self.schema_engine.get_table(schema, name).await
     }
 
-    #[tracing::instrument(skip(self))]
     async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let schema = schema.or(self.default_database());
-        let (query, params) = if let Some(schema_name) = schema {
-            (
-                "SELECT 
-                    COLUMN_NAME,
-                    ORDINAL_POSITION,
-                    DATA_TYPE,
-                    IS_NULLABLE,
-                    COLUMN_DEFAULT,
-                    CHARACTER_MAXIMUM_LENGTH,
-                    NUMERIC_PRECISION,
-                    NUMERIC_SCALE,
-                    COLUMN_TYPE,
-                    COLUMN_KEY,
-                    EXTRA,
-                    COLUMN_COMMENT,
-                    GENERATION_EXPRESSION,
-                    CHARACTER_SET_NAME,
-                    COLLATION_NAME
-                 FROM information_schema.COLUMNS
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                 ORDER BY ORDINAL_POSITION",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT 
-                    COLUMN_NAME,
-                    ORDINAL_POSITION,
-                    DATA_TYPE,
-                    IS_NULLABLE,
-                    COLUMN_DEFAULT,
-                    CHARACTER_MAXIMUM_LENGTH,
-                    NUMERIC_PRECISION,
-                    NUMERIC_SCALE,
-                    COLUMN_TYPE,
-                    COLUMN_KEY,
-                    EXTRA,
-                    COLUMN_COMMENT,
-                    GENERATION_EXPRESSION,
-                    CHARACTER_SET_NAME,
-                    COLLATION_NAME
-                 FROM information_schema.COLUMNS
-                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-                 ORDER BY ORDINAL_POSITION",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        let result = self.query(query, &params).await?;
-
-        let columns = result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let ordinal = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                let data_type = row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let is_nullable = row.get(3).and_then(|v| v.as_str()).unwrap_or("NO") == "YES";
-                let default_value = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
-                let max_length = row.get(5).and_then(|v| v.as_i64());
-                let precision = row.get(6).and_then(|v| v.as_i64()).map(|i| i as i32);
-                let scale = row.get(7).and_then(|v| v.as_i64()).map(|i| i as i32);
-                let column_type = row.get(8).and_then(|v| v.as_str()).unwrap_or("");
-                let column_key = row.get(9).and_then(|v| v.as_str()).unwrap_or("");
-                let extra = row.get(10).and_then(|v| v.as_str()).unwrap_or("");
-                let comment = row
-                    .get(11)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty());
-                let generation_expression = row
-                    .get(12)
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                let charset = row
-                    .get(13)
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty());
-                let collation = row
-                    .get(14)
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .filter(|s| !s.is_empty());
-
-                let is_primary_key = column_key == "PRI";
-                let is_auto_increment = extra.contains("auto_increment");
-                let is_unique = column_key == "UNI";
-                let normalized_type = if column_type.is_empty() {
-                    data_type.clone()
-                } else {
-                    column_type.to_string()
-                };
-                let lower_data_type = data_type.to_lowercase();
-                let enum_values = if lower_data_type == "enum" || lower_data_type == "set" {
-                    parse_mysql_enum_values(column_type)
-                } else {
-                    None
-                };
-
-                ColumnInfo {
-                    name,
-                    ordinal,
-                    data_type: normalized_type,
-                    nullable: is_nullable,
-                    default_value,
-                    max_length,
-                    precision,
-                    scale,
-                    is_primary_key,
-                    is_auto_increment,
-                    is_unique,
-                    foreign_key: None,
-                    comment,
-                    charset,
-                    collation,
-                    enum_values,
-                    generation_expression,
-                    is_generated_stored: extra.to_ascii_lowercase().contains("stored generated"),
-                }
-            })
-            .collect();
-
-        Ok(columns)
+        self.schema_engine.get_columns(schema, table).await
     }
 
-    #[tracing::instrument(skip(self))]
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        self.schema_engine.list_all_columns(schema).await
+    }
+
+    async fn list_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        self.schema_engine.list_all_foreign_keys(schema).await
+    }
+
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let schema = schema.or(self.default_database());
-        let (query, params) = if let Some(schema_name) = schema {
-            (
-                "SELECT 
-                    INDEX_NAME,
-                    NON_UNIQUE,
-                    GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) as COLUMNS,
-                    INDEX_TYPE,
-                    GROUP_CONCAT(COALESCE(COLLATION, '') ORDER BY SEQ_IN_INDEX) as COLLATIONS,
-                    GROUP_CONCAT(COALESCE(SUB_PART, '') ORDER BY SEQ_IN_INDEX) as PREFIX_LENGTHS,
-                    MAX(COALESCE(COMMENT, '')) as COMMENT
-                 FROM information_schema.STATISTICS
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                 GROUP BY INDEX_NAME, NON_UNIQUE, INDEX_TYPE
-                 ORDER BY INDEX_NAME",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT 
-                    INDEX_NAME,
-                    NON_UNIQUE,
-                    GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) as COLUMNS,
-                    INDEX_TYPE,
-                    GROUP_CONCAT(COALESCE(COLLATION, '') ORDER BY SEQ_IN_INDEX) as COLLATIONS,
-                    GROUP_CONCAT(COALESCE(SUB_PART, '') ORDER BY SEQ_IN_INDEX) as PREFIX_LENGTHS,
-                    MAX(COALESCE(COMMENT, '')) as COMMENT
-                 FROM information_schema.STATISTICS
-                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-                 GROUP BY INDEX_NAME, NON_UNIQUE, INDEX_TYPE
-                 ORDER BY INDEX_NAME",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        let result = self.query(query, &params).await?;
-
-        let indexes = result
-            .rows
-            .iter()
-            .filter_map(|row| {
-                let name = row.get(0).and_then(|v| v.as_str())?.to_string();
-                let non_unique = row.get(1).and_then(|v| v.as_i64()).unwrap_or(1);
-                let columns_str = row.get(2).and_then(|v| v.as_str()).unwrap_or("");
-                let index_type = row
-                    .get(3)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("BTREE")
-                    .to_string();
-                let collations = row.get(4).and_then(|v| v.as_str()).unwrap_or("");
-                let prefix_lengths = row.get(5).and_then(|v| v.as_str()).unwrap_or("");
-                let comment = row
-                    .get(6)
-                    .and_then(|v| v.as_str())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string);
-
-                let is_unique = non_unique == 0;
-                let is_primary = name == "PRIMARY";
-                let columns: Vec<String> = columns_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
-                let column_descending = collations
-                    .split(',')
-                    .map(|value| value.eq_ignore_ascii_case("D"))
-                    .collect();
-                let include_columns = prefix_lengths
-                    .split(',')
-                    .enumerate()
-                    .filter_map(|(index, value)| {
-                        let value = value.trim();
-                        if value.is_empty() {
-                            None
-                        } else {
-                            columns
-                                .get(index)
-                                .map(|column| format!("{column}({value})"))
-                        }
-                    })
-                    .collect();
-
-                Some(IndexInfo {
-                    name,
-                    columns,
-                    is_unique,
-                    is_primary,
-                    index_type,
-                    comment,
-                    column_descending,
-                    include_columns,
-                    ..Default::default()
-                })
-            })
-            .collect();
-
-        Ok(indexes)
+        self.schema_engine.get_indexes(schema, table).await
     }
 
-    #[tracing::instrument(skip(self))]
     async fn get_foreign_keys(
         &self,
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let schema = schema.or(self.default_database());
-        let (query, params) = if let Some(schema_name) = schema {
-            (
-                "SELECT 
-                    CONSTRAINT_NAME,
-                    COLUMN_NAME,
-                    REFERENCED_TABLE_NAME,
-                    REFERENCED_COLUMN_NAME
-                 FROM information_schema.KEY_COLUMN_USAGE
-                 WHERE TABLE_SCHEMA = ?
-                   AND TABLE_NAME = ?
-                   AND REFERENCED_TABLE_NAME IS NOT NULL
-                 ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT 
-                    CONSTRAINT_NAME,
-                    COLUMN_NAME,
-                    REFERENCED_TABLE_NAME,
-                    REFERENCED_COLUMN_NAME
-                 FROM information_schema.KEY_COLUMN_USAGE
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = ?
-                   AND REFERENCED_TABLE_NAME IS NOT NULL
-                 ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        let result = self.query(query, &params).await?;
-
-        // Group by constraint name
-        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
-            std::collections::HashMap::new();
-
-        for row in &result.rows {
-            let name = row
-                .get(0)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let column = row
-                .get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ref_table = row
-                .get(2)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ref_column = row
-                .get(3)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(fk) = fk_map.get_mut(&name) {
-                fk.columns.push(column);
-                fk.referenced_columns.push(ref_column);
-            } else {
-                fk_map.insert(
-                    name.clone(),
-                    ForeignKeyInfo {
-                        name,
-                        columns: vec![column],
-                        referenced_table: ref_table,
-                        referenced_schema: schema.map(|s| s.to_string()),
-                        referenced_columns: vec![ref_column],
-                        on_update: ForeignKeyAction::NoAction,
-                        on_delete: ForeignKeyAction::NoAction,
-                        is_deferrable: false,
-                        initially_deferred: false,
-                    },
-                );
-            }
-        }
-
-        // Get ON UPDATE and ON DELETE rules
-        let (rules_query, rules_params) = if let Some(schema_name) = schema {
-            (
-                "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE
-                 FROM information_schema.REFERENTIAL_CONSTRAINTS
-                 WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = ?",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE
-                 FROM information_schema.REFERENTIAL_CONSTRAINTS
-                 WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = ?",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        if let Ok(rules_result) = self.query(rules_query, &rules_params).await {
-            for row in &rules_result.rows {
-                let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("");
-                let update_rule = row.get(1).and_then(|v| v.as_str()).unwrap_or("NO ACTION");
-                let delete_rule = row.get(2).and_then(|v| v.as_str()).unwrap_or("NO ACTION");
-
-                if let Some(fk) = fk_map.get_mut(name) {
-                    fk.on_update = parse_fk_action(update_rule);
-                    fk.on_delete = parse_fk_action(delete_rule);
-                }
-            }
-        }
-
-        Ok(fk_map.into_values().collect())
+        self.schema_engine.get_foreign_keys(schema, table).await
     }
 
     async fn get_primary_key(
@@ -3118,48 +3375,7 @@ impl SchemaIntrospection for MySqlConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Option<PrimaryKeyInfo>> {
-        let schema = schema.or(self.default_database());
-        let (query, params) = if let Some(schema_name) = schema {
-            (
-                "SELECT COLUMN_NAME
-                 FROM information_schema.KEY_COLUMN_USAGE
-                 WHERE TABLE_SCHEMA = ?
-                   AND TABLE_NAME = ?
-                   AND CONSTRAINT_NAME = 'PRIMARY'
-                 ORDER BY ORDINAL_POSITION",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT COLUMN_NAME
-                 FROM information_schema.KEY_COLUMN_USAGE
-                 WHERE TABLE_SCHEMA = DATABASE()
-                   AND TABLE_NAME = ?
-                   AND CONSTRAINT_NAME = 'PRIMARY'
-                 ORDER BY ORDINAL_POSITION",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        let result = self.query(query, &params).await?;
-
-        if result.rows.is_empty() {
-            return Ok(None);
-        }
-
-        let columns: Vec<String> = result
-            .rows
-            .iter()
-            .filter_map(|row| row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect();
-
-        Ok(Some(PrimaryKeyInfo {
-            name: Some("PRIMARY".to_string()),
-            columns,
-        }))
+        self.schema_engine.get_primary_key(schema, table).await
     }
 
     async fn get_constraints(
@@ -3167,128 +3383,7 @@ impl SchemaIntrospection for MySqlConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        let schema = schema.or(self.default_database());
-        let mut constraints = Vec::new();
-
-        // Query CHECK constraints (MySQL 8.0.16+)
-        let (check_query, check_params) = if let Some(schema_name) = schema {
-            (
-                "SELECT 
-                    cc.CONSTRAINT_NAME,
-                    cc.CHECK_CLAUSE
-                 FROM information_schema.CHECK_CONSTRAINTS cc
-                 JOIN information_schema.TABLE_CONSTRAINTS tc 
-                   ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA 
-                   AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
-                 WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ?
-                   AND tc.CONSTRAINT_TYPE = 'CHECK'
-                 ORDER BY cc.CONSTRAINT_NAME",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT 
-                    cc.CONSTRAINT_NAME,
-                    cc.CHECK_CLAUSE
-                 FROM information_schema.CHECK_CONSTRAINTS cc
-                 JOIN information_schema.TABLE_CONSTRAINTS tc 
-                   ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA 
-                   AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
-                 WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ?
-                   AND tc.CONSTRAINT_TYPE = 'CHECK'
-                 ORDER BY cc.CONSTRAINT_NAME",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        // CHECK_CONSTRAINTS table only exists in MySQL 8.0.16+
-        // Silently ignore errors for older versions
-        if let Ok(result) = self.query(check_query, &check_params).await {
-            for row in &result.rows {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                // Skip auto-generated NOT NULL constraints
-                if name.ends_with("_chk") || !name.contains("chk") {
-                    constraints.push(ConstraintInfo {
-                        name,
-                        constraint_type: ConstraintType::Check,
-                        columns: Vec::new(), // CHECK constraints don't have specific columns in MySQL info
-                        definition,
-                    });
-                }
-            }
-        }
-
-        // Also include UNIQUE constraints
-        let (unique_query, unique_params) = if let Some(schema_name) = schema {
-            (
-                "SELECT 
-                    tc.CONSTRAINT_NAME,
-                    GROUP_CONCAT(kcu.COLUMN_NAME ORDER BY kcu.ORDINAL_POSITION) as COLUMNS
-                 FROM information_schema.TABLE_CONSTRAINTS tc
-                 JOIN information_schema.KEY_COLUMN_USAGE kcu
-                   ON tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
-                   AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-                   AND tc.TABLE_NAME = kcu.TABLE_NAME
-                 WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ?
-                   AND tc.CONSTRAINT_TYPE = 'UNIQUE'
-                 GROUP BY tc.CONSTRAINT_NAME
-                 ORDER BY tc.CONSTRAINT_NAME",
-                vec![
-                    Value::String(schema_name.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-        } else {
-            (
-                "SELECT 
-                    tc.CONSTRAINT_NAME,
-                    GROUP_CONCAT(kcu.COLUMN_NAME ORDER BY kcu.ORDINAL_POSITION) as COLUMNS
-                 FROM information_schema.TABLE_CONSTRAINTS tc
-                 JOIN information_schema.KEY_COLUMN_USAGE kcu
-                   ON tc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
-                   AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-                   AND tc.TABLE_NAME = kcu.TABLE_NAME
-                 WHERE tc.TABLE_SCHEMA = DATABASE() AND tc.TABLE_NAME = ?
-                   AND tc.CONSTRAINT_TYPE = 'UNIQUE'
-                 GROUP BY tc.CONSTRAINT_NAME
-                 ORDER BY tc.CONSTRAINT_NAME",
-                vec![Value::String(table.to_string())],
-            )
-        };
-
-        if let Ok(result) = self.query(unique_query, &unique_params).await {
-            for row in &result.rows {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let columns_str = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                let columns: Vec<String> = columns_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-
-                constraints.push(ConstraintInfo {
-                    name,
-                    constraint_type: ConstraintType::Unique,
-                    columns,
-                    definition: None,
-                });
-            }
-        }
-
-        Ok(constraints)
+        self.schema_engine.get_constraints(schema, table).await
     }
 
     async fn list_functions(&self, schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
@@ -4010,15 +4105,7 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(1))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!("Could not get DDL for table '{}'", object.name))
-                    })
+                ddl_from_show_create(&result.rows, &[1], "table", &object.name)
             }
             ObjectType::View => {
                 let query = format!(
@@ -4028,15 +4115,7 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(1))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!("Could not get DDL for view '{}'", object.name))
-                    })
+                ddl_from_show_create(&result.rows, &[1], "view", &object.name)
             }
             ObjectType::Function => {
                 let query = format!(
@@ -4046,18 +4125,7 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(2))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!(
-                            "Could not get DDL for function '{}'",
-                            object.name
-                        ))
-                    })
+                ddl_from_show_create(&result.rows, &[2], "function", &object.name)
             }
             ObjectType::Procedure => {
                 let query = format!(
@@ -4067,18 +4135,7 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(2))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!(
-                            "Could not get DDL for procedure '{}'",
-                            object.name
-                        ))
-                    })
+                ddl_from_show_create(&result.rows, &[2], "procedure", &object.name)
             }
             ObjectType::Trigger => {
                 let query = format!(
@@ -4088,15 +4145,7 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(2))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!("Could not get DDL for trigger '{}'", object.name))
-                    })
+                ddl_from_show_create(&result.rows, &[2], "trigger", &object.name)
             }
             ObjectType::Event => {
                 let query = format!(
@@ -4106,15 +4155,7 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(3).or_else(|| row.get(2)))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!("Could not get DDL for event '{}'", object.name))
-                    })
+                ddl_from_show_create(&result.rows, &[3, 2], "event", &object.name)
             }
             ObjectType::Sequence => {
                 let query = format!(
@@ -4124,35 +4165,13 @@ impl SchemaIntrospection for MySqlConnection {
                 );
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(1))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!(
-                            "Could not get DDL for sequence '{}'",
-                            object.name
-                        ))
-                    })
+                ddl_from_show_create(&result.rows, &[1], "sequence", &object.name)
             }
             ObjectType::Database => {
                 let query = format!("SHOW CREATE DATABASE `{}`", object.name.replace("`", "``"));
                 let result = self.query(&query, &[]).await?;
 
-                result
-                    .rows
-                    .first()
-                    .and_then(|row| row.get(1))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        ZqlzError::Query(format!(
-                            "Could not get DDL for database '{}'",
-                            object.name
-                        ))
-                    })
+                ddl_from_show_create(&result.rows, &[1], "database", &object.name)
             }
             ObjectType::Index => {
                 let Some(table) = object.signature.as_deref() else {
@@ -4497,14 +4516,39 @@ impl SchemaIntrospection for MySqlConnection {
     }
 }
 
-fn parse_fk_action(action: &str) -> ForeignKeyAction {
-    match action.to_uppercase().as_str() {
-        "CASCADE" => ForeignKeyAction::Cascade,
-        "SET NULL" => ForeignKeyAction::SetNull,
-        "SET DEFAULT" => ForeignKeyAction::SetDefault,
-        "RESTRICT" => ForeignKeyAction::Restrict,
-        _ => ForeignKeyAction::NoAction,
-    }
+/// Extract the definition column from a `SHOW CREATE ...` result.
+///
+/// The two failure modes need distinct messages. No rows means the object is gone. A row whose
+/// definition column is NULL means the server listed the object but withheld its source — for
+/// routines that is what MySQL does when the user is neither the definer nor holds `SHOW_ROUTINE`,
+/// so reporting it as "not found" sends people looking for an object that is actually there.
+///
+/// `definition_columns` is tried in order because `SHOW CREATE EVENT` places the statement at a
+/// different index than the other object kinds.
+fn ddl_from_show_create(
+    rows: &[zqlz_core::Row],
+    definition_columns: &[usize],
+    object_kind: &str,
+    object_name: &str,
+) -> Result<String> {
+    let Some(row) = rows.first() else {
+        return Err(ZqlzError::NotFound(format!(
+            "{} '{}'",
+            object_kind, object_name
+        )));
+    };
+
+    definition_columns
+        .iter()
+        .find_map(|index| row.get(*index).and_then(|value| value.as_str()))
+        .map(|definition| definition.to_string())
+        .ok_or_else(|| {
+            // `Other` renders verbatim; the wrapping layers already say what failed.
+            ZqlzError::Other(format!(
+                "The definition of {} '{}' is not readable — the connected user may lack the privileges required to view its source",
+                object_kind, object_name
+            ))
+        })
 }
 
 fn format_bytes_human_readable(bytes: i64) -> String {

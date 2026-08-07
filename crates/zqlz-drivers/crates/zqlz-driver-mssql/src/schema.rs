@@ -1,9 +1,10 @@
 //! MS SQL Server schema introspection implementation
 
+use std::collections::HashMap;
 use async_trait::async_trait;
 use zqlz_core::{
-    ColumnInfo, Connection, ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject,
-    Dependency, ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectFormDdlRequest,
+    ColumnInfo, Connection, ConstraintInfo, DatabaseInfo, DatabaseObject,
+    Dependency, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectFormDdlRequest,
     ObjectFormField, ObjectFormFieldKind, ObjectFormMode, ObjectFormSection, ObjectFormSpec,
     ObjectFormSpecRequest, ObjectFormValue, ObjectsPanelAction, ObjectsPanelColumn,
     ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelObjectKind, ObjectsPanelObjectRef,
@@ -13,7 +14,484 @@ use zqlz_core::{
     ZqlzError,
 };
 
+use super::connection::{run_mssql_query, MssqlClient};
 use super::MssqlConnection;
+
+/// MS SQL Server implementation of the raw-catalog port. Provides the per-table
+/// fetches the shared engine composes; MSSQL's listing, objects-panel,
+/// object-form, and DDL logic remain on `MssqlConnection`.
+pub struct MssqlCatalog {
+    client: MssqlClient,
+    capabilities: zqlz_core::CatalogCapabilities,
+}
+
+impl MssqlCatalog {
+    pub fn new(client: MssqlClient, _database: Option<String>) -> Self {
+        let capabilities = zqlz_core::CatalogCapabilities {
+            driver_id: "mssql".to_string(),
+            server_version: None,
+            namespaces: zqlz_core::NamespaceModel::DatabasesAndSchemas {
+                default_schema: "dbo".to_string(),
+            },
+            objects: zqlz_core::ObjectKindSupport::ALL_RELATIONAL,
+            auto_increment: zqlz_core::AutoIncrementRules::default(),
+            stored_source: Vec::new(),
+            deferrable_constraints: false,
+            panel_extras: Vec::new(),
+        };
+        Self {
+            client,
+            capabilities,
+        }
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[zqlz_core::Value],
+    ) -> Result<zqlz_core::QueryResult> {
+        run_mssql_query(&self.client, sql, params).await
+    }
+}
+
+/// Column query for one relation or for a whole schema.
+///
+/// `t.name` is appended after the original projection so both variants share one
+/// row decoder. The `pk` derived table correlates on `object_id`, so it stays
+/// correct without the relation predicate.
+fn mssql_columns_sql(single_relation: bool) -> String {
+    let relation_filter = if single_relation {
+        "AND t.name = @P2"
+    } else {
+        ""
+    };
+    let order = if single_relation {
+        "ORDER BY c.column_id"
+    } else {
+        "ORDER BY t.name, c.column_id"
+    };
+
+    format!(
+        "SELECT c.name, c.column_id, TYPE_NAME(c.user_type_id), c.is_nullable,
+                dc.definition, c.max_length, c.precision, c.scale, c.is_identity,
+                CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END, t.name
+         FROM sys.columns c
+         INNER JOIN sys.tables t ON c.object_id = t.object_id
+         INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+         LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+         LEFT JOIN (
+             SELECT ic.object_id, ic.column_id FROM sys.index_columns ic
+             INNER JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+             WHERE i.is_primary_key = 1
+         ) pk ON c.object_id = pk.object_id AND c.column_id = pk.column_id
+         WHERE s.name = @P1 {relation_filter}
+         {order}"
+    )
+}
+
+fn mssql_column_row(row: &zqlz_core::Row) -> zqlz_core::RawColumnRow {
+    let is_identity = row.get(8).and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_primary_key = row.get(9).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+
+    zqlz_core::RawColumnRow {
+        name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        ordinal: row.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
+        data_type: row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        is_nullable: row.get(3).and_then(|v| v.as_bool()).unwrap_or(true),
+        default_value: row.get(4).and_then(|v| v.as_str()).map(ToString::to_string),
+        max_length: row.get(5).and_then(|v| v.as_i64()),
+        precision: row.get(6).and_then(|v| v.as_i64()).map(|i| i as i32),
+        scale: row.get(7).and_then(|v| v.as_i64()).map(|i| i as i32),
+        identity: if is_identity {
+            zqlz_core::RawIdentity::Declared
+        } else {
+            zqlz_core::RawIdentity::None
+        },
+        primary_key_ordinal: is_primary_key.then_some(1),
+        ..Default::default()
+    }
+}
+
+#[async_trait]
+impl zqlz_core::CatalogSource for MssqlCatalog {
+    fn capabilities(&self) -> &zqlz_core::CatalogCapabilities {
+        &self.capabilities
+    }
+
+    async fn fetch_relations(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<zqlz_core::RawRelationRow>> {
+        let schema = schema.unwrap_or("dbo").to_string();
+
+        let tables = self
+            .query(
+                "SELECT t.name,
+                    p.rows,
+                    (SELECT SUM(a.total_pages) * 8 * 1024 FROM sys.partitions sp
+                     JOIN sys.allocation_units a ON sp.partition_id = a.container_id
+                     WHERE sp.object_id = t.object_id),
+                    (SELECT COUNT(*) FROM sys.indexes i WHERE i.object_id = t.object_id AND i.index_id > 0),
+                    (SELECT COUNT(*) FROM sys.triggers tr WHERE tr.parent_id = t.object_id)
+                 FROM sys.tables t
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                 LEFT JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
+                 WHERE s.name = @P1 AND t.type = 'U'
+                 ORDER BY t.name",
+                &[zqlz_core::Value::String(schema.clone())],
+            )
+            .await?;
+        let mut relations: Vec<zqlz_core::RawRelationRow> = tables
+            .rows
+            .iter()
+            .map(|row| {
+                let mut relation = zqlz_core::RawRelationRow::new(
+                    row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    zqlz_core::TableType::Table,
+                );
+                relation.schema = Some(schema.clone());
+                relation.row_estimate = row.get(1).and_then(|v| v.as_i64());
+                relation.size_bytes = row.get(2).and_then(|v| v.as_i64());
+                relation.index_count = row.get(3).and_then(|v| v.as_i64());
+                relation.trigger_count = row.get(4).and_then(|v| v.as_i64());
+                relation
+            })
+            .collect();
+
+        let views = self
+            .query(
+                "SELECT v.name, OBJECT_DEFINITION(v.object_id)
+                 FROM sys.views v
+                 INNER JOIN sys.schemas s ON v.schema_id = s.schema_id
+                 WHERE s.name = @P1 ORDER BY v.name",
+                &[zqlz_core::Value::String(schema.clone())],
+            )
+            .await?;
+        relations.extend(views.rows.iter().map(|row| {
+            let mut relation = zqlz_core::RawRelationRow::new(
+                row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                zqlz_core::TableType::View,
+            );
+            relation.schema = Some(schema.clone());
+            relation.view_definition = row.get(1).and_then(|v| v.as_str()).map(ToString::to_string);
+            relation
+        }));
+
+        Ok(relations)
+    }
+
+    async fn fetch_columns(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawColumnRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("dbo");
+        let result = self
+            .query(
+                &mssql_columns_sql(true),
+                &[
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+
+        Ok(result.rows.iter().map(mssql_column_row).collect())
+    }
+
+    async fn fetch_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<zqlz_core::RawColumnRow>>>> {
+        let schema = schema.unwrap_or("dbo");
+        let result = self
+            .query(
+                &mssql_columns_sql(false),
+                &[zqlz_core::Value::String(schema.to_string())],
+            )
+            .await?;
+
+        let mut columns_by_relation: HashMap<String, Vec<zqlz_core::RawColumnRow>> = HashMap::new();
+        for row in &result.rows {
+            let Some(relation) = row.get(10).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            columns_by_relation
+                .entry(relation.to_string())
+                .or_default()
+                .push(mssql_column_row(row));
+        }
+
+        Ok(Some(columns_by_relation))
+    }
+
+    async fn fetch_indexes(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawIndexRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("dbo");
+        let result = self
+            .query(
+                "SELECT i.name, i.is_unique, i.is_primary_key, i.type_desc,
+                        STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal)
+                 FROM sys.indexes i
+                 INNER JOIN sys.tables t ON i.object_id = t.object_id
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                 INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                 INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                 WHERE s.name = @P1 AND t.name = @P2 AND i.name IS NOT NULL
+                 GROUP BY i.name, i.is_unique, i.is_primary_key, i.type_desc
+                 ORDER BY i.name",
+                &[
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| zqlz_core::RawIndexRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                is_unique: row.get(1).and_then(|v| v.as_bool()).unwrap_or(false),
+                is_primary: row.get(2).and_then(|v| v.as_bool()).unwrap_or(false),
+                method: row.get(3).and_then(|v| v.as_str()).map(ToString::to_string),
+                columns: row
+                    .get(4)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    async fn fetch_foreign_keys(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawForeignKeyRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("dbo");
+        let result = self
+            .query(
+                "SELECT fk.name,
+                        COL_NAME(fkc.parent_object_id, fkc.parent_column_id),
+                        OBJECT_NAME(fkc.referenced_object_id),
+                        SCHEMA_NAME(ref_t.schema_id),
+                        COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id),
+                        fk.update_referential_action_desc,
+                        fk.delete_referential_action_desc
+                 FROM sys.foreign_keys fk
+                 INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+                 INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                 INNER JOIN sys.tables ref_t ON fkc.referenced_object_id = ref_t.object_id
+                 WHERE s.name = @P1 AND t.name = @P2
+                 ORDER BY fk.name, fkc.constraint_column_id",
+                &[
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+
+        let mut order: Vec<String> = Vec::new();
+        let mut map: std::collections::HashMap<String, zqlz_core::RawForeignKeyRow> =
+            std::collections::HashMap::new();
+        for row in &result.rows {
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let column = row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_column = row.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !map.contains_key(&name) {
+                order.push(name.clone());
+                map.insert(
+                    name.clone(),
+                    zqlz_core::RawForeignKeyRow {
+                        name: name.clone(),
+                        referenced_table: row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        referenced_schema: row.get(3).and_then(|v| v.as_str()).map(ToString::to_string),
+                        on_update: row.get(5).and_then(|v| v.as_str()).map(ToString::to_string),
+                        on_delete: row.get(6).and_then(|v| v.as_str()).map(ToString::to_string),
+                        ..Default::default()
+                    },
+                );
+            }
+            let entry = map.get_mut(&name).expect("entry just inserted");
+            entry.columns.push(column);
+            entry.referenced_columns.push(ref_column);
+        }
+
+        Ok(order.into_iter().filter_map(|name| map.remove(&name)).collect())
+    }
+
+    async fn fetch_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<zqlz_core::RawForeignKeyRow>>>> {
+        let schema = schema.unwrap_or("dbo");
+        let result = self
+            .query(
+                "SELECT fk.name,
+                        COL_NAME(fkc.parent_object_id, fkc.parent_column_id),
+                        OBJECT_NAME(fkc.referenced_object_id),
+                        SCHEMA_NAME(ref_t.schema_id),
+                        COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id),
+                        fk.update_referential_action_desc,
+                        fk.delete_referential_action_desc,
+                        t.name
+                 FROM sys.foreign_keys fk
+                 INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+                 INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                 INNER JOIN sys.tables ref_t ON fkc.referenced_object_id = ref_t.object_id
+                 WHERE s.name = @P1
+                 ORDER BY t.name, fk.name, fkc.constraint_column_id",
+                &[zqlz_core::Value::String(schema.to_string())],
+            )
+            .await?;
+
+        // Keyed by (table, constraint): grouping on the constraint name alone would
+        // merge same-named keys from different tables.
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut map: HashMap<(String, String), zqlz_core::RawForeignKeyRow> = HashMap::new();
+        for row in &result.rows {
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let table = row.get(7).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let key = (table, name.clone());
+
+            let entry = map.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                zqlz_core::RawForeignKeyRow {
+                    name,
+                    referenced_table: row
+                        .get(2)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    referenced_schema: row.get(3).and_then(|v| v.as_str()).map(ToString::to_string),
+                    on_update: row.get(5).and_then(|v| v.as_str()).map(ToString::to_string),
+                    on_delete: row.get(6).and_then(|v| v.as_str()).map(ToString::to_string),
+                    ..Default::default()
+                }
+            });
+            entry
+                .columns
+                .push(row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string());
+            entry
+                .referenced_columns
+                .push(row.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string());
+        }
+
+        let mut foreign_keys_by_relation: HashMap<String, Vec<zqlz_core::RawForeignKeyRow>> =
+            HashMap::new();
+        for key in order {
+            if let Some(foreign_key) = map.remove(&key) {
+                foreign_keys_by_relation
+                    .entry(key.0)
+                    .or_default()
+                    .push(foreign_key);
+            }
+        }
+
+        Ok(Some(foreign_keys_by_relation))
+    }
+
+    async fn fetch_constraints(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawConstraintRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("dbo");
+        let result = self
+            .query(
+                "SELECT cc.name, 'CHECK', cc.definition
+                 FROM sys.check_constraints cc
+                 INNER JOIN sys.tables t ON cc.parent_object_id = t.object_id
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                 WHERE s.name = @P1 AND t.name = @P2
+                 UNION ALL
+                 SELECT i.name, 'UNIQUE', NULL
+                 FROM sys.indexes i
+                 INNER JOIN sys.tables t ON i.object_id = t.object_id
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+                 WHERE s.name = @P1 AND t.name = @P2 AND i.is_unique = 1 AND i.is_primary_key = 0
+                 ORDER BY 1",
+                &[
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| zqlz_core::RawConstraintRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                kind: row.get(1).and_then(|v| v.as_str()).unwrap_or("CHECK").to_string(),
+                columns: Vec::new(),
+                definition: row.get(2).and_then(|v| v.as_str()).map(ToString::to_string),
+            })
+            .collect())
+    }
+
+    async fn fetch_triggers(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<zqlz_core::RawTriggerRow>> {
+        let schema = schema.unwrap_or("dbo");
+        let base = "SELECT tr.name, OBJECT_NAME(tr.parent_id),
+                    CASE WHEN tr.is_instead_of_trigger = 1 THEN 'INSTEAD OF'
+                         WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsAfterTrigger') = 1 THEN 'AFTER'
+                         ELSE 'FOR' END,
+                    CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsertTrigger') = 1 THEN 'INSERT' ELSE '' END +
+                    CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsUpdateTrigger') = 1 THEN ',UPDATE' ELSE '' END +
+                    CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsDeleteTrigger') = 1 THEN ',DELETE' ELSE '' END,
+                    OBJECT_DEFINITION(tr.object_id),
+                    CASE WHEN tr.is_disabled = 0 THEN 1 ELSE 0 END
+                 FROM sys.triggers tr
+                 INNER JOIN sys.tables t ON tr.parent_id = t.object_id
+                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id";
+        let (sql, params) = match table {
+            Some(table) => (
+                format!("{base} WHERE s.name = @P1 AND t.name = @P2 ORDER BY tr.name"),
+                vec![
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(table.to_string()),
+                ],
+            ),
+            None => (
+                format!("{base} WHERE s.name = @P1 ORDER BY tr.name"),
+                vec![zqlz_core::Value::String(schema.to_string())],
+            ),
+        };
+        let result = self.query(&sql, &params).await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| zqlz_core::RawTriggerRow {
+                schema: Some(schema.to_string()),
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                table_name: row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                timing: row.get(2).and_then(|v| v.as_str()).map(ToString::to_string),
+                events: row
+                    .get(3)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
+                for_each: None,
+                definition: row.get(4).and_then(|v| v.as_str()).map(ToString::to_string),
+                enabled: row.get(5).and_then(|v| v.as_i64()).unwrap_or(1) == 1,
+            })
+            .collect())
+    }
+}
 
 pub(crate) const MSSQL_FUNCTION_DDL_SQL: &str = "SELECT
                     OBJECT_DEFINITION(o.object_id) AS definition
@@ -272,179 +750,33 @@ impl SchemaIntrospection for MssqlConnection {
     /// Get detailed table information
     #[tracing::instrument(skip(self))]
     async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let schema = schema.unwrap_or("dbo");
-        let tables = self.list_tables(Some(schema)).await?;
-        let info = tables
-            .into_iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-
-        let columns = self.get_columns(Some(schema), name).await?;
-        let indexes = self.get_indexes(Some(schema), name).await?;
-        let foreign_keys = self.get_foreign_keys(Some(schema), name).await?;
-        let primary_key = self.get_primary_key(Some(schema), name).await?;
-        let constraints = self.get_constraints(Some(schema), name).await?;
-        let triggers = self.list_triggers(Some(schema), Some(name)).await?;
-
-        Ok(TableDetails {
-            info,
-            columns,
-            primary_key,
-            foreign_keys,
-            indexes,
-            constraints,
-            triggers,
-        })
+        self.schema_engine.get_table(schema, name).await
     }
 
     /// Get columns for a table
     #[tracing::instrument(skip(self))]
     async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let schema = schema.unwrap_or("dbo");
-        let result = self
-            .query(
-                "SELECT 
-                    c.name AS column_name,
-                    c.column_id AS ordinal,
-                    TYPE_NAME(c.user_type_id) AS data_type,
-                    c.is_nullable,
-                    dc.definition AS default_value,
-                    c.max_length,
-                    c.precision,
-                    c.scale,
-                    c.is_identity,
-                    CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END AS is_primary_key,
-                    CASE WHEN uq.column_id IS NOT NULL THEN 1 ELSE 0 END AS is_unique
-                 FROM sys.columns c
-                 INNER JOIN sys.tables t ON c.object_id = t.object_id
-                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                 LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
-                 LEFT JOIN (
-                     SELECT ic.object_id, ic.column_id 
-                     FROM sys.index_columns ic
-                     INNER JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-                     WHERE i.is_primary_key = 1
-                 ) pk ON c.object_id = pk.object_id AND c.column_id = pk.column_id
-                 LEFT JOIN (
-                     SELECT ic.object_id, ic.column_id 
-                     FROM sys.index_columns ic
-                     INNER JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-                     WHERE i.is_unique = 1 AND i.is_primary_key = 0
-                 ) uq ON c.object_id = uq.object_id AND c.column_id = uq.column_id
-                 WHERE s.name = @P1 AND t.name = @P2
-                 ORDER BY c.column_id",
-                &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
-                ],
-            )
-            .await?;
+        self.schema_engine.get_columns(schema, table).await
+    }
 
-        let columns = result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let ordinal = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize;
-                let data_type = row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let is_nullable = row.get(3).and_then(|v| v.as_bool()).unwrap_or(true);
-                let default_value = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
-                let max_length = row.get(5).and_then(|v| v.as_i64());
-                let precision = row.get(6).and_then(|v| v.as_i64()).map(|i| i as i32);
-                let scale = row.get(7).and_then(|v| v.as_i64()).map(|i| i as i32);
-                let is_identity = row.get(8).and_then(|v| v.as_bool()).unwrap_or(false);
-                let is_primary_key = row.get(9).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
-                let is_unique = row.get(10).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        self.schema_engine.list_all_columns(schema).await
+    }
 
-                ColumnInfo {
-                    name,
-                    ordinal,
-                    data_type,
-                    nullable: is_nullable,
-                    default_value,
-                    max_length,
-                    precision,
-                    scale,
-                    is_primary_key,
-                    is_auto_increment: is_identity,
-                    is_unique,
-                    foreign_key: None, // Will be filled if needed
-                    comment: None,
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        Ok(columns)
+    async fn list_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        self.schema_engine.list_all_foreign_keys(schema).await
     }
 
     /// Get indexes for a table
     #[tracing::instrument(skip(self))]
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let schema = schema.unwrap_or("dbo");
-        let result = self
-            .query(
-                "SELECT 
-                    i.name AS index_name,
-                    i.is_unique,
-                    i.is_primary_key,
-                    i.type_desc AS index_type,
-                    STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns
-                 FROM sys.indexes i
-                 INNER JOIN sys.tables t ON i.object_id = t.object_id
-                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                 INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-                 INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                 WHERE s.name = @P1 AND t.name = @P2 AND i.name IS NOT NULL
-                 GROUP BY i.name, i.is_unique, i.is_primary_key, i.type_desc
-                 ORDER BY i.name",
-                &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        let indexes = result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let is_unique = row.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
-                let is_primary = row.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
-                let index_type = row
-                    .get(3)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("NONCLUSTERED")
-                    .to_string();
-                let columns_str = row.get(4).and_then(|v| v.as_str()).unwrap_or("");
-                let columns: Vec<String> = columns_str.split(',').map(|s| s.to_string()).collect();
-
-                IndexInfo {
-                    name,
-                    columns,
-                    is_unique,
-                    is_primary,
-                    index_type,
-                    comment: None,
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        Ok(indexes)
+        self.schema_engine.get_indexes(schema, table).await
     }
 
     /// Get foreign keys for a table
@@ -454,80 +786,7 @@ impl SchemaIntrospection for MssqlConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let schema = schema.unwrap_or("dbo");
-        let result = self
-            .query(
-                "SELECT 
-                    fk.name AS constraint_name,
-                    COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS column_name,
-                    OBJECT_NAME(fkc.referenced_object_id) AS referenced_table,
-                    SCHEMA_NAME(ref_t.schema_id) AS referenced_schema,
-                    COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS referenced_column,
-                    fk.update_referential_action_desc AS on_update,
-                    fk.delete_referential_action_desc AS on_delete
-                 FROM sys.foreign_keys fk
-                 INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-                 INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id
-                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                 INNER JOIN sys.tables ref_t ON fkc.referenced_object_id = ref_t.object_id
-                 WHERE s.name = @P1 AND t.name = @P2
-                 ORDER BY fk.name, fkc.constraint_column_id",
-                &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        // Group by constraint name since a FK can span multiple columns
-        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
-            std::collections::HashMap::new();
-
-        for row in result.rows.iter() {
-            let name = row
-                .get(0)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let column = row
-                .get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ref_table = row
-                .get(2)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ref_schema = row.get(3).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let ref_column = row
-                .get(4)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let on_update_str = row.get(5).and_then(|v| v.as_str()).unwrap_or("NO_ACTION");
-            let on_delete_str = row.get(6).and_then(|v| v.as_str()).unwrap_or("NO_ACTION");
-
-            fk_map
-                .entry(name.clone())
-                .and_modify(|fk| {
-                    fk.columns.push(column.clone());
-                    fk.referenced_columns.push(ref_column.clone());
-                })
-                .or_insert(ForeignKeyInfo {
-                    name,
-                    columns: vec![column],
-                    referenced_table: ref_table,
-                    referenced_schema: ref_schema,
-                    referenced_columns: vec![ref_column],
-                    on_update: parse_fk_action(on_update_str),
-                    on_delete: parse_fk_action(on_delete_str),
-                    is_deferrable: false,
-                    initially_deferred: false,
-                });
-        }
-
-        Ok(fk_map.into_values().collect())
+        self.schema_engine.get_foreign_keys(schema, table).await
     }
 
     /// Get primary key for a table
@@ -536,35 +795,7 @@ impl SchemaIntrospection for MssqlConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Option<PrimaryKeyInfo>> {
-        let schema = schema.unwrap_or("dbo");
-        let result = self
-            .query(
-                "SELECT 
-                    i.name AS constraint_name,
-                    STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns
-                 FROM sys.indexes i
-                 INNER JOIN sys.tables t ON i.object_id = t.object_id
-                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                 INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-                 INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                 WHERE s.name = @P1 AND t.name = @P2 AND i.is_primary_key = 1
-                 GROUP BY i.name",
-                &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        if let Some(row) = result.rows.first() {
-            let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let columns_str = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let columns: Vec<String> = columns_str.split(',').map(|s| s.to_string()).collect();
-
-            Ok(Some(PrimaryKeyInfo { name, columns }))
-        } else {
-            Ok(None)
-        }
+        self.schema_engine.get_primary_key(schema, table).await
     }
 
     /// Get constraints for a table
@@ -573,62 +804,7 @@ impl SchemaIntrospection for MssqlConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        let schema = schema.unwrap_or("dbo");
-        let result = self
-            .query(
-                "SELECT 
-                    cc.name AS constraint_name,
-                    'CHECK' AS constraint_type,
-                    cc.definition
-                 FROM sys.check_constraints cc
-                 INNER JOIN sys.tables t ON cc.parent_object_id = t.object_id
-                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                 WHERE s.name = @P1 AND t.name = @P2
-                 UNION ALL
-                 SELECT 
-                    i.name AS constraint_name,
-                    'UNIQUE' AS constraint_type,
-                    NULL AS definition
-                 FROM sys.indexes i
-                 INNER JOIN sys.tables t ON i.object_id = t.object_id
-                 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                 WHERE s.name = @P1 AND t.name = @P2 AND i.is_unique = 1 AND i.is_primary_key = 0
-                 ORDER BY constraint_name",
-                &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        let constraints = result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let constraint_type_str = row.get(1).and_then(|v| v.as_str()).unwrap_or("CHECK");
-                let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                let constraint_type = match constraint_type_str {
-                    "CHECK" => ConstraintType::Check,
-                    "UNIQUE" => ConstraintType::Unique,
-                    _ => ConstraintType::Check,
-                };
-
-                ConstraintInfo {
-                    name,
-                    constraint_type,
-                    columns: Vec::new(), // Would need separate query
-                    definition,
-                }
-            })
-            .collect();
-
-        Ok(constraints)
+        self.schema_engine.get_constraints(schema, table).await
     }
 
     /// List all functions in a schema
@@ -1596,15 +1772,6 @@ pub(crate) fn generate_ddl_definition_unavailable_message(
 }
 
 /// Parse SQL Server foreign key action
-pub(crate) fn parse_fk_action(action: &str) -> ForeignKeyAction {
-    match action.to_uppercase().as_str() {
-        "CASCADE" => ForeignKeyAction::Cascade,
-        "SET_NULL" | "SET NULL" => ForeignKeyAction::SetNull,
-        "SET_DEFAULT" | "SET DEFAULT" => ForeignKeyAction::SetDefault,
-        "NO_ACTION" | "NO ACTION" => ForeignKeyAction::NoAction,
-        _ => ForeignKeyAction::NoAction,
-    }
-}
 
 /// Generate CREATE TABLE DDL from TableDetails
 pub(crate) fn generate_table_ddl(table: &TableDetails, schema: &str) -> String {

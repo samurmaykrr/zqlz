@@ -20,10 +20,59 @@ fn test_definition_for_table_name() {
     let response = result.unwrap();
     match response {
         GotoDefinitionResponse::Scalar(location) => {
-            assert_eq!(location.uri.to_string(), "sql://internal");
+            // The URI has to name the object: a table has no position in the query,
+            // so this is the only way the editor can navigate to it.
+            assert_eq!(location.uri.to_string(), "sql://internal/table/users");
         }
         _ => panic!("Expected scalar definition response"),
     }
+}
+
+fn definition_uri(lsp: &crate::SqlLsp, sql: &str, needle: &str) -> String {
+    let text = Rope::from(sql);
+    let offset = sql.find(needle).expect("needle present") + needle.len() / 2;
+    match lsp
+        .get_definition(&text, offset)
+        .expect("definition resolves")
+    {
+        GotoDefinitionResponse::Scalar(location) => location.uri.to_string(),
+        _ => panic!("Expected scalar definition response"),
+    }
+}
+
+#[test]
+fn test_definition_for_column_targets_its_table() {
+    let lsp = create_test_lsp();
+
+    // A column has no location of its own, so it must resolve to its table.
+    assert_eq!(
+        definition_uri(&lsp, "SELECT username FROM users", "username"),
+        "sql://internal/table/users"
+    );
+}
+
+#[test]
+fn test_definition_for_qualified_column_targets_its_table() {
+    let lsp = create_test_lsp();
+
+    assert_eq!(
+        definition_uri(
+            &lsp,
+            "SELECT u.username FROM users u",
+            "username"
+        ),
+        "sql://internal/table/users"
+    );
+}
+
+#[test]
+fn test_definition_through_alias_targets_the_real_table() {
+    let lsp = create_test_lsp();
+
+    assert_eq!(
+        definition_uri(&lsp, "SELECT * FROM audit_log AS al WHERE al.log_id = 1", "al."),
+        "sql://internal/table/audit_log"
+    );
 }
 
 #[test]

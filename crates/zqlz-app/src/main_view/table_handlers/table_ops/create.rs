@@ -32,8 +32,15 @@ impl MainView {
             .table_design_service
             .dialect_for_connection(connection.as_ref());
 
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+
         // Create an empty table designer panel
-        let panel = cx.new(|cx| TableDesignerPanel::new(connection_id, dialect, window, cx));
+        let panel = cx
+            .new(|cx| TableDesignerPanel::new(connection_id, dialect, target_database, window, cx));
 
         // Subscribe to table designer events
         let panel_clone = panel.clone();

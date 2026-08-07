@@ -124,7 +124,7 @@ impl DdlGenerator {
         for index in &design.indexes {
             if !index.is_primary {
                 ddl.push_str("\n\n");
-                ddl.push_str(&Self::generate_create_index(&design.table_name, index, q));
+                ddl.push_str(&Self::generate_create_index(&table_ref, index, q));
             }
         }
 
@@ -200,7 +200,7 @@ impl DdlGenerator {
         let mut statements = Vec::new();
 
         // Use the original table name for ALTER statements, then rename at the end
-        let table = Self::quote_ident(&original.table_name, q);
+        let table = Self::qualified_table_name(original, q);
 
         // --- Table rename ---
         if original.table_name != modified.table_name {
@@ -216,7 +216,7 @@ impl DdlGenerator {
         }
 
         // After a potential rename, subsequent statements target the new name
-        let table = Self::quote_ident(&modified.table_name, q);
+        let table = Self::qualified_table_name(modified, q);
 
         // Match columns between original and modified. Use column_id when available,
         // falling back to name matching for backward compatibility with tests/loaders
@@ -332,10 +332,16 @@ impl DdlGenerator {
                         ));
                     }
                     _ => {
-                        statements.push(format!(
-                            "DROP INDEX IF EXISTS {};",
-                            Self::quote_ident(&idx.name, q)
-                        ));
+                        // The index lives in the table's schema, not the session search_path.
+                        let index_ref = match modified.schema.as_deref() {
+                            Some(schema) if !schema.is_empty() => format!(
+                                "{}.{}",
+                                Self::quote_ident(schema, q),
+                                Self::quote_ident(&idx.name, q)
+                            ),
+                            _ => Self::quote_ident(&idx.name, q),
+                        };
+                        statements.push(format!("DROP INDEX IF EXISTS {};", index_ref));
                     }
                 }
             }
@@ -344,7 +350,7 @@ impl DdlGenerator {
         // --- Added indexes ---
         for idx in &modified.indexes {
             if !original.indexes.iter().any(|i| i.name == idx.name) && !idx.is_primary {
-                statements.push(Self::generate_create_index(&modified.table_name, idx, q));
+                statements.push(Self::generate_create_index(&table, idx, q));
             }
         }
 
@@ -558,7 +564,8 @@ impl DdlGenerator {
     }
 
     /// Generate CREATE INDEX statement
-    fn generate_create_index(table_name: &str, index: &IndexDesign, quote: char) -> String {
+    /// `table_ref` must already be quoted (and schema-qualified when applicable).
+    fn generate_create_index(table_ref: &str, index: &IndexDesign, quote: char) -> String {
         let unique = if index.is_unique { "UNIQUE " } else { "" };
         let columns = index
             .columns
@@ -580,7 +587,7 @@ impl DdlGenerator {
             "CREATE {}INDEX {} ON {} ({})",
             unique,
             Self::quote_ident(&index.name, quote),
-            Self::quote_ident(table_name, quote),
+            table_ref,
             columns
         );
 
@@ -889,6 +896,28 @@ mod tests {
         assert_eq!(statements.len(), 1);
         assert!(statements[0].contains("ADD COLUMN"));
         assert!(statements[0].contains("\"email\""));
+    }
+
+    #[test]
+    fn test_generate_alter_table_qualifies_schema() {
+        let mut original = TableDesign::new("orders_returns", DatabaseDialect::Mysql)
+            .with_column(ColumnDesign::named("id").integer().primary_key());
+        original.schema = Some("shop".to_string());
+
+        let mut modified = TableDesign::new("orders_returns", DatabaseDialect::Mysql)
+            .with_column(ColumnDesign::named("id").integer().primary_key())
+            .with_column(ColumnDesign::named("email").text());
+        modified.schema = Some("shop".to_string());
+
+        let statements =
+            DdlGenerator::generate_alter_table(&original, &modified).expect("should generate DDL");
+
+        assert_eq!(statements.len(), 1);
+        assert!(
+            statements[0].starts_with("ALTER TABLE `shop`.`orders_returns` ADD COLUMN"),
+            "expected database-qualified ALTER, got: {}",
+            statements[0]
+        );
     }
 
     #[test]

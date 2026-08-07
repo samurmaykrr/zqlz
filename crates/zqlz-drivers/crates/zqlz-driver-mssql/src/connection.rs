@@ -3,17 +3,22 @@
 use async_trait::async_trait;
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, Row as TiberiusRow};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::MssqlCatalog;
 use zqlz_core::{
-    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnMeta, Connection, ConnectionScope,
+    AffectedRowCountFidelity, BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnMeta,
+    Connection, ConnectionScope,
     DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
     ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault, QueryResult,
-    ResolvedConnectionScope, Result, Row, SchemaIntrospection, SqlObjectName, StatementResult,
-    Transaction, Value, ZqlzError,
+    ResolvedConnectionScope, Result, Row, SchemaIntrospection, SingleRowDmlScope, SqlObjectName,
+    StatementResult, Transaction, Value, ZqlzError,
 };
 
 /// MS SQL Server connection errors
@@ -49,10 +54,13 @@ impl From<MssqlConnectionError> for ZqlzError {
 
 /// MS SQL Server connection using tiberius
 pub struct MssqlConnection {
-    client: Mutex<Client<Compat<TcpStream>>>,
+    client: Arc<Mutex<Client<Compat<TcpStream>>>>,
     closed: AtomicBool,
     database: Option<String>,
+    pub(crate) schema_engine: SchemaEngine,
 }
+
+pub(crate) type MssqlClient = Arc<Mutex<Client<Compat<TcpStream>>>>;
 
 impl MssqlConnection {
     /// Create a new MS SQL Server connection
@@ -123,10 +131,17 @@ impl MssqlConnection {
 
         tracing::debug!("successfully connected to MS SQL Server");
 
+        let client = Arc::new(Mutex::new(client));
+        let database = database.map(String::from);
+        let schema_engine = SchemaEngine::new(
+            Arc::new(MssqlCatalog::new(client.clone(), database.clone())),
+            Arc::new(DefaultDialect),
+        );
         Ok(Self {
-            client: Mutex::new(client),
+            client,
             closed: AtomicBool::new(false),
-            database: database.map(String::from),
+            database,
+            schema_engine,
         })
     }
 
@@ -204,6 +219,12 @@ impl Connection for MssqlConnection {
         Some("mssql")
     }
 
+    // A trigger or procedure running `SET NOCOUNT ON` suppresses @@ROWCOUNT, so
+    // a zero count does not prove the row was missing.
+    fn affected_row_count_fidelity(&self) -> AffectedRowCountFidelity {
+        AffectedRowCountFidelity::BestEffort
+    }
+
     fn explain_config(&self) -> ExplainConfig {
         mssql_explain_config()
     }
@@ -214,6 +235,19 @@ impl Connection for MssqlConnection {
 
     fn quote_identifier(&self, identifier: &str) -> String {
         crate::dialect::MssqlDialect::new().quote_identifier(identifier)
+    }
+
+    /// `%%physloc%%` is the physical location of a row, which tells duplicate
+    /// rows in a keyless table apart. T-SQL limits the subquery with `TOP`
+    /// rather than `LIMIT`, so this cannot use the shared row-identity helper.
+    fn single_row_dml_scope(
+        &self,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::WhereClause(format!(
+            "%%physloc%% IN (SELECT TOP 1 %%physloc%% FROM {qualified_table} WHERE {where_clause})"
+        ))
     }
 
     fn requires_database_scoped_connection(&self) -> bool {
@@ -628,70 +662,7 @@ impl Connection for MssqlConnection {
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.ensure_not_closed()?;
-        let start = std::time::Instant::now();
-
-        let mut client = self.client.lock().await;
-
-        let stream = if params.is_empty() {
-            client.query(sql, &[]).await
-        } else {
-            let tiberius_params = values_to_tiberius_params(params)?;
-            let param_refs: Vec<&dyn tiberius::ToSql> = tiberius_params
-                .iter()
-                .map(|p| p as &dyn tiberius::ToSql)
-                .collect();
-            client.query(sql, &param_refs[..]).await
-        };
-
-        match stream {
-            Ok(query_stream) => {
-                let mut columns: Vec<ColumnMeta> = Vec::new();
-
-                let tib_rows = query_stream
-                    .into_first_result()
-                    .await
-                    .map_err(|e| ZqlzError::Driver(e.to_string()))?;
-
-                if let Some(first_row) = tib_rows.first() {
-                    columns = first_row
-                        .columns()
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, col)| tiberius_column_to_meta(col, idx))
-                        .collect();
-                }
-
-                let mut rows: Vec<Row> = Vec::new();
-                let column_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
-
-                for tib_row in tib_rows {
-                    let values = tiberius_row_to_values(tib_row)?;
-                    rows.push(Row::new(column_names.clone(), values));
-                }
-
-                let execution_time_ms = start.elapsed().as_millis() as u64;
-                tracing::debug!(
-                    row_count = rows.len(),
-                    duration_ms = execution_time_ms,
-                    "query completed"
-                );
-
-                Ok(QueryResult {
-                    id: Uuid::new_v4(),
-                    columns,
-                    rows,
-                    total_rows: None,
-                    is_estimated_total: false,
-                    affected_rows: 0,
-                    execution_time_ms,
-                    warnings: Vec::new(),
-                })
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "query failed");
-                Err(ZqlzError::Driver(e.to_string()))
-            }
-        }
+        run_mssql_query(&self.client, sql, params).await
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
@@ -711,9 +682,70 @@ impl Connection for MssqlConnection {
         self.closed.load(Ordering::SeqCst)
     }
 
+    fn is_busy(&self) -> bool {
+        self.client.try_lock().is_err()
+    }
+
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
         Some(self)
     }
+}
+
+/// Execute a query against a shared MS SQL Server client and collect the
+/// result. Shared by `MssqlConnection` and the schema-introspection adapter.
+pub(crate) async fn run_mssql_query(
+    client: &MssqlClient,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let start = std::time::Instant::now();
+    let mut client = client.lock().await;
+
+    let stream = if params.is_empty() {
+        client.query(sql, &[]).await
+    } else {
+        let tiberius_params = values_to_tiberius_params(params)?;
+        let param_refs: Vec<&dyn tiberius::ToSql> = tiberius_params
+            .iter()
+            .map(|p| p as &dyn tiberius::ToSql)
+            .collect();
+        client.query(sql, &param_refs[..]).await
+    };
+
+    let query_stream = stream.map_err(|e| ZqlzError::Driver(e.to_string()))?;
+    let tib_rows = query_stream
+        .into_first_result()
+        .await
+        .map_err(|e| ZqlzError::Driver(e.to_string()))?;
+
+    let mut columns: Vec<ColumnMeta> = Vec::new();
+    if let Some(first_row) = tib_rows.first() {
+        columns = first_row
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| tiberius_column_to_meta(col, idx))
+            .collect();
+    }
+
+    let column_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+    let mut rows: Vec<Row> = Vec::new();
+    for tib_row in tib_rows {
+        let values = tiberius_row_to_values(tib_row)?;
+        rows.push(Row::new(column_names.clone(), values));
+    }
+
+    let execution_time_ms = start.elapsed().as_millis() as u64;
+    Ok(QueryResult {
+        id: Uuid::new_v4(),
+        columns,
+        rows,
+        total_rows: None,
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms,
+        warnings: Vec::new(),
+    })
 }
 
 /// Convert a tiberius column to ColumnMeta

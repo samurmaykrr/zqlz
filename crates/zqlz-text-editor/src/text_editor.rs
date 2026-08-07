@@ -58,6 +58,7 @@ use zqlz_core::{
     syntax_bracket_pairs_for_capabilities,
 };
 use zqlz_ui::widgets::input::{Input, InputEvent, InputState};
+use zqlz_ui::widgets::kbd::Kbd;
 use zqlz_ui::widgets::{ActiveTheme, Sizable, Size};
 
 pub type FormatProvider = std::rc::Rc<dyn Fn(&str) -> Option<String>>;
@@ -125,9 +126,9 @@ pub(crate) use large_file_policy::syntax_refresh_strategy_for_policy;
 pub use large_file_policy::{LargeFilePolicyConfig, LargeFilePolicyTier, ResolvedLargeFilePolicy};
 pub use lsp::{
     CodeActionProvider, CompletionMenuData, CompletionProvider, DefinitionProvider,
-    DiagnosticProvider, EditorInlayHint, HoverProvider, HoverResolution, HoverState, InlayHintKind,
-    InlayHintSide, Lsp, LspRequestState, ReferencesProvider, RenameProvider, RequestToken,
-    SqlCompletionProvider, completion_prefix_with_word_chars,
+    DefinitionTarget, DiagnosticProvider, EditorInlayHint, HoverProvider, HoverResolution,
+    HoverState, InlayHintKind, InlayHintSide, Lsp, LspRequestState, ReferencesProvider,
+    RenameProvider, RequestToken, SqlCompletionProvider, completion_prefix_with_word_chars,
     completion_trigger_context_for_characters,
 };
 pub use lsp_types::{CompletionItem, Hover, SignatureHelp};
@@ -198,6 +199,64 @@ pub struct TextEditor {
     selections_collection: SelectionsCollection,
     snippets: EditorSnippetState,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The action a context-menu entry dispatches.
+///
+/// Kept separate from the menu so the same mapping can resolve the entry's
+/// keybinding for display — otherwise the two drift apart silently.
+fn context_menu_boxed_action(action: ContextMenuAction) -> Box<dyn Action> {
+    match action {
+        ContextMenuAction::Cut => actions::Cut.boxed_clone(),
+        ContextMenuAction::Copy => actions::Copy.boxed_clone(),
+        ContextMenuAction::Paste => actions::Paste.boxed_clone(),
+        ContextMenuAction::SelectAll => actions::SelectAll.boxed_clone(),
+        ContextMenuAction::Find => actions::OpenFind.boxed_clone(),
+        ContextMenuAction::FindReplace => actions::OpenFindReplace.boxed_clone(),
+        ContextMenuAction::SelectAllMatches => actions::FindSelectAllMatches.boxed_clone(),
+        ContextMenuAction::Complete => actions::TriggerCompletion.boxed_clone(),
+        ContextMenuAction::GoToDefinition => actions::GoToDefinition.boxed_clone(),
+        ContextMenuAction::FindReferences => actions::FindReferences.boxed_clone(),
+        ContextMenuAction::RenameSymbol => actions::RenameSymbol.boxed_clone(),
+        ContextMenuAction::GoToLine => actions::GoToLine.boxed_clone(),
+        ContextMenuAction::ToggleSoftWrap => actions::ToggleSoftWrap.boxed_clone(),
+        ContextMenuAction::FoldAll => actions::FoldAll.boxed_clone(),
+        ContextMenuAction::UnfoldAll => actions::UnfoldAll.boxed_clone(),
+        ContextMenuAction::DuplicateLineDown => actions::DuplicateLineDown.boxed_clone(),
+        ContextMenuAction::MoveLineUp => actions::MoveLineUp.boxed_clone(),
+        ContextMenuAction::MoveLineDown => actions::MoveLineDown.boxed_clone(),
+        ContextMenuAction::ToggleLineComment => actions::ToggleLineComment.boxed_clone(),
+        ContextMenuAction::ToggleBlockComment => actions::ToggleBlockComment.boxed_clone(),
+        ContextMenuAction::SortLinesAscending => actions::SortLinesAscending.boxed_clone(),
+        ContextMenuAction::UniqueLines => actions::UniqueLines.boxed_clone(),
+        ContextMenuAction::TransformUppercase => actions::TransformUppercase.boxed_clone(),
+        ContextMenuAction::TransformLowercase => actions::TransformLowercase.boxed_clone(),
+        ContextMenuAction::TransformTitleCase => actions::TransformTitleCase.boxed_clone(),
+        ContextMenuAction::TransformSnakeCase => actions::TransformSnakeCase.boxed_clone(),
+        ContextMenuAction::TransformCamelCase => actions::TransformCamelCase.boxed_clone(),
+        ContextMenuAction::TransformKebabCase => actions::TransformKebabCase.boxed_clone(),
+        ContextMenuAction::InsertUuidV4 => actions::InsertUuidV4.boxed_clone(),
+        ContextMenuAction::InsertUuidV7 => actions::InsertUuidV7.boxed_clone(),
+        ContextMenuAction::FormatSql => actions::FormatSQL.boxed_clone(),
+    }
+}
+
+/// The keystrokes bound to a menu entry, formatted for the current platform.
+///
+/// Resolved when the menu opens rather than cached, so a user keymap change shows
+/// up immediately. Chords render every keystroke (`⌘K ⌘U`), not just the first.
+fn context_menu_shortcut(action: ContextMenuAction, window: &Window) -> Option<String> {
+    let action = context_menu_boxed_action(action);
+    let key_context = KeyContext::parse(actions::CONTEXT).ok()?;
+    let binding =
+        window.highest_precedence_binding_for_action_in_context(action.as_ref(), key_context)?;
+
+    let formatted: Vec<String> = binding
+        .keystrokes()
+        .iter()
+        .map(|keystroke| Kbd::format(keystroke.as_keystroke()))
+        .collect();
+    (!formatted.is_empty()).then(|| formatted.join(" "))
 }
 
 impl EventEmitter<TextEditorEvent> for TextEditor {}
@@ -1597,6 +1656,22 @@ impl TextEditor {
         self.apply_single_cursor_edit_batch(batch, cx, true);
     }
 
+    fn delete_word_left(&mut self, cx: &mut Context<Self>) {
+        let Some(batch) = self.editor_core_snapshot().delete_word_left_edit_batch() else {
+            return;
+        };
+
+        self.apply_single_cursor_edit_batch(batch, cx, true);
+    }
+
+    fn delete_word_right(&mut self, cx: &mut Context<Self>) {
+        let Some(batch) = self.editor_core_snapshot().delete_word_right_edit_batch() else {
+            return;
+        };
+
+        self.apply_single_cursor_edit_batch(batch, cx, true);
+    }
+
     /// Get the current scroll offset (in lines)
     pub fn scroll_offset(&self) -> f32 {
         self.scroll.vertical_offset()
@@ -1839,6 +1914,10 @@ impl TextEditor {
         if !self.render_settings.bracket_matching_enabled() {
             return Vec::new();
         }
+        self.bracket_pairs_at_cursor()
+    }
+
+    fn bracket_pairs_at_cursor(&self) -> Vec<(usize, usize)> {
         let cursor_offset = self.current_cursor_offset();
         let rope = self.document.rope();
         let scan_range = Self::bracket_highlight_scan_range(
@@ -1860,6 +1939,47 @@ impl TextEditor {
             .into_iter()
             .map(|pair| (pair.open, pair.close))
             .collect()
+    }
+
+    fn handle_jump_to_matching_bracket(
+        &mut self,
+        _: &actions::JumpToMatchingBracket,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = self.current_cursor_offset();
+        let pairs = self.bracket_pairs_at_cursor();
+
+        // On (or just after) a bracket: jump to its partner. Otherwise jump to
+        // the closing bracket of the innermost enclosing pair, like VS Code.
+        let target = pairs
+            .iter()
+            .find_map(|&(open, close)| {
+                if offset == open || offset == open + 1 {
+                    Some(close)
+                } else if offset == close || offset == close + 1 {
+                    Some(open)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                pairs
+                    .iter()
+                    .filter(|&&(open, close)| open < offset && offset < close)
+                    .max_by_key(|&&(open, _)| open)
+                    .map(|&(_, close)| close)
+            });
+
+        let Some(target) = target else {
+            return;
+        };
+        if let Ok(position) = self.document.offset_to_position(target) {
+            self.begin_non_extending_selection_action();
+            self.mutate_selections(|core| core.set_single_cursor(position));
+            self.scroll_to_cursor();
+            cx.notify();
+        }
     }
 
     pub fn innermost_enclosing_bracket_range(&self, offset: usize) -> Option<StructuralRange> {
@@ -3089,6 +3209,60 @@ impl TextEditor {
         cx.notify();
     }
 
+    /// Normalize the buffer before saving: strip trailing whitespace from every
+    /// line and ensure the document ends with exactly one newline. Applied as a
+    /// single undoable transaction; cursors stay where they were (clamped).
+    pub fn prepare_for_save(&mut self, cx: &mut Context<Self>) {
+        let rope = self.document.rope();
+        let mut edits: Vec<TextReplacementEdit> = Vec::new();
+
+        let mut line_start = 0usize;
+        for line in rope.lines() {
+            let line_text = line.to_string();
+            let line_bytes = line_text.len();
+            let content = line_text.trim_end_matches(['\n', '\r']);
+            let trimmed_length = content.trim_end().len();
+            if trimmed_length < content.len() {
+                edits.push(TextReplacementEdit {
+                    range: line_start + trimmed_length..line_start + content.len(),
+                    replacement: String::new(),
+                });
+            }
+            line_start += line_bytes;
+        }
+
+        let total_bytes = rope.len_bytes();
+        if total_bytes > 0 && rope.char(rope.len_chars() - 1) != '\n' {
+            edits.push(TextReplacementEdit {
+                range: total_bytes..total_bytes,
+                replacement: "\n".to_string(),
+            });
+        }
+
+        if edits.is_empty() {
+            return;
+        }
+
+        // Edits are applied sequentially without offset adjustment, so apply
+        // bottom-up to keep earlier ranges valid.
+        edits.sort_by(|left, right| right.range.start.cmp(&left.range.start));
+
+        if !self.apply_planned_edit_batch(
+            PlannedEditBatch {
+                edits,
+                post_apply_selection: PostApplySelection::Keep,
+            },
+            true,
+        ) {
+            return;
+        }
+
+        self.apply_interpolated_syntax_highlights();
+        self.update_diagnostics();
+        self.did_change_content(cx);
+        cx.notify();
+    }
+
     pub fn mark_saved(&mut self, cx: &mut Context<Self>) {
         let revision = self.document.buffer_revision();
         if self.document.saved_revision() == revision {
@@ -3193,8 +3367,11 @@ impl TextEditor {
             return None;
         }
 
-        self.lsp
-            .request_diagnostics(&self.document.rope(), &self.document.context())
+        self.lsp.request_diagnostics(
+            &self.document.rope(),
+            &self.document.context(),
+            Some(self.current_cursor_offset()),
+        )
     }
 
     // ============================================================================
@@ -3238,8 +3415,10 @@ impl TextEditor {
             crate::lsp::CompletionResolution::CachedFilter {
                 items,
                 trigger_offset,
+                items_revision,
             } => {
-                self.lsp.set_completion_items(items, trigger_offset);
+                self.lsp
+                    .set_completion_items(items, trigger_offset, items_revision);
             }
             crate::lsp::CompletionResolution::Clear => {
                 self.lsp.clear_completion_menu();
@@ -3279,14 +3458,20 @@ impl TextEditor {
                             if items.is_empty() {
                                 editor.lsp.clear_completion_menu();
                             } else {
+                                let items_revision = editor.document.buffer_revision();
                                 editor
                                     .lsp
                                     .set_completion_cache(crate::lsp::CompletionCache {
                                         all_items: items.clone(),
                                         trigger_prefix: trigger_prefix.clone(),
                                         trigger_offset,
+                                        items_revision,
                                     });
-                                editor.lsp.set_completion_items(items, trigger_offset);
+                                editor.lsp.set_completion_items(
+                                    items,
+                                    trigger_offset,
+                                    items_revision,
+                                );
                             }
                             cx.notify();
                         })?;
@@ -3342,11 +3527,13 @@ impl TextEditor {
         };
 
         let cursor_offset = self.current_cursor_offset();
+        let ranges_valid = menu.items_revision == self.document.buffer_revision();
         let acceptance = Self::completion_acceptance_for_item(
             &self.document,
             item,
             menu.trigger_offset,
             cursor_offset,
+            ranges_valid,
         );
 
         let replacement_batch = self
@@ -3384,28 +3571,42 @@ impl TextEditor {
         item: &lsp_types::CompletionItem,
         trigger_offset: usize,
         cursor_offset: usize,
+        ranges_valid: bool,
     ) -> CompletionAcceptance {
-        let (completion_text, replacement_range) = item
-            .text_edit
-            .as_ref()
-            .and_then(|text_edit| match text_edit {
-                lsp_types::CompletionTextEdit::Edit(edit) => Some((
-                    edit.new_text.clone(),
-                    Self::lsp_range_to_byte_range(document, &edit.range).ok()?,
-                )),
-                lsp_types::CompletionTextEdit::InsertAndReplace(edit) => Some((
-                    edit.new_text.clone(),
-                    Self::lsp_range_to_byte_range(document, &edit.replace).ok()?,
-                )),
-            })
-            .unwrap_or_else(|| {
-                (
-                    item.insert_text
-                        .clone()
-                        .unwrap_or_else(|| item.label.clone()),
-                    trigger_offset..cursor_offset,
-                )
-            });
+        // `text_edit` ranges were computed against the buffer revision the items
+        // were produced for. Once the buffer has changed (the user kept typing
+        // while the menu was open) those ranges point at the wrong bytes, so we
+        // fall back to replacing the live word prefix instead.
+        let stamped_edit = if ranges_valid {
+            item.text_edit
+                .as_ref()
+                .and_then(|text_edit| match text_edit {
+                    lsp_types::CompletionTextEdit::Edit(edit) => Some((
+                        edit.new_text.clone(),
+                        Self::lsp_range_to_byte_range(document, &edit.range).ok()?,
+                    )),
+                    lsp_types::CompletionTextEdit::InsertAndReplace(edit) => Some((
+                        edit.new_text.clone(),
+                        Self::lsp_range_to_byte_range(document, &edit.replace).ok()?,
+                    )),
+                })
+        } else {
+            None
+        };
+
+        let (completion_text, replacement_range) = stamped_edit.unwrap_or_else(|| {
+            let text = item
+                .text_edit
+                .as_ref()
+                .map(|text_edit| match text_edit {
+                    lsp_types::CompletionTextEdit::Edit(edit) => edit.new_text.clone(),
+                    lsp_types::CompletionTextEdit::InsertAndReplace(edit) => edit.new_text.clone(),
+                })
+                .or_else(|| item.insert_text.clone())
+                .unwrap_or_else(|| item.label.clone());
+            let start = trigger_offset.min(cursor_offset);
+            (text, start..cursor_offset)
+        });
 
         let snippet = if matches!(
             item.insert_text_format,
@@ -3952,12 +4153,18 @@ impl TextEditor {
     }
 
     /// Get definition at cursor.
+    ///
+    /// Only in-document targets have an LSP location; an external object is left to
+    /// [`TextEditorEvent::OpenExternalDefinition`].
     pub fn get_definition(&self, _cx: &App) -> Option<lsp_types::GotoDefinitionResponse> {
-        let target_offset = self.lsp.definition_at(
+        let target = self.lsp.definition_at(
             &self.document.rope(),
             self.current_cursor_offset(),
             &self.document.context(),
         )?;
+        let DefinitionTarget::InDocument(target_offset) = target else {
+            return None;
+        };
         let range = self.lsp_range_for_offsets(target_offset, target_offset)?;
         let uri = self.document.identity().uri().clone();
         Some(lsp_types::GotoDefinitionResponse::Scalar(
@@ -4829,6 +5036,9 @@ impl Render for TextEditor {
             .on_action(cx.listener(Self::handle_delete_to_end_of_line))
             .on_action(cx.listener(Self::handle_delete_subword_left))
             .on_action(cx.listener(Self::handle_delete_subword_right))
+            .on_action(cx.listener(Self::handle_delete_word_left))
+            .on_action(cx.listener(Self::handle_delete_word_right))
+            .on_action(cx.listener(Self::handle_jump_to_matching_bracket))
             .on_action(cx.listener(Self::handle_select_all))
             .on_action(cx.listener(Self::handle_toggle_block_selection))
             .on_action(cx.listener(Self::handle_backspace))
@@ -5063,10 +5273,10 @@ impl TextEditor {
                     }
                 }
                 "up" => {
-                    self.context_menu_move(-1, cx);
+                    self.context_menu_move(-1, window, cx);
                 }
                 "down" => {
-                    self.context_menu_move(1, cx);
+                    self.context_menu_move(1, window, cx);
                 }
                 "enter" => {
                     self.context_menu_activate(window, cx);
@@ -5549,6 +5759,40 @@ impl TextEditor {
         self.delete_subword_right(cx);
     }
 
+    fn handle_delete_word_left(
+        &mut self,
+        _: &actions::DeleteWordLeft,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_selection() {
+            if self.delete_selection() {
+                self.did_change_content(cx);
+                cx.notify();
+            }
+            return;
+        }
+        self.delete_word_left(cx);
+        self.refresh_or_dismiss_completions_after_deletion(cx);
+    }
+
+    fn handle_delete_word_right(
+        &mut self,
+        _: &actions::DeleteWordRight,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_selection() {
+            if self.delete_selection() {
+                self.did_change_content(cx);
+                cx.notify();
+            }
+            return;
+        }
+        self.delete_word_right(cx);
+        self.refresh_or_dismiss_completions_after_deletion(cx);
+    }
+
     fn handle_select_all(
         &mut self,
         _: &actions::SelectAll,
@@ -5587,6 +5831,7 @@ impl TextEditor {
             self.delete_before_cursor(window, cx);
         }
         self.mutate_selections(|core| core.collapse_primary_selection_to_cursor());
+        self.refresh_or_dismiss_completions_after_deletion(cx);
         cx.notify();
     }
 
@@ -5599,7 +5844,34 @@ impl TextEditor {
             self.delete_at_cursor(window, cx);
         }
         self.mutate_selections(|core| core.collapse_primary_selection_to_cursor());
+        self.refresh_or_dismiss_completions_after_deletion(cx);
         cx.notify();
+    }
+
+    /// After a deletion, an open completion menu either keeps filtering on the
+    /// shrunken word prefix or goes away once the prefix is gone. Deletion never
+    /// opens a closed menu.
+    fn refresh_or_dismiss_completions_after_deletion(&mut self, cx: &mut Context<Self>) {
+        if !self.lsp.has_completion_menu() {
+            return;
+        }
+        let CompletionQueryPlan { current_prefix, .. } = self
+            .editor_core_snapshot()
+            .completion_query_plan_with_extra_chars(
+                &self.syntax_capabilities.completion_word_chars,
+            );
+        if current_prefix.is_empty() {
+            self.lsp.clear_pending_completion();
+            self.lsp.clear_completion_menu();
+        } else {
+            self.trigger_completions_debounced(
+                lsp_types::CompletionContext {
+                    trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
+                },
+                cx,
+            );
+        }
     }
 
     fn handle_newline(
@@ -5608,14 +5880,18 @@ impl TextEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.overlays.has_inline_suggestion() {
-            self.accept_inline_suggestion(window, cx);
-            return;
-        }
-
+        // Enter accepts a completion the user explicitly navigated to, or an
+        // unambiguous single-item menu (nothing to navigate to). Otherwise it
+        // always inserts a newline — an uninvited multi-item menu must never
+        // steal the keystroke. Inline (ghost) suggestions are Tab-only.
         if self.lsp.has_completion_items() {
-            self.accept_completion(window, cx);
-            return;
+            if self.lsp.completion_menu_user_navigated()
+                || self.lsp.completion_menu_has_single_item()
+            {
+                self.accept_completion(window, cx);
+                return;
+            }
+            self.lsp.clear_completion_menu();
         }
         if self.has_selection() {
             self.delete_selection();
@@ -5630,13 +5906,20 @@ impl TextEditor {
     }
 
     fn handle_tab(&mut self, _: &actions::Tab, window: &mut Window, cx: &mut Context<Self>) {
+        // Tab is the universal accept key: completion menu first, then inline
+        // (ghost) suggestion, then snippet placeholder advance, then ordinary
+        // indentation.
+        if self.lsp.has_completion_items() {
+            self.accept_completion(window, cx);
+            return;
+        }
+
         if self.overlays.has_inline_suggestion() {
             self.accept_inline_suggestion(window, cx);
             return;
         }
 
-        if self.lsp.has_completion_items() {
-            self.accept_completion(window, cx);
+        if self.advance_snippet_placeholder(cx) {
             return;
         }
         // With a multi-line selection, Tab indents all selected lines rather than
@@ -5814,6 +6097,10 @@ impl TextEditor {
     }
 
     fn begin_non_extending_selection_action(&mut self) {
+        // Moving the cursor away invalidates the completion context; a menu
+        // left open here would later swallow Enter/Tab far from its word.
+        self.lsp.clear_pending_completion();
+        self.lsp.clear_completion_menu();
         self.mutate_selections(|core| core.begin_non_extending_selection_action());
     }
 
@@ -6485,12 +6772,33 @@ impl TextEditor {
         // Request focus so keyboard events are routed here.
         self.focus_handle.focus(window, cx);
 
+        // A click that lands in the text (not the menu) moves the cursor away
+        // from the completion context, so the menu must not linger.
+        self.lsp.clear_pending_completion();
+        self.lsp.clear_completion_menu();
+
         let line_height = self.input.line_height_or(window.line_height());
 
         // Mouse event positions are in window coordinates. Use the bounds origin
         // cached during the last prepaint to convert to element-relative coordinates.
         self.record_cursor_activity();
         let position = self.pixel_to_position(event.position, line_height);
+
+        // VSCode-style modifier clicks: alt+click adds a cursor, cmd+click
+        // jumps to the definition under the pointer.
+        if event.click_count == 1 && !event.modifiers.shift {
+            if event.modifiers.alt && !event.modifiers.platform && !event.modifiers.control {
+                self.mutate_selections(|core| core.add_cursor_at(position));
+                cx.notify();
+                return;
+            }
+            if event.modifiers.platform && !event.modifiers.alt && !event.modifiers.control {
+                if let Ok(offset) = self.document.position_to_offset(position) {
+                    self.go_to_definition_at_offset(offset, cx);
+                }
+                return;
+            }
+        }
 
         let now = std::time::Instant::now();
         let click_count =
@@ -6551,6 +6859,19 @@ impl TextEditor {
         let sensitivity = self.scroll.sensitivity();
         let scroll_delta_x = delta.x * sensitivity;
         let scroll_delta_y = delta.y * sensitivity;
+
+        // When the context menu is open, scroll its content instead of the buffer.
+        if self.overlays.has_context_menu() {
+            // Wheel deltas are positive toward the top; menu scroll grows downward.
+            if self.overlays.scroll_context_menu(
+                -f32::from(scroll_delta_y),
+                self.input.cached_layout(),
+                line_height,
+            ) {
+                cx.notify();
+            }
+            return;
+        }
 
         // When the completion menu is open, always capture scroll for the menu
         // regardless of pointer position. This prevents the confusing UX where
@@ -7349,13 +7670,26 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         let offset = self.cursor_byte_offset();
+        self.go_to_definition_at_offset(offset, cx);
+    }
+
+    fn go_to_definition_at_offset(&mut self, offset: usize, cx: &mut Context<Self>) {
         let rope = self.document.rope();
-        let Some(target_offset) = self
+        let Some(target) = self
             .lsp
             .definition_at(&rope, offset, &self.document.context())
         else {
             return;
         };
+
+        let target_offset = match target {
+            DefinitionTarget::InDocument(target_offset) => target_offset,
+            DefinitionTarget::External(uri) => {
+                cx.emit(TextEditorEvent::OpenExternalDefinition { uri });
+                return;
+            }
+        };
+
         if let Ok(pos) = self.document.offset_to_position(target_offset) {
             self.mutate_selections(|core| core.set_single_cursor(pos));
             // Also clear stale reference highlights since the cursor moved.
@@ -7441,6 +7775,7 @@ impl TextEditor {
                 case_sensitive: true,
                 whole_word,
                 regex: false,
+                preserve_case: false,
             },
         )
         .map(|engine| {
@@ -7717,9 +8052,9 @@ impl TextEditor {
     // ============================================================================
 
     /// Build the standard context menu items for the current editor state.
-    fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
+    fn build_context_menu_items(&self, window: &Window) -> Vec<ContextMenuItem> {
         let has_selection = self.has_selection();
-        vec![
+        let items = vec![
             ContextMenuItem::action("Cut", ContextMenuAction::Cut, !has_selection),
             ContextMenuItem::action("Copy", ContextMenuAction::Copy, !has_selection),
             ContextMenuItem::action("Paste", ContextMenuAction::Paste, false),
@@ -7799,7 +8134,19 @@ impl TextEditor {
                 ContextMenuAction::FormatSql,
                 !self.can_format_current_document(),
             ),
-        ]
+        ];
+
+        // Resolved in one place so a new entry cannot be added without its
+        // shortcut, and so a rebound key shows up without touching the list.
+        items
+            .into_iter()
+            .map(|item| {
+                let shortcut = item
+                    .action_kind()
+                    .and_then(|action| context_menu_shortcut(action, window));
+                item.with_shortcut(shortcut)
+            })
+            .collect()
     }
 
     /// Open the context menu at a specific pixel position.
@@ -7808,9 +8155,10 @@ impl TextEditor {
         x: f32,
         y: f32,
         highlighted: Option<usize>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let items = self.build_context_menu_items();
+        let items = self.build_context_menu_items(window);
         self.overlays.open_context_menu(items, x, y, highlighted);
         cx.notify();
     }
@@ -7819,7 +8167,7 @@ impl TextEditor {
     fn handle_open_context_menu_keyboard(
         &mut self,
         _: &actions::OpenContextMenu,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let cursor = self.current_cursor_position();
@@ -7833,7 +8181,7 @@ impl TextEditor {
         let (x, y) = self
             .input
             .window_point_to_local(gpui::point(anchor.x, anchor.y + line_height));
-        let items = self.build_context_menu_items();
+        let items = self.build_context_menu_items(window);
         let highlighted = ContextMenuState::first_actionable_index(&items);
         self.overlays.open_context_menu(items, x, y, highlighted);
         cx.notify();
@@ -7860,7 +8208,7 @@ impl TextEditor {
         // element-relative coords (the renderer adds bounds.origin back when
         // positioning the menu overlay).
         let (x, y) = self.input.window_point_to_local(event.position);
-        self.open_context_menu_at(x, y, None, cx);
+        self.open_context_menu_at(x, y, None, window, cx);
     }
 
     fn selection_contains_position(&self, position: Position) -> bool {
@@ -7869,8 +8217,11 @@ impl TextEditor {
     }
 
     /// Move the keyboard highlight up/down within the open context menu.
-    fn context_menu_move(&mut self, delta: i32, cx: &mut Context<Self>) {
+    fn context_menu_move(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlays.move_context_menu_highlight(delta) {
+            let line_height = self.input.line_height_or(window.line_height());
+            self.overlays
+                .ensure_context_menu_highlight_visible(self.input.cached_layout(), line_height);
             cx.notify();
         }
     }
@@ -7879,99 +8230,8 @@ impl TextEditor {
     fn context_menu_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let action = self.overlays.take_context_menu_highlighted_action();
         self.focus_handle.focus(window, cx);
-        match action {
-            Some(ContextMenuAction::Cut) => window.dispatch_action(actions::Cut.boxed_clone(), cx),
-            Some(ContextMenuAction::Copy) => {
-                window.dispatch_action(actions::Copy.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::Paste) => {
-                window.dispatch_action(actions::Paste.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::SelectAll) => {
-                window.dispatch_action(actions::SelectAll.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::Find) => {
-                window.dispatch_action(actions::OpenFind.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::FindReplace) => {
-                window.dispatch_action(actions::OpenFindReplace.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::SelectAllMatches) => {
-                window.dispatch_action(actions::FindSelectAllMatches.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::Complete) => {
-                window.dispatch_action(actions::TriggerCompletion.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::GoToDefinition) => {
-                window.dispatch_action(actions::GoToDefinition.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::FindReferences) => {
-                window.dispatch_action(actions::FindReferences.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::RenameSymbol) => {
-                window.dispatch_action(actions::RenameSymbol.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::GoToLine) => {
-                window.dispatch_action(actions::GoToLine.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::ToggleSoftWrap) => {
-                window.dispatch_action(actions::ToggleSoftWrap.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::FoldAll) => {
-                window.dispatch_action(actions::FoldAll.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::UnfoldAll) => {
-                window.dispatch_action(actions::UnfoldAll.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::DuplicateLineDown) => {
-                window.dispatch_action(actions::DuplicateLineDown.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::MoveLineUp) => {
-                window.dispatch_action(actions::MoveLineUp.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::MoveLineDown) => {
-                window.dispatch_action(actions::MoveLineDown.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::ToggleLineComment) => {
-                window.dispatch_action(actions::ToggleLineComment.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::ToggleBlockComment) => {
-                window.dispatch_action(actions::ToggleBlockComment.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::SortLinesAscending) => {
-                window.dispatch_action(actions::SortLinesAscending.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::UniqueLines) => {
-                window.dispatch_action(actions::UniqueLines.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::TransformUppercase) => {
-                window.dispatch_action(actions::TransformUppercase.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::TransformLowercase) => {
-                window.dispatch_action(actions::TransformLowercase.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::TransformTitleCase) => {
-                window.dispatch_action(actions::TransformTitleCase.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::TransformSnakeCase) => {
-                window.dispatch_action(actions::TransformSnakeCase.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::TransformCamelCase) => {
-                window.dispatch_action(actions::TransformCamelCase.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::TransformKebabCase) => {
-                window.dispatch_action(actions::TransformKebabCase.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::InsertUuidV4) => {
-                window.dispatch_action(actions::InsertUuidV4.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::InsertUuidV7) => {
-                window.dispatch_action(actions::InsertUuidV7.boxed_clone(), cx)
-            }
-            Some(ContextMenuAction::FormatSql) => {
-                window.dispatch_action(actions::FormatSQL.boxed_clone(), cx)
-            }
-            None => {}
+        if let Some(action) = action {
+            window.dispatch_action(context_menu_boxed_action(action), cx);
         }
         cx.notify();
     }
@@ -8112,6 +8372,11 @@ impl EntityInputHandler for TextEditor {
                     .completion_trigger_context(self.cursor_byte_offset(), new_text, cx)
             {
                 self.trigger_completions_debounced(trigger, cx);
+            } else {
+                // Typing a non-word character (space, comma, paren, …) ends the
+                // completion context — never leave a stale menu armed.
+                self.lsp.clear_pending_completion();
+                self.lsp.clear_completion_menu();
             }
             self.did_change_content(cx);
             cx.notify();
@@ -8130,6 +8395,9 @@ impl EntityInputHandler for TextEditor {
                 .completion_trigger_context(self.cursor_byte_offset(), new_text, cx)
         {
             self.trigger_completions_debounced(trigger, cx);
+        } else {
+            self.lsp.clear_pending_completion();
+            self.lsp.clear_completion_menu();
         }
 
         self.did_change_content(cx);
@@ -8194,8 +8462,36 @@ mod tests {
     use super::{
         CachedEditorLayout, DocumentSnapshot, EditorAppearance, EditorSnapshot,
         LargeFilePolicyConfig, LargeFilePolicyTier, ResolvedLargeFilePolicy,
-        expand_visible_syntax_refresh_range,
+        context_menu_boxed_action, expand_visible_syntax_refresh_range,
     };
+
+    #[gpui::test]
+    fn context_menu_entries_resolve_their_keybindings(cx: &mut gpui::TestAppContext) {
+        // The menu shows a shortcut per entry; if the action mapping and the
+        // keymap drift apart the entry silently loses its binding.
+        cx.update(crate::actions::init);
+
+        let cases = [
+            (crate::ContextMenuAction::Copy, "Copy"),
+            (crate::ContextMenuAction::GoToDefinition, "Go to Definition"),
+            (
+                crate::ContextMenuAction::ToggleLineComment,
+                "Toggle Line Comment",
+            ),
+        ];
+
+        cx.update(|cx| {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            for (action, label) in cases {
+                let boxed = context_menu_boxed_action(action);
+                assert!(
+                    keymap.bindings_for_action(boxed.as_ref()).next().is_some(),
+                    "{label} should have a keybinding to display"
+                );
+            }
+        });
+    }
     use crate::history_state::TransactionRecord;
     use crate::language_pipeline::{
         build_language_pipeline_snapshot, edited_line_range_from_changes,
@@ -9551,9 +9847,16 @@ mod tests {
             ..Default::default()
         };
 
-        let acceptance = TextEditor::completion_acceptance_for_item(&document, &item, 0, 3);
+        let acceptance = TextEditor::completion_acceptance_for_item(&document, &item, 0, 3, true);
 
         assert_eq!(acceptance.replacement_range, 0..6);
+        assert_eq!(acceptance.inserted_text, "select");
+
+        // With stale ranges (buffer changed since items were produced) the
+        // text_edit range must be ignored in favor of the live word prefix.
+        let acceptance = TextEditor::completion_acceptance_for_item(&document, &item, 0, 3, false);
+
+        assert_eq!(acceptance.replacement_range, 0..3);
         assert_eq!(acceptance.inserted_text, "select");
     }
 
@@ -10830,5 +11133,253 @@ mod tests {
         reversed.reverse();
         assert_eq!(reversed[0].buffer_line, 2);
         assert_eq!(reversed[1].buffer_line, 0);
+    }
+
+    // ========================================================================
+    // Keystroke dispatch tests — these simulate real key events through GPUI's
+    // binding/action pipeline, so they catch broken or shadowed keybindings,
+    // not just broken handler logic.
+    // ========================================================================
+
+    fn build_focused_editor<'a>(
+        text: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (gpui::Entity<TextEditor>, &'a mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            zqlz_ui::widgets::theme::init(cx);
+            crate::actions::init(cx);
+        });
+        let (editor, cx) = cx.add_window_view(|window, cx| {
+            let mut editor = TextEditor::new(window, cx);
+            editor.set_text(text.to_string(), window, cx);
+            editor
+        });
+        editor.update_in(cx, |editor, window, cx| {
+            editor.focus_handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+        (editor, cx)
+    }
+
+    #[gpui::test]
+    fn test_alt_arrow_keystrokes_move_by_word(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("select first_name from users", cx);
+
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.current_cursor_offset()),
+            0
+        );
+
+        cx.simulate_keystrokes("alt-right");
+        let after_right = editor.read_with(cx, |editor, _| editor.current_cursor_offset());
+        assert!(
+            after_right > 0,
+            "alt-right did not move the cursor (binding dead or shadowed)"
+        );
+
+        cx.simulate_keystrokes("alt-left");
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.current_cursor_offset()),
+            0,
+            "alt-left did not move the cursor back to the word start"
+        );
+    }
+
+    #[gpui::test]
+    fn test_alt_backspace_deletes_word(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("select first_name", cx);
+
+        editor.update(cx, |editor, _| {
+            editor.mutate_selections(|core| {
+                core.move_primary_cursor_to_document_end_with_selection(false)
+            });
+        });
+
+        cx.simulate_keystrokes("alt-backspace");
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "select ",
+            "alt-backspace should delete the word before the cursor"
+        );
+    }
+
+    #[gpui::test]
+    fn test_alt_up_moves_line_up(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("first\nsecond", cx);
+
+        editor.update(cx, |editor, _| {
+            editor.mutate_selections(|core| {
+                core.move_primary_cursor_to_document_end_with_selection(false)
+            });
+        });
+
+        cx.simulate_keystrokes("alt-up");
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "second\nfirst",
+            "alt-up should swap the current line with the one above"
+        );
+    }
+
+    #[gpui::test]
+    fn test_enter_inserts_newline_when_menu_not_navigated(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("sel", cx);
+
+        editor.update(cx, |editor, _| {
+            editor.mutate_selections(|core| {
+                core.move_primary_cursor_to_document_end_with_selection(false)
+            });
+            let revision = editor.document.buffer_revision();
+            editor.lsp.set_completion_items(
+                vec![
+                    lsp_types::CompletionItem {
+                        label: "select".to_string(),
+                        ..Default::default()
+                    },
+                    lsp_types::CompletionItem {
+                        label: "self".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                0,
+                revision,
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        let text = editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string());
+        assert_eq!(
+            text, "sel\n",
+            "enter must insert a newline when an ambiguous (multi-item) menu was never navigated"
+        );
+        assert!(
+            !editor.read_with(cx, |editor, _| editor.lsp.has_completion_menu()),
+            "the un-navigated menu must be dismissed by enter"
+        );
+    }
+
+    #[gpui::test]
+    fn test_enter_accepts_single_completion_without_navigation(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("sel", cx);
+
+        editor.update(cx, |editor, _| {
+            editor.mutate_selections(|core| {
+                core.move_primary_cursor_to_document_end_with_selection(false)
+            });
+            let revision = editor.document.buffer_revision();
+            editor.lsp.set_completion_items(
+                vec![lsp_types::CompletionItem {
+                    label: "select".to_string(),
+                    ..Default::default()
+                }],
+                0,
+                revision,
+            );
+        });
+
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "select",
+            "enter must accept an unambiguous single-item completion without navigation"
+        );
+    }
+
+    #[gpui::test]
+    fn test_enter_accepts_completion_after_navigation(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("sel", cx);
+
+        editor.update(cx, |editor, _| {
+            editor.mutate_selections(|core| {
+                core.move_primary_cursor_to_document_end_with_selection(false)
+            });
+            let revision = editor.document.buffer_revision();
+            editor.lsp.set_completion_items(
+                vec![lsp_types::CompletionItem {
+                    label: "select".to_string(),
+                    ..Default::default()
+                }],
+                0,
+                revision,
+            );
+        });
+
+        cx.simulate_keystrokes("down enter");
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "select",
+            "enter after arrow navigation must accept the highlighted completion"
+        );
+    }
+
+    #[gpui::test]
+    fn test_tab_accepts_completion_without_navigation(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("sel", cx);
+
+        editor.update(cx, |editor, _| {
+            editor.mutate_selections(|core| {
+                core.move_primary_cursor_to_document_end_with_selection(false)
+            });
+            let revision = editor.document.buffer_revision();
+            editor.lsp.set_completion_items(
+                vec![lsp_types::CompletionItem {
+                    label: "select".to_string(),
+                    ..Default::default()
+                }],
+                0,
+                revision,
+            );
+        });
+
+        cx.simulate_keystrokes("tab");
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "select",
+            "tab must accept the top completion immediately"
+        );
+    }
+
+    #[gpui::test]
+    fn test_prepare_for_save_trims_whitespace_and_adds_final_newline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (editor, cx) = build_focused_editor("select 1;   \nfrom x\t", cx);
+
+        editor.update(cx, |editor, cx| editor.prepare_for_save(cx));
+
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "select 1;\nfrom x\n",
+        );
+
+        editor.update(cx, |editor, cx| editor.prepare_for_save(cx));
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.get_text(cx).to_string()),
+            "select 1;\nfrom x\n",
+            "prepare_for_save must be idempotent"
+        );
+    }
+
+    #[gpui::test]
+    fn test_cursor_movement_dismisses_completion_menu(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = build_focused_editor("sel", cx);
+
+        editor.update(cx, |editor, _| {
+            let revision = editor.document.buffer_revision();
+            editor.lsp.set_completion_items(
+                vec![lsp_types::CompletionItem {
+                    label: "select".to_string(),
+                    ..Default::default()
+                }],
+                0,
+                revision,
+            );
+        });
+
+        cx.simulate_keystrokes("left");
+        assert!(
+            !editor.read_with(cx, |editor, _| editor.lsp.has_completion_menu()),
+            "moving the cursor must dismiss the completion menu"
+        );
     }
 }

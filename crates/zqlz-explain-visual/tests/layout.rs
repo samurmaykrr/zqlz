@@ -27,7 +27,7 @@ fn layout_for_multijoin_plan_keeps_depth_and_branches_readable() {
 }
 
 #[test]
-fn cost_percent_and_threshold_classification_work() {
+fn cost_highlight_points_at_the_expensive_node_not_the_root() {
     let analysis = QueryAnalysis::new(QueryPlan::new(sample_plan()));
     let graph = ExplainGraph::from_analysis(&analysis);
     let root = graph.nodes().first().expect("root");
@@ -36,11 +36,84 @@ fn cost_percent_and_threshold_classification_work() {
         .iter()
         .find(|node| node.display_label() == "products")
         .expect("products");
+    let order_items_scan = graph
+        .nodes()
+        .iter()
+        .find(|node| node.display_label() == "order_items")
+        .expect("order_items");
 
+    // Cumulative cost still puts the root at 100%, which is exactly why the
+    // highlight must not use it.
     assert_eq!(root.cost_percent(graph.root_total_cost()), 1.0);
-    assert!(root.exceeds_threshold(graph.root_total_cost()));
+    assert!(root.self_cost_percent(graph.root_total_cost()) < 0.01);
+    assert!(!root.exceeds_threshold(graph.root_total_cost()));
+
     assert!(product_scan.cost_percent(graph.root_total_cost()) < 0.01);
     assert!(!product_scan.exceeds_threshold(graph.root_total_cost()));
+
+    assert!(order_items_scan.exceeds_threshold(graph.root_total_cost()));
+
+    let highlighted = graph
+        .nodes()
+        .iter()
+        .filter(|node| node.exceeds_threshold(graph.root_total_cost()))
+        .count();
+    assert_eq!(highlighted, 1);
+}
+
+#[test]
+fn nodes_render_the_postgres_node_type_as_their_primary_label() {
+    let analysis = QueryAnalysis::new(QueryPlan::new(sample_plan()));
+    let graph = ExplainGraph::from_analysis(&analysis);
+
+    let order_items_scan = graph
+        .nodes()
+        .iter()
+        .find(|node| node.display_label() == "order_items")
+        .expect("order_items");
+    assert_eq!(order_items_scan.short_name(), "Seq Scan");
+    assert_eq!(
+        order_items_scan.secondary_label().as_deref(),
+        Some("order_items")
+    );
+
+    let hash = graph
+        .nodes()
+        .iter()
+        .find(|node| node.short_name() == "Hash")
+        .expect("hash");
+    assert_eq!(hash.secondary_label(), None);
+
+    assert!(
+        graph
+            .nodes()
+            .iter()
+            .any(|node| node.short_name() == "Index Scan")
+    );
+}
+
+#[test]
+fn row_label_contrasts_estimate_with_actual_when_analyze_data_is_present() {
+    let mut estimate_only = PlanNode::new(NodeType::SeqScan)
+        .with_relation("events")
+        .with_cost(0.0, 100.0)
+        .with_rows(2_000_000);
+    estimate_only.filter = Some("(status = 'open')".to_string());
+
+    let graph = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(
+        estimate_only.clone(),
+    )));
+    let node = graph.nodes().first().expect("root");
+    assert_eq!(node.rows_label().as_deref(), Some("2.0M rows"));
+
+    let mut analyzed = estimate_only;
+    analyzed.actual_rows = Some(12);
+    analyzed.rows_removed_by_filter = Some(2_000_000);
+
+    let graph = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(analyzed)));
+    let node = graph.nodes().first().expect("root");
+    assert_eq!(node.rows_label().as_deref(), Some("est 2.0M / act 12"));
+    assert!(node.copy_payload().contains("Rows Removed by Filter: 2.0M"));
 }
 
 #[test]

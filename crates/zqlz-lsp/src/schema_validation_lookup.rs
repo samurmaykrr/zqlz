@@ -83,7 +83,25 @@ pub(crate) fn schema_table_name<'a>(
     schema
         .tables
         .keys()
-        .find(|name| name.eq_ignore_ascii_case(&lookup_key))
+        .find(|name| table_name_matches(name, &lookup_key))
+}
+
+/// Compares a schema-cache key against an unqualified lookup key.
+///
+/// Cache keys may be stored schema-qualified (e.g. `"public.users"`, when the
+/// driver was queried across all schemas) or unqualified (e.g. `"users"`, when
+/// queried within a single schema) depending on the driver/scope that
+/// populated the cache. `object_name_lookup_key` always reduces the AST
+/// reference to its unqualified base name, so the cache side must be reduced
+/// the same way before comparing.
+fn table_name_matches(cache_key: &str, lookup_key: &str) -> bool {
+    if cache_key.eq_ignore_ascii_case(lookup_key) {
+        return true;
+    }
+    cache_key
+        .rsplit_once('.')
+        .map(|(_, name)| name.eq_ignore_ascii_case(lookup_key))
+        .unwrap_or(false)
 }
 
 pub(crate) fn schema_column_names(
@@ -113,7 +131,7 @@ pub(crate) fn schema_columns_for_table_name<'a>(
     schema
         .columns_by_table
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(table_name))
+        .find(|(name, _)| table_name_matches(name, table_name))
         .map(|(_, columns)| columns)
 }
 

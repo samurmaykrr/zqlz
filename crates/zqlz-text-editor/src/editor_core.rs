@@ -360,6 +360,14 @@ impl<'a> EditorCoreSnapshot<'a> {
         self.with_core(|core| core.delete_subword_right_edit_batch())
     }
 
+    pub fn delete_word_left_edit_batch(self) -> Option<PlannedEditBatch> {
+        self.with_core(|core| core.delete_word_left_edit_batch())
+    }
+
+    pub fn delete_word_right_edit_batch(self) -> Option<PlannedEditBatch> {
+        self.with_core(|core| core.delete_word_right_edit_batch())
+    }
+
     pub fn primary_selection_deletion_edit_batch(self) -> Option<PlannedEditBatch> {
         self.with_core(|core| core.primary_selection_deletion_edit_batch())
     }
@@ -1662,6 +1670,25 @@ impl<'a> EditorCore<'a> {
         true
     }
 
+    /// Add an extra cursor at an arbitrary position (alt+click), clamped to
+    /// the buffer.
+    pub fn add_cursor_at(&mut self, position: Position) -> bool {
+        let line_count = self.buffer.line_count();
+        if line_count == 0 {
+            return false;
+        }
+        let line = position.line.min(line_count - 1);
+        let line_length = self
+            .buffer
+            .line(line)
+            .map(|text| text.trim_end_matches(['\n', '\r']).len())
+            .unwrap_or(0);
+        let clamped = Position::new(line, position.column.min(line_length));
+        self.add_extra_cursor(clamped, None);
+        self.normalize_extra_cursors();
+        true
+    }
+
     pub fn add_cursor_below(&mut self) -> bool {
         let line_count = self.buffer.line_count();
         let bottom_line = {
@@ -2372,7 +2399,15 @@ impl<'a> EditorCore<'a> {
             .buffer
             .position_to_offset(Position::new(block.first_line - 1, 0))
             .ok()?;
-        let replacement = format!("{}{}", self.selected_line_block_text()?, above_line);
+        // `line()` includes the trailing newline. When the block is the last
+        // line it has none, so a separator must be inserted and the above
+        // line's newline dropped to keep the buffer free of a trailing one.
+        let block_text = self.selected_line_block_text()?;
+        let replacement = if block.has_trailing_newline {
+            format!("{}{}", block_text, above_line)
+        } else {
+            format!("{}\n{}", block_text, above_line.trim_end_matches(['\n', '\r']))
+        };
         let target_line = self.cursor.position().line.saturating_sub(1);
         let target_column = self.cursor.position().column.min(
             self.buffer
@@ -2400,9 +2435,16 @@ impl<'a> EditorCore<'a> {
             .buffer
             .position_to_offset(Position::new(block.last_line + 1, below_line.len()))
             .ok()?;
+        // `line()` includes the trailing newline, so normalize both pieces and
+        // restore a trailing newline only if the swapped region had one. The
+        // previous formulation doubled the below line's newline mid-buffer.
         let block_text = self.selected_line_block_text()?;
-        let mut replacement = format!("{}\n{}", below_line, block_text.trim_end_matches('\n'));
-        if block.has_trailing_newline {
+        let mut replacement = format!(
+            "{}\n{}",
+            below_line.trim_end_matches(['\n', '\r']),
+            block_text.trim_end_matches('\n')
+        );
+        if below_line.ends_with('\n') {
             replacement.push('\n');
         }
         let target_line =
@@ -3287,6 +3329,64 @@ impl<'a> EditorCore<'a> {
 
     pub fn delete_subword_right_edit_batch(&self) -> Option<PlannedEditBatch> {
         let plan = self.delete_subword_right_plan()?;
+        Some(PlannedEditBatch {
+            edits: vec![TextReplacementEdit {
+                range: plan.range,
+                replacement: String::new(),
+            }],
+            post_apply_selection: PostApplySelection::MovePrimaryCursorToOffset(plan.target_offset),
+        })
+    }
+
+    pub fn delete_word_left_plan(&self) -> Option<DeleteSubwordPlan> {
+        let offset = self
+            .buffer
+            .position_to_offset(self.cursor.position())
+            .ok()?;
+        let mut cursor = self.cursor.clone();
+        cursor.move_to_prev_word_start(self.buffer);
+        let start = self.buffer.position_to_offset(cursor.position()).ok()?;
+        if start >= offset {
+            return None;
+        }
+
+        Some(DeleteSubwordPlan {
+            range: start..offset,
+            target_offset: start,
+        })
+    }
+
+    pub fn delete_word_left_edit_batch(&self) -> Option<PlannedEditBatch> {
+        let plan = self.delete_word_left_plan()?;
+        Some(PlannedEditBatch {
+            edits: vec![TextReplacementEdit {
+                range: plan.range,
+                replacement: String::new(),
+            }],
+            post_apply_selection: PostApplySelection::MovePrimaryCursorToOffset(plan.target_offset),
+        })
+    }
+
+    pub fn delete_word_right_plan(&self) -> Option<DeleteSubwordPlan> {
+        let offset = self
+            .buffer
+            .position_to_offset(self.cursor.position())
+            .ok()?;
+        let mut cursor = self.cursor.clone();
+        cursor.move_to_next_word_start(self.buffer);
+        let end = self.buffer.position_to_offset(cursor.position()).ok()?;
+        if end <= offset {
+            return None;
+        }
+
+        Some(DeleteSubwordPlan {
+            range: offset..end,
+            target_offset: offset,
+        })
+    }
+
+    pub fn delete_word_right_edit_batch(&self) -> Option<PlannedEditBatch> {
+        let plan = self.delete_word_right_plan()?;
         Some(PlannedEditBatch {
             edits: vec![TextReplacementEdit {
                 range: plan.range,
@@ -5801,7 +5901,7 @@ mod tests {
             core.move_selected_lines_down_plan(),
             Some(MoveSelectedLinesPlan {
                 byte_range: 5..18,
-                replacement: "three\none\ntwo\n".to_string(),
+                replacement: "three\none\ntwo".to_string(),
                 target_line: 2,
                 target_position: Position::new(2, 2),
             })
@@ -5870,7 +5970,7 @@ mod tests {
                 .move_selected_lines_down_plan(),
             Some(MoveSelectedLinesPlan {
                 byte_range: 5..18,
-                replacement: "three\none\ntwo\n".to_string(),
+                replacement: "three\none\ntwo".to_string(),
                 target_line: 2,
                 target_position: Position::new(2, 2),
             })

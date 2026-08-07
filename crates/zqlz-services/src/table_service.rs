@@ -5,8 +5,10 @@
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::{
-    CellUpdateRequest, Connection, DatabaseObject, DriverCategory, DropTableOptions, ObjectType,
-    QueryResult, RowIdentifier, SqlObjectName, Value,
+    AffectedRowCountFidelity, CellUpdateRequest, Connection, DatabaseObject, DriverCategory,
+    DropTableOptions, ObjectType, QueryResult, RowIdentifier, RowIdentity, RowIdentityColumn,
+    SchemaIntrospection, SingleRowDmlScope, SqlNumericKind, SqlObjectName, SqlTypeFamily,
+    SqlTypeInfo, Value, resolve_row_identity, unique_key_candidates,
 };
 pub use zqlz_table_workflows::{
     decide_delete_tables, decide_design_tables, decide_duplicate_tables, decide_empty_tables,
@@ -20,6 +22,19 @@ pub use zqlz_table_workflows::{
 use crate::error::{ServiceError, ServiceResult};
 use crate::schema_service::SchemaService;
 use crate::view_models::TableDetails;
+
+/// Qualify a table name with the namespace the caller is browsing.
+///
+/// Statements built from a bare name resolve against the connection's current
+/// session database, which is not necessarily the database the object was listed
+/// from — for destructive statements that means dropping or truncating the wrong
+/// table.
+fn qualified_object_name(namespace: Option<&str>, name: &str) -> SqlObjectName {
+    match namespace {
+        Some(namespace) if !namespace.is_empty() => SqlObjectName::with_namespace(namespace, name),
+        _ => SqlObjectName::new(name),
+    }
+}
 
 /// Determine whether table browsing should degrade to schema-only mode when
 /// the driver declares that metadata can still be shown after a browse error.
@@ -99,6 +114,8 @@ pub struct OpenViewerSchemaViewerMetadata {
     pub foreign_keys_for_viewer: Vec<zqlz_core::ForeignKeyInfo>,
     pub schema_columns: Vec<crate::view_models::ColumnInfo>,
     pub primary_key_columns: Vec<String>,
+    /// Columns the viewer matches on when a row is edited or deleted.
+    pub row_identity: RowIdentity,
 }
 
 /// Service-layer outcome for open-viewer initial load.
@@ -169,10 +186,27 @@ pub fn build_open_viewer_schema_viewer_metadata(
         })
         .collect();
 
+    let identity_columns: Vec<RowIdentityColumn<'_>> = schema_load
+        .table_details
+        .columns
+        .iter()
+        .map(|column| RowIdentityColumn {
+            name: column.name.as_str(),
+            nullable: column.nullable,
+        })
+        .collect();
+
     OpenViewerSchemaViewerMetadata {
         foreign_keys_for_viewer,
         schema_columns: schema_load.table_details.columns.clone(),
         primary_key_columns: schema_load.table_details.primary_key_columns.clone(),
+        row_identity: resolve_row_identity(
+            schema_load.table_details.table_type,
+            &identity_columns,
+            &schema_load.table_details.primary_key_columns,
+            &schema_load.table_details.constraints,
+            &schema_load.table_details.indexes,
+        ),
     }
 }
 
@@ -341,7 +375,10 @@ impl TableService {
         if !is_view {
             if let Ok(tables) = schema_introspection.list_tables(schema).await {
                 if let Some(table) = tables.iter().find(|table| table.name == table_name) {
-                    return ResolvedRelationName::new(table.name.clone(), table.schema.clone());
+                    return ResolvedRelationName::new(
+                        relation_display_name(&table.name, table_name),
+                        table.schema.clone(),
+                    );
                 }
 
                 let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
@@ -363,7 +400,10 @@ impl TableService {
 
         if let Ok(views) = schema_introspection.list_views(schema).await {
             if let Some(view) = views.iter().find(|view| view.name == table_name) {
-                return ResolvedRelationName::new(view.name.clone(), view.schema.clone());
+                return ResolvedRelationName::new(
+                    relation_display_name(&view.name, table_name),
+                    view.schema.clone(),
+                );
             }
 
             let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
@@ -385,7 +425,10 @@ impl TableService {
         if connection.supports_materialized_views() {
             if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
                 if let Some(view) = views.iter().find(|view| view.name == table_name) {
-                    return ResolvedRelationName::new(view.name.clone(), view.schema.clone());
+                    return ResolvedRelationName::new(
+                        relation_display_name(&view.name, table_name),
+                        view.schema.clone(),
+                    );
                 }
 
                 let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
@@ -1108,7 +1151,7 @@ impl TableService {
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the update succeeds
+    /// A [`CellUpdateOutcome`] if the update succeeds
     #[tracing::instrument(skip(self, connection, cell_data), fields(table_name = %table_name))]
     pub async fn update_cell(
         &self,
@@ -1116,7 +1159,34 @@ impl TableService {
         table_name: &str,
         schema: Option<&str>,
         cell_data: CellUpdateData,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<CellUpdateOutcome> {
+        self.update_cell_inner(connection, table_name, schema, cell_data, true)
+            .await
+    }
+
+    /// Update a cell without re-reading the stored value.
+    ///
+    /// For callers that refresh the whole table afterwards, the per-cell
+    /// read-back is redundant and would add one round trip per cell.
+    pub async fn update_cell_without_read_back(
+        &self,
+        connection: Arc<dyn Connection>,
+        table_name: &str,
+        schema: Option<&str>,
+        cell_data: CellUpdateData,
+    ) -> ServiceResult<CellUpdateOutcome> {
+        self.update_cell_inner(connection, table_name, schema, cell_data, false)
+            .await
+    }
+
+    async fn update_cell_inner(
+        &self,
+        connection: Arc<dyn Connection>,
+        table_name: &str,
+        schema: Option<&str>,
+        cell_data: CellUpdateData,
+        read_back: bool,
+    ) -> ServiceResult<CellUpdateOutcome> {
         Self::ensure_relational_connection(connection.as_ref())?;
         tracing::debug!("Updating cell in table {}", table_name);
         let relation = self
@@ -1152,7 +1222,7 @@ impl TableService {
                 .zip(cell_data.all_column_types.iter().cloned())
                 .collect(),
             new_value,
-            row_identifier,
+            row_identifier: row_identifier.clone(),
         };
 
         let affected_rows = connection
@@ -1160,24 +1230,111 @@ impl TableService {
             .await
             .map_err(|e| ServiceError::UpdateFailed(e.to_string()))?;
 
-        if affected_rows == 0 {
-            return Err(ServiceError::UpdateFailed(
-                "No rows matched - the row may have been modified or deleted by another user"
+        // A zero count only proves the row is gone on drivers that report matched
+        // rows. Treating it as failure elsewhere turns a harmless no-op update into
+        // a phantom "modified by another user" error.
+        let unconfirmed_reason = match connection.affected_row_count_fidelity() {
+            AffectedRowCountFidelity::Exact if affected_rows == 0 => {
+                return Err(ServiceError::UpdateFailed(
+                    "No rows matched - the row may have been modified or deleted by another user"
+                        .to_string(),
+                ));
+            }
+            AffectedRowCountFidelity::Exact => None,
+            AffectedRowCountFidelity::BestEffort if affected_rows == 0 => Some(
+                "The database did not report a row count for this update, so the change could not be confirmed."
                     .to_string(),
-            ));
-        }
+            ),
+            AffectedRowCountFidelity::BestEffort => None,
+            AffectedRowCountFidelity::Unavailable => Some(format!(
+                "{} does not report update row counts, so the change could not be confirmed.",
+                connection.driver_name()
+            )),
+        };
+
+        let stored_value = if read_back {
+            self.read_back_cell(
+                connection.as_ref(),
+                &relation,
+                &cell_data.column_name,
+                &row_identifier,
+            )
+            .await
+        } else {
+            None
+        };
 
         tracing::info!(
             table_name = %table_name,
             column = %cell_data.column_name,
             affected_rows = affected_rows,
+            unconfirmed = unconfirmed_reason.is_some(),
             "Cell updated successfully"
         );
 
-        Ok(())
+        Ok(CellUpdateOutcome {
+            affected_rows,
+            unconfirmed_reason,
+            stored_value,
+        })
     }
 
-    /// Build row identifier (prefer primary key, fallback to full row)
+    /// Re-read the column that was just written so callers can show what the
+    /// database actually stored rather than what the client sent.
+    ///
+    /// Databases silently adjust values on write — rounding a DECIMAL to its
+    /// declared scale, truncating a VARCHAR, coercing a type — and without this
+    /// the grid would keep displaying the typed value indefinitely.
+    ///
+    /// Returns `None` (never an error) when the value cannot be re-read: the
+    /// write itself already succeeded, so a failed confirmation must not fail
+    /// the update.
+    async fn read_back_cell(
+        &self,
+        connection: &dyn Connection,
+        relation: &ResolvedRelationName,
+        column_name: &str,
+        row_identifier: &RowIdentifier,
+    ) -> Option<Value> {
+        // A FullRow identifier matches on the pre-update value of the column we
+        // just changed, so it would select nothing after the write.
+        if !matches!(row_identifier, RowIdentifier::PrimaryKey(_)) {
+            return None;
+        }
+
+        let (where_clause, params) = self
+            .build_where_clause(connection, row_identifier)
+            .map_err(|error| {
+                tracing::warn!("Could not build cell read-back query: {}", error);
+                error
+            })
+            .ok()?;
+
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {}",
+            connection.quote_identifier(column_name),
+            Self::qualified_relation_name(connection, relation),
+            where_clause
+        );
+
+        match connection.query(&sql, &params).await {
+            Ok(result) => result
+                .rows
+                .first()
+                .and_then(|row| row.values.first())
+                .cloned(),
+            Err(error) => {
+                tracing::warn!(
+                    column = %column_name,
+                    "Cell update succeeded but the stored value could not be read back: {}",
+                    error
+                );
+                None
+            }
+        }
+    }
+
+    /// Build row identifier (prefer primary key, then a unique key, then the full row)
     async fn build_row_identifier(
         &self,
         connection: Arc<dyn Connection>,
@@ -1188,51 +1345,41 @@ impl TableService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        // Try to use primary key
         if let Ok(Some(pk_info)) = schema
             .get_primary_key(relation.schema_ref(), &relation.table_name)
             .await
         {
-            let mut pk_values = Vec::with_capacity(pk_info.columns.len());
-            let mut has_complete_primary_key = true;
-
-            for pk_col in &pk_info.columns {
-                let Some(idx) = cell_data
-                    .all_column_names
-                    .iter()
-                    .position(|col| col == pk_col)
-                else {
-                    has_complete_primary_key = false;
-                    break;
-                };
-
-                let Some(value) = cell_data.all_row_values.get(idx).cloned() else {
-                    has_complete_primary_key = false;
-                    break;
-                };
-
-                let col_type = cell_data.all_column_types.get(idx).map(|s| s.as_str());
-                let value = match value {
-                    Value::String(text) => self.parse_value(&text, col_type)?,
-                    other => other,
-                };
-
-                if value.is_null() {
-                    has_complete_primary_key = false;
-                    break;
-                }
-
-                pk_values.push((pk_col.clone(), value));
-            }
-
-            if has_complete_primary_key && pk_values.len() == pk_info.columns.len() {
+            if let Some(key_values) = self.key_values_for_row(
+                &pk_info.columns,
+                &cell_data.all_column_names,
+                &cell_data.all_row_values,
+                &cell_data.all_column_types,
+            )? {
                 tracing::debug!("Using primary key for row identification");
-                return Ok(RowIdentifier::PrimaryKey(pk_values));
+                return Ok(RowIdentifier::PrimaryKey(key_values));
             }
         }
 
-        // Fallback: use all columns
-        tracing::debug!("Using full row for row identification (no primary key available)");
+        // A unique key identifies the row just as precisely as a primary key,
+        // and keeps the statement off every other column of the row.
+        for (key_name, key_columns) in self.unique_keys_for_relation(schema, relation).await {
+            if let Some(key_values) = self.key_values_for_row(
+                &key_columns,
+                &cell_data.all_column_names,
+                &cell_data.all_row_values,
+                &cell_data.all_column_types,
+            )? {
+                tracing::debug!(
+                    unique_key = %key_name,
+                    "Using unique key for row identification"
+                );
+                return Ok(RowIdentifier::PrimaryKey(key_values));
+            }
+        }
+
+        // Fallback: use all columns. Drivers narrow this to a single row so
+        // duplicate rows are not written together.
+        tracing::debug!("Using full row for row identification (no key available)");
         let row_values: Vec<(String, Value)> = cell_data
             .all_column_names
             .iter()
@@ -1249,6 +1396,69 @@ impl TableService {
             .collect::<ServiceResult<Vec<_>>>()?;
 
         Ok(RowIdentifier::FullRow(row_values))
+    }
+
+    /// Unique keys of a relation that could identify one of its rows, narrowest
+    /// first. Returns nothing when the metadata cannot be read, so callers fall
+    /// back to matching on all columns.
+    async fn unique_keys_for_relation(
+        &self,
+        schema: &dyn SchemaIntrospection,
+        relation: &ResolvedRelationName,
+    ) -> Vec<(String, Vec<String>)> {
+        let constraints = schema
+            .get_constraints(relation.schema_ref(), &relation.table_name)
+            .await
+            .unwrap_or_default();
+        let indexes = schema
+            .get_indexes(relation.schema_ref(), &relation.table_name)
+            .await
+            .unwrap_or_default();
+
+        unique_key_candidates(&constraints, &indexes)
+    }
+
+    /// The key's value in this row, or `None` when the key cannot address it.
+    ///
+    /// A key column missing from the row, or NULL in it, identifies nothing:
+    /// NULL never compares equal to itself, so such a key would match no row.
+    fn key_values_for_row(
+        &self,
+        key_columns: &[String],
+        column_names: &[String],
+        row_values: &[Value],
+        column_types: &[String],
+    ) -> ServiceResult<Option<Vec<(String, Value)>>> {
+        if key_columns.is_empty() {
+            return Ok(None);
+        }
+
+        let mut key_values = Vec::with_capacity(key_columns.len());
+        for key_column in key_columns {
+            let Some(index) = column_names.iter().position(|col| col == key_column) else {
+                return Ok(None);
+            };
+            let Some(value) = row_values.get(index).cloned() else {
+                return Ok(None);
+            };
+
+            // Without a declared type there is nothing to parse against, and
+            // guessing would risk turning a text key into a number.
+            let value = match (value, column_types.get(index)) {
+                (Value::String(text), Some(column_type)) => {
+                    self.parse_value(&text, Some(column_type.as_str()))?
+                }
+                (other, _) => other,
+            };
+
+            if value.is_null() {
+                return Ok(None);
+            }
+
+            key_values.push((key_column.clone(), value));
+        }
+
+        Ok(Some(key_values))
     }
 
     /// Parse string value to typed Value
@@ -1294,14 +1504,20 @@ impl TableService {
     }
 
     /// Parse a value string using the known database column type
+    ///
+    /// Dispatches on [`SqlTypeInfo`], which strips length/precision modifiers so
+    /// that declarations like `decimal(12,4)` and `varchar(255)` classify the
+    /// same as their bare forms. Matching on the raw type name would miss them
+    /// and silently fall through to the string catch-all.
     fn parse_value_with_type(&self, value_str: &str, column_type: &str) -> ServiceResult<Value> {
         let col_type = Value::normalize_data_type(column_type);
+        let type_info = SqlTypeInfo::from_data_type(column_type);
 
-        if Value::array_element_type(&col_type).is_some() {
+        if type_info.is_array {
             return Ok(Value::parse_from_string(value_str, &col_type));
         }
 
-        if matches!(col_type.as_str(), "json" | "jsonb") {
+        if matches!(type_info.base_type.as_str(), "json" | "jsonb") {
             return match Value::parse_from_string(value_str, &col_type) {
                 Value::Json(value) => Ok(Value::Json(value)),
                 _ => Err(ServiceError::InvalidValue(format!(
@@ -1311,15 +1527,13 @@ impl TableService {
             };
         }
 
-        if col_type == "set" {
+        if type_info.base_type == "set" {
             return Ok(Value::parse_from_string(value_str, &col_type));
         }
 
-        if Self::is_string_type(&col_type) {
-            return Ok(Value::String(value_str.to_string()));
-        }
-
-        if Self::is_boolean_type(&col_type) {
+        // Checked before the numeric kinds so MySQL's `tinyint(1)` stays boolean
+        // rather than classifying as a small integer.
+        if type_info.family == SqlTypeFamily::Boolean {
             return match value_str.to_lowercase().as_str() {
                 "true" | "t" | "1" | "yes" => Ok(Value::Bool(true)),
                 "false" | "f" | "0" | "no" => Ok(Value::Bool(false)),
@@ -1327,84 +1541,38 @@ impl TableService {
             };
         }
 
-        if Self::is_integer_type(&col_type) {
-            if let Ok(val) = value_str.parse::<i64>() {
-                if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
-                    return Ok(Value::Int32(val as i32));
+        if matches!(type_info.family, SqlTypeFamily::Text | SqlTypeFamily::Enum) {
+            return Ok(Value::String(value_str.to_string()));
+        }
+
+        match type_info.numeric_kind {
+            Some(SqlNumericKind::Integer) => {
+                if let Ok(val) = value_str.parse::<i64>() {
+                    if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+                        return Ok(Value::Int32(val as i32));
+                    }
+                    return Ok(Value::Int64(val));
                 }
-                return Ok(Value::Int64(val));
+                Ok(Value::String(value_str.to_string()))
             }
-            return Ok(Value::String(value_str.to_string()));
-        }
-
-        if Self::is_float_type(&col_type) {
-            if let Ok(val) = value_str.parse::<f64>() {
-                return Ok(Value::Float64(val));
+            Some(SqlNumericKind::Float) => {
+                if let Ok(val) = value_str.parse::<f64>() {
+                    return Ok(Value::Float64(val));
+                }
+                Ok(Value::String(value_str.to_string()))
             }
-            return Ok(Value::String(value_str.to_string()));
+            // Kept as digits rather than going through f64 so that values wider
+            // than a double can round-trip without losing precision.
+            Some(SqlNumericKind::Decimal) => {
+                if Value::is_sql_numeric_literal(value_str) {
+                    return Ok(Value::Decimal(value_str.to_string()));
+                }
+                Ok(Value::String(value_str.to_string()))
+            }
+            // Dates, timestamps, UUIDs, etc. — keep as string and let the
+            // driver handle formatting in value_to_pg_literal / equivalent
+            None => Ok(Value::String(value_str.to_string())),
         }
-
-        // Dates, timestamps, UUIDs, JSON, etc. — keep as string and let the
-        // database driver handle formatting in value_to_pg_literal / equivalent
-        Ok(Value::String(value_str.to_string()))
-    }
-
-    pub fn is_string_type(col_type: &str) -> bool {
-        matches!(
-            col_type,
-            "text"
-                | "varchar"
-                | "char"
-                | "bpchar"
-                | "name"
-                | "citext"
-                | "character varying"
-                | "character"
-                | "nvarchar"
-                | "nchar"
-                | "longtext"
-                | "mediumtext"
-                | "tinytext"
-                | "enum"
-                | "set"
-        )
-    }
-
-    fn is_boolean_type(col_type: &str) -> bool {
-        matches!(col_type, "bool" | "boolean" | "tinyint(1)")
-    }
-
-    fn is_integer_type(col_type: &str) -> bool {
-        matches!(
-            col_type,
-            "int2"
-                | "int4"
-                | "int8"
-                | "smallint"
-                | "integer"
-                | "bigint"
-                | "int"
-                | "mediumint"
-                | "tinyint"
-                | "serial"
-                | "bigserial"
-                | "smallserial"
-        )
-    }
-
-    fn is_float_type(col_type: &str) -> bool {
-        matches!(
-            col_type,
-            "float4"
-                | "float8"
-                | "real"
-                | "double precision"
-                | "double"
-                | "float"
-                | "numeric"
-                | "decimal"
-                | "money"
-        )
     }
 
     fn qualified_relation_name(
@@ -1637,50 +1805,62 @@ impl TableService {
             .resolve_relation_reference(connection.clone(), table_name, schema, false)
             .await;
 
-        // Try to get primary key
-        let pk_info = schema_introspection
+        // Keys that can address a row on their own, best first.
+        let mut key_candidates: Vec<Vec<String>> = schema_introspection
             .get_primary_key(relation.schema_ref(), &relation.table_name)
             .await
             .ok()
-            .flatten();
+            .flatten()
+            .map(|primary_key| primary_key.columns)
+            .into_iter()
+            .collect();
+        if key_candidates.is_empty() {
+            key_candidates.extend(
+                self.unique_keys_for_relation(schema_introspection, &relation)
+                    .await
+                    .into_iter()
+                    .map(|(_, columns)| columns),
+            );
+        }
 
         let mut total_deleted = 0u64;
 
         for row_values in &delete_data.rows {
-            // Build row identifier
-            let row_identifier = if let Some(ref pk) = pk_info {
-                // Use primary key
-                let pk_values: Vec<(String, Value)> = pk
-                    .columns
-                    .iter()
-                    .filter_map(|pk_col| {
-                        let idx = delete_data
-                            .all_column_names
-                            .iter()
-                            .position(|col| col == pk_col)?;
-                        let value = row_values.get(idx)?.clone();
-                        Some((pk_col.clone(), value))
-                    })
-                    .collect();
+            let key_values = key_candidates
+                .iter()
+                .find_map(|key_columns| {
+                    self.key_values_for_row(
+                        key_columns,
+                        &delete_data.all_column_names,
+                        row_values,
+                        &[],
+                    )
+                    .transpose()
+                })
+                .transpose()?;
 
-                if !pk_values.is_empty() {
-                    RowIdentifier::PrimaryKey(pk_values)
-                } else {
-                    // Fallback to full row
-                    self.build_full_row_identifier(&delete_data.all_column_names, row_values)?
-                }
-            } else {
-                // No primary key, use full row
-                self.build_full_row_identifier(&delete_data.all_column_names, row_values)?
+            let row_identifier = match key_values {
+                Some(key_values) => RowIdentifier::PrimaryKey(key_values),
+                None => self.build_full_row_identifier(&delete_data.all_column_names, row_values)?,
             };
 
             // Build DELETE statement
             let (where_clause, params) =
                 self.build_where_clause(connection.as_ref(), &row_identifier)?;
+            let qualified_table = Self::qualified_relation_name(connection.as_ref(), &relation);
+            // Without a key the row is matched on all its columns, which cannot
+            // tell duplicate rows apart; the driver narrows it to one row so a
+            // single selected row deletes a single row.
+            let scope = match row_identifier {
+                RowIdentifier::FullRow(_) => {
+                    connection.single_row_dml_scope(&qualified_table, &where_clause)
+                }
+                _ => SingleRowDmlScope::Unsupported,
+            };
+            let (where_clause, statement_suffix) = scope.apply(&where_clause);
             let sql = format!(
-                "DELETE FROM {} WHERE {}",
-                Self::qualified_relation_name(connection.as_ref(), &relation),
-                where_clause
+                "DELETE FROM {} WHERE {}{}",
+                qualified_table, where_clause, statement_suffix
             );
 
             tracing::debug!("Delete SQL: {}", sql);
@@ -1853,6 +2033,22 @@ pub struct CellUpdateData {
     pub all_column_types: Vec<String>,
 }
 
+/// Result of a single cell update.
+#[derive(Debug, Clone, Default)]
+pub struct CellUpdateOutcome {
+    /// Rows the driver reported as affected.
+    pub affected_rows: u64,
+    /// Set when the write could not be confirmed because the driver does not
+    /// report trustworthy row counts. The update is still treated as successful;
+    /// callers should surface this as a warning rather than reverting the cell.
+    pub unconfirmed_reason: Option<String>,
+    /// The value the database actually holds after the write, when it could be
+    /// read back. Differs from the submitted value whenever the database adjusts
+    /// it — rounding a DECIMAL to scale, truncating a string, coercing a type.
+    /// `None` means the read-back was skipped or failed; keep the client value.
+    pub stored_value: Option<Value>,
+}
+
 /// Data required to insert a new row
 #[derive(Debug, Clone)]
 pub struct RowInsertData {
@@ -1881,6 +2077,10 @@ pub struct DuplicateTablesRequest {
     pub operations: Vec<DuplicateTableOperation>,
     /// When true, continue processing remaining tables after one failure.
     pub continue_on_error: bool,
+    /// Schema/database the tables live in. Unqualified names resolve against the
+    /// session's current database, which is not necessarily the one the caller is
+    /// browsing.
+    pub namespace: Option<String>,
 }
 
 /// One duplicate-table operation.
@@ -1917,6 +2117,10 @@ pub struct DeleteTablesRequest {
     pub table_names: Vec<String>,
     /// When true, continue processing remaining tables after one failure.
     pub continue_on_error: bool,
+    /// Schema/database the tables live in. Unqualified names resolve against the
+    /// session's current database, which is not necessarily the one the caller is
+    /// browsing.
+    pub namespace: Option<String>,
 }
 
 /// Aggregate result for a delete-tables operation.
@@ -1935,6 +2139,10 @@ pub struct EmptyTablesRequest {
     pub table_names: Vec<String>,
     /// When true, continue processing remaining tables after one failure.
     pub continue_on_error: bool,
+    /// Schema/database the tables live in. Unqualified names resolve against the
+    /// session's current database, which is not necessarily the one the caller is
+    /// browsing.
+    pub namespace: Option<String>,
 }
 
 /// Aggregate result for an empty-tables operation.
@@ -1955,6 +2163,10 @@ pub struct RenameTableRequest {
     pub source_table_name: String,
     /// New table name.
     pub target_table_name: String,
+    /// Schema/database the table lives in. Unqualified names resolve against the
+    /// session's current database, which is not necessarily the one the caller is
+    /// browsing.
+    pub namespace: Option<String>,
 }
 
 /// Request for generating SQL dumps for one or more tables.
@@ -2322,8 +2534,10 @@ impl TableService {
                     all_column_types: column_types.clone(),
                 };
 
+                // The caller reloads the table once the batch completes, so a
+                // per-cell read-back would only add round trips.
                 match self
-                    .update_cell(
+                    .update_cell_without_read_back(
                         connection.clone(),
                         &table_name,
                         schema.as_deref(),
@@ -2331,7 +2545,22 @@ impl TableService {
                     )
                     .await
                 {
-                    Ok(()) => {
+                    Ok(cell_outcome) => {
+                        if let Some(reason) = cell_outcome.unconfirmed_reason {
+                            tracing::warn!(
+                                table_name = %table_name,
+                                column = %column_name,
+                                "Cell update could not be confirmed: {}",
+                                reason
+                            );
+                        }
+                        // The row now holds this value, and the next statement
+                        // for the same row has to match it: a keyless row is
+                        // matched on all its columns, and even a key can be the
+                        // column that was just written.
+                        if let Some(cell) = original_row_values.get_mut(change.column_index) {
+                            *cell = change.new_value.clone();
+                        }
                         outcome.successful_operations =
                             outcome.successful_operations.saturating_add(1);
                     }
@@ -2445,6 +2674,7 @@ impl TableService {
         let DuplicateTablesRequest {
             operations,
             continue_on_error,
+            namespace,
         } = request;
 
         let mut outcome = DuplicateTablesOutcome::default();
@@ -2455,8 +2685,8 @@ impl TableService {
                 target_table_name,
             } = operation;
             let sql = match connection.duplicate_table_sql(
-                &SqlObjectName::new(&source_table_name),
-                &SqlObjectName::new(&target_table_name),
+                &qualified_object_name(namespace.as_deref(), &source_table_name),
+                &qualified_object_name(namespace.as_deref(), &target_table_name),
             ) {
                 Ok(sql) => sql,
                 Err(error) => {
@@ -2507,13 +2737,14 @@ impl TableService {
         let DeleteTablesRequest {
             table_names,
             continue_on_error,
+            namespace,
         } = request;
 
         let mut outcome = DeleteTablesOutcome::default();
 
         for table_name in table_names {
             let sql = match connection.drop_table_sql(
-                &SqlObjectName::new(&table_name),
+                &qualified_object_name(namespace.as_deref(), &table_name),
                 DropTableOptions::default(),
             ) {
                 Ok(sql) => sql,
@@ -2560,12 +2791,15 @@ impl TableService {
         let EmptyTablesRequest {
             table_names,
             continue_on_error,
+            namespace,
         } = request;
 
         let mut outcome = EmptyTablesOutcome::default();
 
         for table_name in table_names {
-            let sql = match connection.truncate_table_sql(&SqlObjectName::new(&table_name)) {
+            let sql = match connection
+                .truncate_table_sql(&qualified_object_name(namespace.as_deref(), &table_name))
+            {
                 Ok(sql) => sql,
                 Err(error) => {
                     let error_message =
@@ -2613,10 +2847,14 @@ impl TableService {
         let RenameTableRequest {
             source_table_name,
             target_table_name,
+            namespace,
         } = request;
 
         let sql = connection
-            .rename_table_sql(&SqlObjectName::new(&source_table_name), &target_table_name)
+            .rename_table_sql(
+                &qualified_object_name(namespace.as_deref(), &source_table_name),
+                &target_table_name,
+            )
             .map_err(|error| {
                 ServiceError::TableOperationFailed(format!(
                     "Failed to build rename SQL for table '{}': {}",
@@ -2994,6 +3232,15 @@ impl TableService {
                 let hex_string: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
                 format!("X'{}'", hex_string)
             }
+            // Reaches the catch-all unquoted via Display, so a non-numeric
+            // payload would escape into the statement.
+            Value::Decimal(decimal_value) => {
+                if Value::is_sql_numeric_literal(decimal_value) {
+                    decimal_value.clone()
+                } else {
+                    format!("'{}'", decimal_value.replace('\'', "''"))
+                }
+            }
             _ => value.to_string(),
         }
     }
@@ -3014,7 +3261,15 @@ impl TableService {
             Value::Int64(integer_value) => integer_value.to_string(),
             Value::Float32(float_value) => float_value.to_string(),
             Value::Float64(float_value) => float_value.to_string(),
-            Value::Decimal(decimal_value) => decimal_value.clone(),
+            // Emitted unquoted to preserve precision; quote anything that is not
+            // a real number so it cannot escape into the surrounding statement.
+            Value::Decimal(decimal_value) => {
+                if Value::is_sql_numeric_literal(decimal_value) {
+                    decimal_value.clone()
+                } else {
+                    format!("'{}'", decimal_value.replace('\'', "''"))
+                }
+            }
             Value::String(text) => format!("'{}'", text.replace('\'', "''")),
             Value::Bytes(bytes) => {
                 let hex_string: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
@@ -3128,6 +3383,19 @@ mod tests {
     use zqlz_core::TableType;
 
     #[test]
+    fn qualified_object_name_uses_browsing_namespace() {
+        let qualified = qualified_object_name(Some("shop"), "orders_returns");
+        assert_eq!(qualified.namespace.as_deref(), Some("shop"));
+        assert_eq!(qualified.name, "orders_returns");
+
+        for namespace in [None, Some("")] {
+            let bare = qualified_object_name(namespace, "orders_returns");
+            assert_eq!(bare.namespace, None);
+            assert_eq!(bare.name, "orders_returns");
+        }
+    }
+
+    #[test]
     fn test_escape_identifier_postgresql() {
         assert_eq!(
             TableService::escape_identifier_for("users", "postgresql"),
@@ -3172,6 +3440,80 @@ mod tests {
         assert_eq!(
             TableService::escape_identifier_for("my table", "mssql"),
             "[my table]"
+        );
+    }
+
+    /// Type dispatch used to match on the raw type name, so any declaration
+    /// carrying a length or precision modifier fell through to the string
+    /// catch-all instead of being recognised.
+    #[test]
+    fn parse_value_handles_types_with_modifiers() {
+        let service = TableService::new(1000);
+
+        assert_eq!(
+            service.parse_value("1.5", Some("decimal(12,4)")).unwrap(),
+            Value::Decimal("1.5".to_string())
+        );
+        assert_eq!(
+            service.parse_value("42", Some("int(11)")).unwrap(),
+            Value::Int32(42)
+        );
+        assert_eq!(
+            service.parse_value("hello", Some("varchar(255)")).unwrap(),
+            Value::String("hello".to_string())
+        );
+        assert_eq!(
+            service.parse_value("1.5", Some("double(8,2)")).unwrap(),
+            Value::Float64(1.5)
+        );
+    }
+
+    /// MySQL spells BOOL as `tinyint(1)`; stripping the modifier would make it
+    /// look like an ordinary small integer.
+    #[test]
+    fn parse_value_keeps_mysql_boolean_columns_boolean() {
+        let service = TableService::new(1000);
+
+        assert_eq!(
+            service.parse_value("1", Some("tinyint(1)")).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            service.parse_value("0", Some("tinyint(1)")).unwrap(),
+            Value::Bool(false)
+        );
+        // A wider tinyint is still an integer.
+        assert_eq!(
+            service.parse_value("7", Some("tinyint(4)")).unwrap(),
+            Value::Int32(7)
+        );
+    }
+
+    /// Decimal columns keep their digits instead of being routed through f64,
+    /// which cannot represent values this wide.
+    #[test]
+    fn parse_value_preserves_wide_decimal_precision() {
+        let service = TableService::new(1000);
+
+        assert_eq!(
+            service
+                .parse_value("20000000000000000001.5", Some("numeric"))
+                .unwrap(),
+            Value::Decimal("20000000000000000001.5".to_string())
+        );
+    }
+
+    /// A decimal column must never turn unparseable input into `Value::Decimal`,
+    /// which drivers emit into SQL unquoted.
+    #[test]
+    fn parse_value_rejects_non_numeric_decimals() {
+        let service = TableService::new(1000);
+
+        assert_eq!(
+            service
+                .parse_value("0 WHERE 1=1 -- ", Some("decimal(12,4)"))
+                .unwrap(),
+            Value::String("0 WHERE 1=1 -- ".to_string())
         );
     }
 

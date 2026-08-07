@@ -7,7 +7,9 @@ use gpui::*;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_connection::{ConnectionManager, SavedConnection};
+use zqlz_connection::{
+    ConnectionManager, DEFAULT_HEARTBEAT_INTERVAL, HeartbeatOutcome, SavedConnection,
+};
 use zqlz_query::{HistoryPersistence, QueryHistory, QueryService};
 use zqlz_services::{
     ConnectionService, DocumentService, KeyValueService, RefreshService, SchemaService,
@@ -221,6 +223,70 @@ impl Default for AppState {
 }
 
 impl Global for AppState {}
+
+/// Start the background task that keeps database connections alive.
+///
+/// Idle TCP sessions are torn down by managed database services, connection
+/// poolers and NAT gateways, and without traffic the first symptom is a user
+/// query failing with "connection closed". This runs on the background
+/// executor, so it keeps pinging regardless of whether the window is focused.
+pub fn spawn_connection_heartbeat(connections: Arc<ConnectionManager>, cx: &App) {
+    let executor = cx.background_executor().clone();
+
+    cx.background_executor()
+        .spawn(async move {
+            loop {
+                executor.timer(DEFAULT_HEARTBEAT_INTERVAL).await;
+
+                for outcome in connections.heartbeat(&executor).await {
+                    match outcome {
+                        HeartbeatOutcome::Healthy {
+                            connection_id,
+                            database,
+                            latency,
+                        } => tracing::debug!(
+                            %connection_id,
+                            database = ?database,
+                            latency_ms = latency.as_millis(),
+                            "connection heartbeat ok"
+                        ),
+                        HeartbeatOutcome::Reconnected {
+                            connection_id,
+                            database,
+                        } => tracing::info!(
+                            %connection_id,
+                            database = ?database,
+                            "connection re-established by heartbeat"
+                        ),
+                        HeartbeatOutcome::Busy {
+                            connection_id,
+                            database,
+                        } => tracing::debug!(
+                            %connection_id,
+                            database = ?database,
+                            "connection busy, heartbeat skipped"
+                        ),
+                        HeartbeatOutcome::Lost {
+                            connection_id,
+                            database,
+                            error,
+                        } => tracing::warn!(
+                            %connection_id,
+                            database = ?database,
+                            %error,
+                            "connection heartbeat failed"
+                        ),
+                    }
+                }
+            }
+        })
+        .detach();
+
+    tracing::info!(
+        interval_seconds = DEFAULT_HEARTBEAT_INTERVAL.as_secs(),
+        "connection heartbeat started"
+    );
+}
 
 /// Application settings
 #[derive(Clone, Debug)]

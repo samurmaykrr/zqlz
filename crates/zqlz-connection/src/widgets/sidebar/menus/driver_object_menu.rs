@@ -1,6 +1,9 @@
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::{ObjectFormMode, ObjectsPanelAction, ObjectsPanelObjectRef};
+use zqlz_core::{
+    ObjectFeatureSet, ObjectFormMode, ObjectsPanelAction, ObjectsPanelObjectRef,
+    objects_panel_action_feature_availability,
+};
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
 
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
@@ -137,6 +140,7 @@ impl ConnectionSidebar {
         mut menu: PopupMenu,
         actions: Vec<ObjectsPanelAction>,
         context: DriverObjectMenuContext,
+        object_features: Option<ObjectFeatureSet>,
         sidebar: WeakEntity<Self>,
     ) -> PopupMenu {
         let mut previous_group: Option<String> = None;
@@ -146,19 +150,39 @@ impl ConnectionSidebar {
             }
             previous_group = action.group.clone();
 
+            let disabled_reason = object_features
+                .as_ref()
+                .and_then(|features| Self::object_action_unavailable_reason(features, &action.id));
             let action_id = action.id.clone();
             let context = context.clone();
             let sidebar = sidebar.clone();
-            menu = menu.item(PopupMenuItem::new(action.label).on_click(
-                move |_event, _window, cx| {
-                    _ = sidebar.update(cx, |sidebar, cx| {
-                        sidebar.invoke_driver_object_action(&action_id, context.clone(), cx);
-                    });
-                },
-            ));
+            menu = menu.item(
+                PopupMenuItem::new(action.label)
+                    .disabled_with_reason(disabled_reason)
+                    .on_click(move |_event, _window, cx| {
+                        _ = sidebar.update(cx, |sidebar, cx| {
+                            sidebar.invoke_driver_object_action(&action_id, context.clone(), cx);
+                        });
+                    }),
+            );
         }
 
         menu
+    }
+
+    /// Why the connection cannot run `action_id`, or `None` when it can.
+    fn object_action_unavailable_reason(
+        features: &ObjectFeatureSet,
+        action_id: &str,
+    ) -> Option<SharedString> {
+        let availability = objects_panel_action_feature_availability(features, action_id);
+        if availability.available {
+            return None;
+        }
+
+        Some(SharedString::from(availability.reason_or(format!(
+            "The '{action_id}' action is not available for this connection"
+        ))))
     }
 
     pub(in crate::widgets) fn driver_toolbar_actions(

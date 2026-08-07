@@ -1,8 +1,9 @@
 //! ClickHouse schema introspection implementation
 
+use std::collections::HashMap;
 use async_trait::async_trait;
 use zqlz_core::{
-    ColumnInfo, Connection, ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject,
+    ColumnInfo, Connection, ConstraintInfo, DatabaseInfo, DatabaseObject,
     Dependency, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectFormDdlRequest, ObjectFormField,
     ObjectFormFieldKind, ObjectFormMode, ObjectFormOption, ObjectFormSection, ObjectFormSpec,
     ObjectFormSpecRequest, ObjectType, ObjectsPanelAction, ObjectsPanelColumn, ObjectsPanelData,
@@ -12,7 +13,233 @@ use zqlz_core::{
     ZqlzError,
 };
 
+use super::driver::run_clickhouse_query;
 use super::ClickHouseConnection;
+
+/// ClickHouse implementation of the raw-catalog port. Provides the per-table
+/// fetches the shared engine composes; ClickHouse's listing, objects-panel,
+/// object-form, and DDL logic remain on `ClickHouseConnection`.
+pub struct ClickHouseCatalog {
+    client: clickhouse::Client,
+    database: String,
+    capabilities: zqlz_core::CatalogCapabilities,
+}
+
+impl ClickHouseCatalog {
+    pub fn new(client: clickhouse::Client, database: String) -> Self {
+        let capabilities = zqlz_core::CatalogCapabilities {
+            driver_id: "clickhouse".to_string(),
+            server_version: None,
+            namespaces: zqlz_core::NamespaceModel::DatabasesOnly,
+            objects: zqlz_core::ObjectKindSupport {
+                tables: true,
+                views: true,
+                materialized_views: true,
+                types: true,
+                ..zqlz_core::ObjectKindSupport::NONE
+            },
+            auto_increment: zqlz_core::AutoIncrementRules::default(),
+            stored_source: Vec::new(),
+            deferrable_constraints: false,
+            panel_extras: Vec::new(),
+        };
+        Self {
+            client,
+            database,
+            capabilities,
+        }
+    }
+
+    async fn query(
+        &self,
+        sql: &str,
+        params: &[zqlz_core::Value],
+    ) -> Result<zqlz_core::QueryResult> {
+        run_clickhouse_query(&self.client, sql, params).await
+    }
+
+    fn resolved(&self, schema: Option<&str>) -> String {
+        schema.unwrap_or(self.database.as_str()).to_string()
+    }
+}
+
+fn clickhouse_column_row(row: &zqlz_core::Row) -> zqlz_core::RawColumnRow {
+    let data_type = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let default_kind = row.get(3).and_then(|v| v.as_str()).unwrap_or("");
+    let position = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+    let is_pk = row.get(6).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+
+    zqlz_core::RawColumnRow {
+        name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        ordinal: position,
+        is_nullable: data_type.starts_with("Nullable"),
+        data_type,
+        default_value: if default_kind.is_empty() {
+            None
+        } else {
+            row.get(4).and_then(|v| v.as_str()).map(ToString::to_string)
+        },
+        comment: row.get(5).and_then(|v| v.as_str()).map(ToString::to_string),
+        primary_key_ordinal: is_pk.then_some(position.max(1)),
+        ..Default::default()
+    }
+}
+
+#[async_trait]
+impl zqlz_core::CatalogSource for ClickHouseCatalog {
+    fn capabilities(&self) -> &zqlz_core::CatalogCapabilities {
+        &self.capabilities
+    }
+
+    async fn fetch_relations(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<zqlz_core::RawRelationRow>> {
+        let database = self.resolved(schema);
+        let result = self
+            .query(
+                "SELECT name, total_rows, total_bytes, comment FROM system.tables
+                 WHERE database = ? AND is_temporary = 0 AND engine NOT LIKE '%View%'
+                 ORDER BY name",
+                &[zqlz_core::Value::String(database.clone())],
+            )
+            .await?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| {
+                let mut relation = zqlz_core::RawRelationRow::new(
+                    row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    zqlz_core::TableType::Table,
+                );
+                relation.schema = Some(database.clone());
+                relation.row_estimate = row.get(1).and_then(|v| v.as_i64());
+                relation.size_bytes = row.get(2).and_then(|v| v.as_i64());
+                relation.comment = row.get(3).and_then(|v| v.as_str()).map(ToString::to_string);
+                relation
+            })
+            .collect())
+    }
+
+    async fn fetch_columns(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawColumnRow>> {
+        let database = self.resolved(relation.schema.as_deref());
+        let result = self
+            .query(
+                "SELECT name, position, type, default_kind, default_expression, comment, is_in_primary_key, table
+                 FROM system.columns WHERE database = ? AND table = ? ORDER BY position",
+                &[
+                    zqlz_core::Value::String(database),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+        Ok(result.rows.iter().map(clickhouse_column_row).collect())
+    }
+
+    async fn fetch_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<zqlz_core::RawColumnRow>>>> {
+        let database = self.resolved(schema);
+        let result = self
+            .query(
+                "SELECT name, position, type, default_kind, default_expression, comment, is_in_primary_key, table
+                 FROM system.columns WHERE database = ? ORDER BY table, position",
+                &[zqlz_core::Value::String(database)],
+            )
+            .await?;
+
+        let mut columns_by_relation: HashMap<String, Vec<zqlz_core::RawColumnRow>> = HashMap::new();
+        for row in &result.rows {
+            let Some(relation) = row.get(7).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            columns_by_relation
+                .entry(relation.to_string())
+                .or_default()
+                .push(clickhouse_column_row(row));
+        }
+
+        Ok(Some(columns_by_relation))
+    }
+
+    async fn fetch_all_foreign_keys(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<zqlz_core::RawForeignKeyRow>>>> {
+        // ClickHouse has no foreign keys. This is "supported, and there are none" —
+        // returning `None` would read as "no bulk form" and send the caller back to
+        // the per-table path it just avoided for columns.
+        Ok(Some(HashMap::new()))
+    }
+
+    async fn fetch_indexes(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawIndexRow>> {
+        let database = self.resolved(relation.schema.as_deref());
+        let result = self
+            .query(
+                "SELECT name, expr, type FROM system.data_skipping_indices
+                 WHERE database = ? AND table = ?",
+                &[
+                    zqlz_core::Value::String(database),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| zqlz_core::RawIndexRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                columns: Vec::new(),
+                is_unique: false,
+                is_primary: false,
+                method: row.get(2).and_then(|v| v.as_str()).map(ToString::to_string),
+                comment: row
+                    .get(1)
+                    .and_then(|v| v.as_str())
+                    .map(|expr| format!("expr: {expr}")),
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    async fn fetch_constraints(
+        &self,
+        relation: &zqlz_core::RelationRef,
+    ) -> Result<Vec<zqlz_core::RawConstraintRow>> {
+        let database = self.resolved(relation.schema.as_deref());
+        let result = self
+            .query(
+                "SELECT name FROM system.columns
+                 WHERE database = ? AND table = ? AND is_in_primary_key = 1 ORDER BY position",
+                &[
+                    zqlz_core::Value::String(database),
+                    zqlz_core::Value::String(relation.name.clone()),
+                ],
+            )
+            .await?;
+        let columns: Vec<String> = result
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0).and_then(|v| v.as_str()).map(ToString::to_string))
+            .collect();
+        if columns.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![zqlz_core::RawConstraintRow {
+            name: "PRIMARY KEY".to_string(),
+            kind: "PRIMARY KEY".to_string(),
+            columns,
+            definition: None,
+        }])
+    }
+}
 
 #[async_trait]
 impl SchemaIntrospection for ClickHouseConnection {
@@ -161,128 +388,37 @@ impl SchemaIntrospection for ClickHouseConnection {
     }
 
     async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let database = schema.unwrap_or(self.database());
-        let tables = self.list_tables(Some(database)).await?;
-        let info = tables
-            .into_iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-
-        Ok(TableDetails {
-            info,
-            columns: self.get_columns(Some(database), name).await?,
-            primary_key: self.get_primary_key(Some(database), name).await?,
-            foreign_keys: Vec::new(), // ClickHouse has no foreign keys
-            indexes: self.get_indexes(Some(database), name).await?,
-            constraints: self.get_constraints(Some(database), name).await?,
-            triggers: Vec::new(), // ClickHouse has no triggers
-        })
+        self.schema_engine.get_table(schema, name).await
     }
 
     async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let database = schema.unwrap_or(self.database());
-        let result = self
-            .query(
-                "SELECT name, position, type, default_kind, default_expression, comment, is_in_primary_key
-                     FROM system.columns
-                     WHERE database = ? AND table = ?
-                     ORDER BY position",
-                &[
-                    Value::String(database.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
+        self.schema_engine.get_columns(schema, table).await
+    }
 
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| {
-                let data_type = row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let nullable = data_type.starts_with("Nullable");
-                let default_kind = row.get(3).and_then(|v| v.as_str()).unwrap_or("");
-                let default_expr = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
-                let is_pk = row.get(6).and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        self.schema_engine.list_all_columns(schema).await
+    }
 
-                ColumnInfo {
-                    name: row
-                        .get(0)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    ordinal: row.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize,
-                    data_type,
-                    nullable,
-                    default_value: if default_kind.is_empty() {
-                        None
-                    } else {
-                        default_expr
-                    },
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    is_primary_key: is_pk,
-                    is_auto_increment: false, // ClickHouse doesn't have auto-increment
-                    is_unique: false,
-                    foreign_key: None,
-                    comment: row.get(5).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    ..Default::default()
-                }
-            })
-            .collect())
+    async fn list_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        self.schema_engine.list_all_foreign_keys(schema).await
     }
 
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let database = schema.unwrap_or(self.database());
-        let result = self
-            .query(
-                "SELECT name, expr, type
-                     FROM system.data_skipping_indices
-                     WHERE database = ? AND table = ?",
-                &[
-                    Value::String(database.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| IndexInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                columns: vec![], // Expression-based, not column-based
-                is_unique: false,
-                is_primary: false,
-                index_type: row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                comment: row
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .map(|s| format!("expr: {}", s)),
-                ..Default::default()
-            })
-            .collect())
+        self.schema_engine.get_indexes(schema, table).await
     }
 
     async fn get_foreign_keys(
         &self,
-        _schema: Option<&str>,
-        _table: &str,
+        schema: Option<&str>,
+        table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        // ClickHouse does not support foreign keys
-        Ok(Vec::new())
+        self.schema_engine.get_foreign_keys(schema, table).await
     }
 
     async fn get_primary_key(
@@ -290,34 +426,7 @@ impl SchemaIntrospection for ClickHouseConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Option<PrimaryKeyInfo>> {
-        let database = schema.unwrap_or(self.database());
-        // Get primary key columns from system.columns
-        let result = self
-            .query(
-                &format!(
-                    "SELECT name FROM system.columns
-                     WHERE database = '{}' AND table = '{}' AND is_in_primary_key = 1
-                     ORDER BY position",
-                    database, table
-                ),
-                &[],
-            )
-            .await?;
-
-        if result.rows.is_empty() {
-            return Ok(None);
-        }
-
-        let columns: Vec<String> = result
-            .rows
-            .iter()
-            .filter_map(|row| row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect();
-
-        Ok(Some(PrimaryKeyInfo {
-            name: None,
-            columns,
-        }))
+        self.schema_engine.get_primary_key(schema, table).await
     }
 
     async fn get_constraints(
@@ -325,20 +434,7 @@ impl SchemaIntrospection for ClickHouseConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        // ClickHouse has limited constraint support - mainly through ASSUME expressions
-        let pk = self.get_primary_key(schema, table).await?;
-        let mut constraints = Vec::new();
-
-        if let Some(pk) = pk {
-            constraints.push(ConstraintInfo {
-                name: "PRIMARY KEY".to_string(),
-                constraint_type: ConstraintType::PrimaryKey,
-                columns: pk.columns,
-                definition: None,
-            });
-        }
-
-        Ok(constraints)
+        self.schema_engine.get_constraints(schema, table).await
     }
 
     async fn list_functions(&self, _schema: Option<&str>) -> Result<Vec<FunctionInfo>> {

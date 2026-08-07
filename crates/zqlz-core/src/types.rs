@@ -175,6 +175,41 @@ fn normalize_sql_type_name(data_type: &str) -> String {
     }
 }
 
+/// Normalize a plain decimal string to (negative, integer digits, fraction
+/// digits) with padding removed, so `1.50`, `1.5` and `+1.5` all agree.
+///
+/// Returns `None` for anything that is not a plain number, including exponent
+/// notation, leaving callers to fall back to text comparison.
+fn canonical_number(text: &str) -> Option<(bool, String, String)> {
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+
+    let (integer, fraction) = match digits.find('.') {
+        Some(index) => (&digits[..index], &digits[index + 1..]),
+        None => (digits, ""),
+    };
+
+    if integer.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !integer.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let integer = integer.trim_start_matches('0').to_string();
+    let fraction = fraction.trim_end_matches('0').to_string();
+    // "-0" and "0" are the same number.
+    let negative = negative && !(integer.is_empty() && fraction.is_empty());
+
+    Some((negative, integer, fraction))
+}
+
 fn strip_sql_type_modifiers(data_type: &str) -> &str {
     match data_type.find('(') {
         Some(index) => data_type[..index].trim(),
@@ -364,6 +399,96 @@ impl Value {
 
     fn strip_type_modifiers(data_type: &str) -> &str {
         strip_sql_type_modifiers(data_type)
+    }
+
+    /// The digits behind a numeric value, or `None` when it is not a number.
+    fn numeric_text(&self) -> Option<String> {
+        match self {
+            Value::Int8(v) => Some(v.to_string()),
+            Value::Int16(v) => Some(v.to_string()),
+            Value::Int32(v) => Some(v.to_string()),
+            Value::Int64(v) => Some(v.to_string()),
+            Value::Float32(v) => Some(v.to_string()),
+            Value::Float64(v) => Some(v.to_string()),
+            Value::Decimal(v) if Value::is_sql_numeric_literal(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Whether two values denote the same data, treating numeric variants that
+    /// hold the same number as equal.
+    ///
+    /// Editors compare what the user typed against what was read from the
+    /// database, and those can arrive in different variants — a DECIMAL column
+    /// reads back as [`Value::Decimal`] but parses from text as a float — so a
+    /// derived equality check would report a change where there is none and
+    /// issue a pointless UPDATE.
+    pub fn is_equivalent_to(&self, other: &Value) -> bool {
+        if self == other {
+            return true;
+        }
+
+        match (self.numeric_text(), other.numeric_text()) {
+            (Some(left), Some(right)) => {
+                match (canonical_number(&left), canonical_number(&right)) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `text` is safe to emit into SQL as a bare numeric literal.
+    ///
+    /// `Value::Decimal` holds its digits as a string to preserve precision, and
+    /// drivers emit it unquoted. Anything that is not strictly a number would
+    /// therefore be injected as SQL, so callers must check before emitting.
+    /// Accepts optional sign, digits with at most one decimal point, and an
+    /// optional exponent. Rejects `NaN`, `inf`, whitespace and separators.
+    pub fn is_sql_numeric_literal(text: &str) -> bool {
+        let mut characters = text.chars().peekable();
+
+        if matches!(characters.peek(), Some('+' | '-')) {
+            characters.next();
+        }
+
+        let mut mantissa_digits = 0usize;
+        let mut seen_point = false;
+        while let Some(&character) = characters.peek() {
+            match character {
+                '0'..='9' => {
+                    mantissa_digits += 1;
+                    characters.next();
+                }
+                '.' if !seen_point => {
+                    seen_point = true;
+                    characters.next();
+                }
+                _ => break,
+            }
+        }
+
+        if mantissa_digits == 0 {
+            return false;
+        }
+
+        if matches!(characters.peek(), Some('e' | 'E')) {
+            characters.next();
+            if matches!(characters.peek(), Some('+' | '-')) {
+                characters.next();
+            }
+            let mut exponent_digits = 0usize;
+            while matches!(characters.peek(), Some('0'..='9')) {
+                exponent_digits += 1;
+                characters.next();
+            }
+            if exponent_digits == 0 {
+                return false;
+            }
+        }
+
+        characters.next().is_none()
     }
 
     pub fn array_element_type(data_type: &str) -> Option<String> {
@@ -888,10 +1013,17 @@ impl Value {
                 .parse::<f64>()
                 .map(Value::Float64)
                 .unwrap_or_else(|_| Value::String(input.to_string())),
-            "numeric" | "decimal" | "money" => input
-                .parse::<f64>()
-                .map(Value::Float64)
-                .unwrap_or_else(|_| Value::Decimal(input.to_string())),
+            // Kept as digits rather than routed through f64, which cannot hold
+            // the full width of a wide DECIMAL. Only genuine numbers may become
+            // Decimal: drivers emit that variant unquoted, so anything else has
+            // to travel as an escaped string.
+            "numeric" | "decimal" | "money" => {
+                if Value::is_sql_numeric_literal(input) {
+                    Value::Decimal(input.to_string())
+                } else {
+                    Value::String(input.to_string())
+                }
+            }
             "json" | "jsonb" => serde_json::from_str::<serde_json::Value>(input)
                 .map(Value::Json)
                 .unwrap_or_else(|_| Value::String(input.to_string())),
@@ -949,6 +1081,64 @@ impl std::fmt::Display for Value {
 mod tests {
     use super::{SqlNumericKind, SqlTemporalKind, SqlTypeFamily, SqlTypeInfo, Value};
     use chrono::NaiveDate;
+
+    /// A DECIMAL column reads back as `Decimal` but the editor may hand back a
+    /// float, and that variant mismatch used to look like a real edit — which is
+    /// why re-typing an unchanged decimal still issued an UPDATE.
+    #[test]
+    fn is_equivalent_to_ignores_numeric_variant() {
+        assert!(Value::Decimal("-6.0000".to_string()).is_equivalent_to(&Value::Float64(-6.0)));
+        assert!(Value::Float64(-6.0).is_equivalent_to(&Value::Decimal("-6.0000".to_string())));
+        assert!(Value::Decimal("7".to_string()).is_equivalent_to(&Value::Int32(7)));
+        assert!(Value::Int64(7).is_equivalent_to(&Value::Decimal("007".to_string())));
+        assert!(Value::Decimal("-0".to_string()).is_equivalent_to(&Value::Int32(0)));
+    }
+
+    #[test]
+    fn is_equivalent_to_still_reports_real_changes() {
+        assert!(!Value::Decimal("-6.0000".to_string()).is_equivalent_to(&Value::Float64(-6.00001)));
+        assert!(!Value::Int32(7).is_equivalent_to(&Value::Int32(8)));
+        assert!(
+            !Value::String("7".to_string()).is_equivalent_to(&Value::Int32(7)),
+            "text and numbers are different data"
+        );
+        assert!(!Value::Null.is_equivalent_to(&Value::Int32(0)));
+    }
+
+    #[test]
+    fn is_sql_numeric_literal_rejects_sql_payloads() {
+        assert!(!Value::is_sql_numeric_literal("0 WHERE 1=1 -- "));
+        assert!(!Value::is_sql_numeric_literal("1; DROP TABLE users"));
+        assert!(!Value::is_sql_numeric_literal("abc"));
+        assert!(!Value::is_sql_numeric_literal(""));
+        assert!(!Value::is_sql_numeric_literal("NaN"));
+        assert!(!Value::is_sql_numeric_literal("inf"));
+        assert!(!Value::is_sql_numeric_literal("1 2"));
+        assert!(!Value::is_sql_numeric_literal("1,000"));
+        assert!(!Value::is_sql_numeric_literal("1.2.3"));
+        assert!(!Value::is_sql_numeric_literal("1e"));
+        assert!(!Value::is_sql_numeric_literal(" 1"));
+    }
+
+    #[test]
+    fn is_sql_numeric_literal_accepts_numbers() {
+        assert!(Value::is_sql_numeric_literal("-6.0000"));
+        assert!(Value::is_sql_numeric_literal("+.5"));
+        assert!(Value::is_sql_numeric_literal("1e10"));
+        assert!(Value::is_sql_numeric_literal("1E-10"));
+        assert!(Value::is_sql_numeric_literal("0"));
+        assert!(Value::is_sql_numeric_literal("20000000000000000001.5"));
+    }
+
+    /// A decimal column must never turn unparseable input into `Value::Decimal`,
+    /// which drivers emit into SQL unquoted.
+    #[test]
+    fn parse_from_string_does_not_make_decimals_from_sql_payloads() {
+        assert_eq!(
+            Value::parse_from_string("0 WHERE 1=1 -- ", "decimal(12,4)"),
+            Value::String("0 WHERE 1=1 -- ".to_string())
+        );
+    }
 
     #[test]
     fn parse_from_string_preserves_literal_empty_and_null_for_text_columns() {
@@ -1047,9 +1237,10 @@ mod tests {
             Value::parse_from_string("[{\"enabled\":true}]", "jsonb[]"),
             Value::Array(vec![Value::Json(serde_json::json!({ "enabled": true }))])
         );
+        // Numeric elements keep their digits so wide values survive the trip.
         assert_eq!(
             Value::parse_from_string("[12.5, null]", "NumericArray"),
-            Value::Array(vec![Value::Float64(12.5), Value::Null])
+            Value::Array(vec![Value::Decimal("12.5".to_string()), Value::Null])
         );
         assert_eq!(
             Value::parse_from_string("[\"0xdeadbeef\"]", "ByteaArray"),

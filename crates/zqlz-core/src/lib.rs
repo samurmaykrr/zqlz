@@ -28,6 +28,7 @@ mod object_identity;
 pub mod paths;
 pub mod redis_command_catalog;
 pub mod redis_command_spec;
+mod row_identity;
 mod schema;
 pub mod security;
 pub mod sql_lexing;
@@ -41,7 +42,7 @@ pub use dialect::*;
 pub use dialect_syntax::{
     IncompleteSqlCompletionContext, SignificantSqlToken, SqlCompletionTriggerContext,
     SyntaxCompletionContextKind, SyntaxCompletionItemKind, SyntaxContextToken,
-    SyntaxOperatorCompletion, SyntaxTermProfile, active_sql_context_tokens,
+    PostgresJsonOperator, SyntaxOperatorCompletion, SyntaxTermProfile, active_sql_context_tokens,
     active_sql_unquoted_word_tokens, aggregate_function_sort_text, base_function_terms,
     base_keyword_terms, base_type_terms, compare_syntax_completion_sort_texts,
     condition_operator_completion_terms, create_table_keyword_insert_text,
@@ -53,6 +54,7 @@ pub use dialect_syntax::{
     function_term_rank, incomplete_sql_completion_context, is_dialect_reserved_sql_symbol,
     is_inside_active_create_table_column_list, is_valid_dialect_sql_identifier,
     keyword_allowed_in_completion_context, keyword_allowed_in_condition, keyword_allowed_in_cte,
+    postgres_json_operator, postgres_json_operators,
     keyword_allowed_in_from_clause, keyword_allowed_in_join_condition,
     keyword_allowed_in_select_expression, keyword_category_rank,
     keyword_completion_sort_prefix_for_context, keyword_context_categories,
@@ -128,17 +130,19 @@ pub use feature_set::*;
 pub use formatter::*;
 pub use naming_validation::*;
 pub use object_identity::*;
+pub use row_identity::*;
 pub use schema::*;
 pub use security::*;
 pub use sql_lexing::{
     SqlDocumentSymbol, SqlParameterPlaceholder, SqlParameterPlaceholderKind, SqlProtectedRange,
-    SqlProtectedRangeKind, SqlStatementSpan, SqlSymbolWord, is_position_in_sql_ranges,
-    qualified_sql_reference_at_offset, qualified_sql_reference_prefix, split_sql_statement_spans,
-    split_sql_statements, sql_document_symbols, sql_matching_qualified_symbol_segments,
-    sql_matching_symbol_segments, sql_parameter_placeholders,
-    sql_parameter_placeholders_with_ranges, sql_protected_range_at, sql_protected_ranges,
-    sql_protected_ranges_with_unclosed_dollar_strings, sql_statement_span_at, sql_symbol_at_offset,
-    sql_symbol_word_spans, sql_symbol_words, unclosed_dollar_quoted_string_start,
+    SqlProtectedRangeKind, SqlStatementSpan, SqlSymbolWord, is_compound_routine_header,
+    is_position_in_sql_ranges, qualified_sql_reference_at_offset, qualified_sql_reference_prefix,
+    split_sql_statement_spans, split_sql_statements, sql_document_symbols,
+    sql_matching_qualified_symbol_segments, sql_matching_symbol_segments,
+    sql_parameter_placeholders, sql_parameter_placeholders_with_ranges, sql_protected_range_at,
+    sql_protected_ranges, sql_protected_ranges_with_unclosed_dollar_strings, sql_statement_span_at,
+    sql_symbol_at_offset, sql_symbol_word_spans, sql_symbol_words,
+    unclosed_dollar_quoted_string_start,
 };
 pub use syntax_brackets::{
     SyntaxBracketPair, SyntaxBracketScanMode, syntax_bracket_pairs_for_capabilities,

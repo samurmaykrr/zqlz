@@ -4,7 +4,8 @@
       "cmd-,": "zqlz::OpenSettings",
       "cmd-q": "zqlz::Quit",
       "cmd-r": "zqlz::Refresh",
-      "cmd-shift-p": "zqlz::OpenCommandPalette"
+      "cmd-shift-p": "zqlz::OpenCommandPalette",
+      "cmd-k": "zqlz::OpenCommandPalette"
     }
   },
   {
@@ -20,6 +21,10 @@
       "cmd-1": "zqlz::FocusSidebar",
       "cmd-2": "zqlz::FocusEditor",
       "cmd-3": "zqlz::FocusResults",
+      "cmd-4": "zqlz::ShowSchemaInspector",
+      "cmd-5": "zqlz::ShowCellEditorInspector",
+      "cmd-6": "zqlz::ShowKeyEditorInspector",
+      "cmd-7": "zqlz::ShowQueryHistoryInspector",
       "cmd-]": "tabs::ActivateNextTab",
       "cmd-[": "tabs::ActivatePrevTab",
       "cmd-alt-left": "tabs::NavigateTabBack",
@@ -27,23 +32,9 @@
       "cmd-w": "tabs::CloseActiveTab",
       "cmd-shift-w": "zqlz::CloseWindow",
       "cmd-alt-shift-w": "tabs::CloseOtherTabs",
-      "cmd-k cmd-o": "tabs::MoveTabToNewWindow",
-      "cmd-k cmd-shift-w": "tabs::CloseTabsToLeft",
-      "cmd-k cmd-shift-p": "tabs::TogglePinActiveTab",
-      "cmd-k cmd-p": "tabs::MarkActiveTabAsPreview",
-      "cmd-k cmd-alt-p": "tabs::ClearActiveTabPreview",
-      "cmd-k cmd-w": "tabs::CloseCleanTabs",
       "cmd-alt-w": "tabs::CloseAllTabs",
-      "cmd-k 1": "tabs::ActivateTab1",
-      "cmd-k 2": "tabs::ActivateTab2",
-      "cmd-k 3": "tabs::ActivateTab3",
-      "cmd-k 4": "tabs::ActivateTab4",
-      "cmd-k 5": "tabs::ActivateTab5",
-      "cmd-k 6": "tabs::ActivateTab6",
-      "cmd-k 7": "tabs::ActivateTab7",
-      "cmd-k 8": "tabs::ActivateTab8",
-      "cmd-k 9": "tabs::ActivateTab9",
-      "cmd-k 0": "tabs::ActivateLastTab"
+      "cmd-shift-x": "zqlz::ExplainQuery",
+      "cmd-alt-x": "zqlz::ExplainAnalyzeQuery"
     }
   },
   {
@@ -53,6 +44,10 @@
       "ctrl-enter": "zqlz::ExecuteQuery",
       "cmd-shift-enter": "zqlz::ExecuteSelection",
       "cmd-shift-e": "zqlz::ExecuteSelection",
+      "cmd-shift-x": "zqlz::ExplainQuery",
+      "cmd-alt-x": "zqlz::ExplainAnalyzeQuery",
+      "cmd-ctrl-shift-x": "zqlz::ExplainSelection",
+      "cmd-ctrl-alt-x": "zqlz::ExplainAnalyzeSelection",
       "cmd-.": "editor::TriggerCompletion",
       "cmd-shift-f": "editor::FormatSQL",
       "cmd-s": "query_editor::SaveQuery",
@@ -104,6 +99,8 @@
     "context": "CellEditorPanel",
     "bindings": {
       "cmd-s": "cell_editor::SaveCellEdit",
+      "cmd-enter": "cell_editor::SaveCellEdit",
+      "ctrl-enter": "cell_editor::SaveCellEdit",
       "escape": "cell_editor::CancelCellEdit",
       "cmd-shift-f": "cell_editor::FormatCellEdit",
       "alt-z": "cell_editor::ToggleCellEditorWordWrap"

@@ -507,7 +507,7 @@ impl zqlz_text_editor::DefinitionProvider for SqlLspDefinitionAdapter {
         text: &ropey::Rope,
         offset: usize,
         _document: &zqlz_text_editor::DocumentContext,
-    ) -> Option<usize> {
+    ) -> Option<zqlz_text_editor::DefinitionTarget> {
         if !allow_full_document_lsp(text) {
             return None;
         }
@@ -517,9 +517,12 @@ impl zqlz_text_editor::DefinitionProvider for SqlLspDefinitionAdapter {
 
         if let Some(definition) = self.sql_lsp.read().get_definition(&ui_rope, offset)
             && let Some(location) = first_location_from_definition_response(&definition)
-            && let Some(target_offset) = byte_offset_for_lsp_position(text, location.range.start)
         {
-            return Some(target_offset);
+            // A schema object has no position in the user's query — the LSP names it
+            // in the URI instead, and the app opens it.
+            return Some(zqlz_text_editor::DefinitionTarget::External(
+                location.uri.to_string(),
+            ));
         }
 
         self.sql_lsp
@@ -527,6 +530,34 @@ impl zqlz_text_editor::DefinitionProvider for SqlLspDefinitionAdapter {
             .get_references(&ui_rope, offset)
             .into_iter()
             .find_map(|location| byte_offset_for_lsp_position(text, location.range.start))
+            .map(zqlz_text_editor::DefinitionTarget::InDocument)
+    }
+}
+
+/// A schema object named by a `sql://internal/<kind>/<name>` definition URI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaObjectRef {
+    pub kind: String,
+    pub name: String,
+}
+
+impl SchemaObjectRef {
+    /// Parses the URI the SQL LSP mints for go-to-definition targets.
+    pub fn parse(uri: &str) -> Option<Self> {
+        let path = uri.strip_prefix("sql://internal/")?;
+        let (kind, name) = path.split_once('/')?;
+        if kind.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some(Self {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        })
+    }
+
+    /// Whether this object opens as a view rather than a table.
+    pub fn is_view(&self) -> bool {
+        self.kind == "view"
     }
 }
 
@@ -624,7 +655,7 @@ impl zqlz_text_editor::CodeActionProvider for SqlLspCodeActionAdapter {
         let mut lsp = self.sql_lsp.write();
         let validated_diagnostics;
         let diagnostics = if diagnostics.is_empty() {
-            validated_diagnostics = lsp.validate_sql(&ui_rope);
+            validated_diagnostics = lsp.validate_sql_at_cursor(&ui_rope, Some(offset));
             validated_diagnostics.as_slice()
         } else {
             diagnostics
@@ -651,6 +682,7 @@ impl zqlz_text_editor::DiagnosticProvider for SqlLspDiagnosticAdapter {
         &self,
         text: &ropey::Rope,
         _document: &zqlz_text_editor::DocumentContext,
+        cursor_offset: Option<usize>,
     ) -> Task<anyhow::Result<Vec<lsp_types::Diagnostic>>> {
         if !allow_full_document_lsp(text) {
             return Task::ready(Ok(Vec::new()));
@@ -658,7 +690,10 @@ impl zqlz_text_editor::DiagnosticProvider for SqlLspDiagnosticAdapter {
 
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
-        let diagnostics = self.sql_lsp.write().validate_sql(&ui_rope);
+        let diagnostics = self
+            .sql_lsp
+            .write()
+            .validate_sql_at_cursor(&ui_rope, cursor_offset);
         Task::ready(Ok(diagnostics))
     }
 }
@@ -1347,15 +1382,25 @@ pub enum QueryEditorEvent {
         sql: String,
         connection_id: Option<Uuid>,
         database_name: Option<String>,
+        /// `true` when the user asked for EXPLAIN ANALYZE, which really runs the SQL.
+        analyze: bool,
     },
     /// User requested to explain selected text or current statement
     ExplainSelection {
         sql: String,
         connection_id: Option<Uuid>,
         database_name: Option<String>,
+        /// `true` when the user asked for EXPLAIN ANALYZE, which really runs the SQL.
+        analyze: bool,
     },
     /// User requested to cancel the currently executing query
     CancelQuery,
+    /// Go-to-definition resolved to a database object, which the app should open.
+    OpenSchemaObject {
+        connection_id: Uuid,
+        database_name: Option<String>,
+        object: SchemaObjectRef,
+    },
     /// User requested to save a database object (view, procedure, function, trigger)
     SaveObject {
         connection_id: Uuid,
@@ -2228,15 +2273,43 @@ impl QueryEditor {
         })
     }
 
+    /// Turns a resolved go-to-definition URI into a request the app can act on.
+    ///
+    /// Only objects the app knows how to open are forwarded; functions, triggers and
+    /// indexes resolve but have no viewer, so they are logged rather than dropped
+    /// silently.
+    fn handle_external_definition(&mut self, uri: &str, cx: &mut Context<Self>) {
+        let Some(object) = SchemaObjectRef::parse(uri) else {
+            tracing::warn!(uri, "Unrecognised definition target");
+            return;
+        };
+        let Some(connection_id) = self.connection_id else {
+            tracing::debug!(uri, "No connection to open the definition target against");
+            return;
+        };
+
+        if !matches!(object.kind.as_str(), "table" | "view") {
+            tracing::debug!(kind = %object.kind, name = %object.name, "No viewer for this object kind");
+            return;
+        }
+
+        cx.emit(QueryEditorEvent::OpenSchemaObject {
+            connection_id,
+            database_name: self.current_database.clone(),
+            object,
+        });
+    }
+
     fn build_editor_subscriptions(
         editor: &Entity<TextEditor>,
         template_params: &Entity<TextEditor>,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
         vec![
-            cx.subscribe(editor, |this, _, event: &TextEditorEvent, cx| {
-                if matches!(event, TextEditorEvent::ContentChanged) {
-                    this.handle_primary_editor_changed(cx);
+            cx.subscribe(editor, |this, _, event: &TextEditorEvent, cx| match event {
+                TextEditorEvent::ContentChanged => this.handle_primary_editor_changed(cx),
+                TextEditorEvent::OpenExternalDefinition { uri } => {
+                    this.handle_external_definition(uri, cx)
                 }
             }),
             cx.subscribe(template_params, |this, _, event: &TextEditorEvent, cx| {
@@ -2678,6 +2751,45 @@ impl QueryEditor {
         }
     }
 
+    /// Merges one table's freshly-loaded details into the LSP cache so `alias.`
+    /// completions for it work immediately, instead of waiting for the next full
+    /// schema refresh.
+    ///
+    /// Unlike [`Self::notify_tables_available`] this is not gated on `schema_loading`:
+    /// the details are authoritative whether or not a background fetch is in flight.
+    pub fn notify_table_details_loaded(
+        &mut self,
+        table_name: &str,
+        details: &zqlz_services::TableDetails,
+        _cx: &mut Context<Self>,
+    ) {
+        self.sql_lsp
+            .write()
+            .merge_table_columns(table_name, details);
+    }
+
+    /// Bulk form of [`Self::notify_table_details_loaded`] for the connect-time prefetch.
+    ///
+    /// Merging in memory avoids a whole-schema reload just to read back details the
+    /// service already holds.
+    pub fn notify_table_details_batch_loaded(
+        &mut self,
+        details: &std::collections::HashMap<String, zqlz_services::TableDetails>,
+        _cx: &mut Context<Self>,
+    ) {
+        self.sql_lsp.write().merge_table_details_batch(details);
+    }
+
+    /// Applies the connect-time column warm-up, which fetches only what completions
+    /// need rather than full table details.
+    pub fn notify_table_columns_batch_loaded(
+        &mut self,
+        summaries: &std::collections::HashMap<String, zqlz_services::TableColumnSummary>,
+        _cx: &mut Context<Self>,
+    ) {
+        self.sql_lsp.write().merge_table_columns_batch(summaries);
+    }
+
     /// Called after a query successfully executes so the LSP can react to schema changes.
     ///
     /// DDL statements (CREATE, ALTER, DROP, etc.) may invalidate the cached schema, so this
@@ -2696,6 +2808,12 @@ impl QueryEditor {
             if let Some(path) = schema_cache_path(conn_id, scope.as_deref()) {
                 std::fs::remove_file(path).ok();
             }
+
+            // Cached table details outlive the connection-wide snapshot, so DDL has
+            // to purge them explicitly or an added/dropped column keeps completing
+            // until the sidebar happens to reload.
+            let schema_service = self.sql_lsp.read().schema_service();
+            schema_service.invalidate_connection_cache(conn_id);
         }
         // Mark schema as loading so completions don't surface stale objects
         // (e.g. a just-dropped table) during the background re-fetch window.
@@ -3308,6 +3426,15 @@ impl QueryEditor {
 
     /// Emit explain query event (entire content)
     pub fn emit_explain_query(&mut self, cx: &mut Context<Self>) {
+        self.emit_explain_query_with_mode(false, cx);
+    }
+
+    /// Emit an EXPLAIN ANALYZE request for the entire content.
+    pub fn emit_explain_analyze_query(&mut self, cx: &mut Context<Self>) {
+        self.emit_explain_query_with_mode(true, cx);
+    }
+
+    fn emit_explain_query_with_mode(&mut self, analyze: bool, cx: &mut Context<Self>) {
         let sql = self.get_executable_sql(cx);
         if sql.trim().is_empty() {
             return;
@@ -3324,11 +3451,21 @@ impl QueryEditor {
             sql,
             connection_id: self.connection_id,
             database_name: self.current_database.clone(),
+            analyze,
         });
     }
 
     /// Emit explain selection event (selected text or entire content)
     pub fn emit_explain_selection(&mut self, cx: &mut Context<Self>) {
+        self.emit_explain_selection_with_mode(false, cx);
+    }
+
+    /// Emit an EXPLAIN ANALYZE request for the selection or current statement.
+    pub fn emit_explain_analyze_selection(&mut self, cx: &mut Context<Self>) {
+        self.emit_explain_selection_with_mode(true, cx);
+    }
+
+    fn emit_explain_selection_with_mode(&mut self, analyze: bool, cx: &mut Context<Self>) {
         if self.editor_mode == EditorMode::Template && self.template_error.is_some() {
             tracing::warn!("Cannot explain selection: template has errors");
             return;
@@ -3343,6 +3480,7 @@ impl QueryEditor {
             sql,
             connection_id: self.connection_id,
             database_name: self.current_database.clone(),
+            analyze,
         });
     }
 
@@ -3624,6 +3762,12 @@ impl QueryEditor {
         cx: &mut Context<Self>,
     ) {
         tracing::info!("SaveQuery action triggered");
+
+        // Normalize whitespace (trim trailing, ensure final newline) before
+        // the content is read for either save path.
+        self.editor.update(cx, |editor, cx| {
+            editor.prepare_for_save(cx);
+        });
 
         // For database objects (Views, Functions, etc.), use SaveObject
         if self.object_type.supports_save() {
@@ -4003,10 +4147,22 @@ impl QueryEditor {
                             .ghost()
                             .xsmall()
                             .icon(ZqlzIcon::Lightbulb)
-                            .tooltip("Explain")
+                            .tooltip("Explain (estimated plan)")
                             .disabled(execute_disabled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.emit_explain_query(cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("explain-analyze")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::LightningBolt)
+                            .tooltip("Explain Analyze (runs the query for real timings)")
+                            .disabled(execute_disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.emit_explain_analyze_query(cx);
                                 this.focus_inner_editor(window, cx);
                             })),
                     )

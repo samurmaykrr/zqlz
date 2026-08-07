@@ -3,8 +3,10 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_core::{DocumentCellUpdateRequest, DriverCategory, Value};
+use zqlz_services::CellUpdateOutcome;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
+    notification::Notification, v_flex,
 };
 
 use crate::app::AppState;
@@ -108,6 +110,12 @@ pub(in crate::main_view) fn handle_save_cell_event(
                             },
                         )
                         .await
+                        // MongoDB matches on _id and errors when nothing matched,
+                        // so reaching here means the write landed.
+                        .map(|_| CellUpdateOutcome {
+                            affected_rows: 1,
+                            ..Default::default()
+                        })
                         .map_err(|error| anyhow::anyhow!("{}", error)),
                     (Err(error), _) | (_, Err(error)) => Err(error),
                 }
@@ -125,16 +133,23 @@ pub(in crate::main_view) fn handle_save_cell_event(
         };
 
         match update_result {
-            Ok(()) => {
+            Ok(outcome) => {
                 tracing::info!("Cell updated successfully in database");
+                // Prefer what the database stored: it may have rounded or
+                // truncated the submitted value.
+                let displayed_value = outcome
+                    .stored_value
+                    .clone()
+                    .unwrap_or_else(|| new_value_for_update.as_value());
                 _ = viewer_weak.update(cx, |viewer, cx| {
-                    viewer.update_cell_value(
-                        row,
-                        col,
-                        new_value_for_update.as_value(),
-                        cx,
-                    );
+                    viewer.update_cell_value(row, col, displayed_value, cx);
                 });
+
+                if let Some(reason) = outcome.unconfirmed_reason {
+                    _ = cx.update(|window, cx| {
+                        window.push_notification(Notification::warning(reason), cx);
+                    });
+                }
             }
             Err(e) => {
                 tracing::error!("Failed to update cell: {}", e);

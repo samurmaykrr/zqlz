@@ -17,7 +17,7 @@ use zqlz_query::{
     QueryWorkflowDispatch, QueryWorkflowRequest, build_query_editor_switcher_selection,
     plan_query_connection_switch, plan_query_database_selection,
     resolve_query_connection_selection, resolve_query_editor_open_connection,
-    run_execute_query_workflow, run_explain_query_workflow,
+    run_execute_query_workflow, run_explain_query_workflow_with_mode,
 };
 use zqlz_text_editor::{DocumentIdentity, TextDocument};
 use zqlz_ui::widgets::{
@@ -267,11 +267,12 @@ impl MainView {
 
         let tracking_sql = match &request {
             QueryWorkflowRequest::Execute { sql, .. } => sql.clone(),
-            QueryWorkflowRequest::Explain { sql } => sql.clone(),
+            QueryWorkflowRequest::Explain { sql, .. } => sql.clone(),
         };
         let request_kind = match &request {
             QueryWorkflowRequest::Execute { .. } => "execute",
-            QueryWorkflowRequest::Explain { .. } => "explain",
+            QueryWorkflowRequest::Explain { analyze: false, .. } => "explain",
+            QueryWorkflowRequest::Explain { analyze: true, .. } => "explain_analyze",
         };
         let executed_sql = match &request {
             QueryWorkflowRequest::Execute { sql, .. } => Some(sql.clone()),
@@ -345,12 +346,25 @@ impl MainView {
 
                     query_success
                 }
-                QueryWorkflowRequest::Explain { sql } => {
-                    let explain_outcome = run_explain_query_workflow(
+                QueryWorkflowRequest::Explain {
+                    sql,
+                    analyze,
+                    destructive_warning,
+                } => {
+                    if let Some(warning) = destructive_warning.as_ref() {
+                        tracing::warn!(
+                            operation = warning.operation_type.display_name(),
+                            affected_object = %warning.affected_object,
+                            reason = %warning.reason,
+                            "EXPLAIN ANALYZE will really execute a destructive statement"
+                        );
+                    }
+                    let explain_outcome = run_explain_query_workflow_with_mode(
                         resources.query_service.as_ref(),
                         resources.connection,
                         resources.connection_id,
                         sql,
+                        analyze,
                         resources.display_context,
                         chrono::Utc::now(),
                     )
@@ -900,7 +914,10 @@ impl MainView {
                 destructive_warning,
                 ..
             } => destructive_warning.as_ref(),
-            QueryWorkflowRequest::Explain { .. } => None,
+            QueryWorkflowRequest::Explain {
+                destructive_warning,
+                ..
+            } => destructive_warning.as_ref(),
         }
     }
 
@@ -917,6 +934,23 @@ impl MainView {
         let operation_name = warning.operation_type.display_name();
         let affected_object = warning.affected_object.clone();
         let reason = warning.reason.clone();
+        let is_analyze = matches!(request, QueryWorkflowRequest::Explain { analyze: true, .. });
+        let (dialog_title, ok_text, lead_in) = if is_analyze {
+            (
+                "Confirm EXPLAIN ANALYZE",
+                "Run Explain Analyze",
+                format!(
+                    "EXPLAIN ANALYZE really runs this statement, so {} will affect '{}'.",
+                    operation_name, affected_object
+                ),
+            )
+        } else {
+            (
+                "Confirm Destructive Query",
+                "Run Query",
+                format!("{} will affect '{}'.", operation_name, affected_object),
+            )
+        };
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let main_view = main_view.clone();
@@ -925,14 +959,11 @@ impl MainView {
             let spawn_context = spawn_context.clone();
 
             dialog
-                .title("Confirm Destructive Query")
+                .title(dialog_title)
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(div().child(format!(
-                            "{} will affect '{}'.",
-                            operation_name, affected_object
-                        )))
+                        .child(div().child(lead_in.clone()))
                         .child(
                             div()
                                 .text_sm()
@@ -948,7 +979,7 @@ impl MainView {
                 )
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Run Query")
+                        .ok_text(ok_text)
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, window, cx| {
@@ -1328,23 +1359,37 @@ impl MainView {
                         sql,
                         connection_id,
                         database_name,
+                        analyze,
                     }
                     | QueryEditorEvent::ExplainSelection {
                         sql,
                         connection_id,
                         database_name,
+                        analyze,
                     } => {
-                        let start_log_message = if matches!(event, QueryEditorEvent::ExplainQuery { .. }) {
-                            "Explaining query from editor"
-                        } else {
-                            "Explaining selection from editor"
+                        let is_whole_query =
+                            matches!(event, QueryEditorEvent::ExplainQuery { .. });
+                        let start_log_message = match (is_whole_query, analyze) {
+                            (true, false) => "Explaining query from editor",
+                            (false, false) => "Explaining selection from editor",
+                            (true, true) => "Explain-analyzing query from editor",
+                            (false, true) => "Explain-analyzing selection from editor",
                         };
-                        let dispatch = QueryWorkflowDispatch::explain(
-                            *connection_id,
-                            database_name.clone(),
-                            sql.clone(),
-                            start_log_message,
-                        );
+                        let dispatch = if *analyze {
+                            QueryWorkflowDispatch::explain_analyze(
+                                *connection_id,
+                                database_name.clone(),
+                                sql.clone(),
+                                start_log_message,
+                            )
+                        } else {
+                            QueryWorkflowDispatch::explain(
+                                *connection_id,
+                                database_name.clone(),
+                                sql.clone(),
+                                start_log_message,
+                            )
+                        };
 
                         _this.dispatch_query_workflow_editor_event(
                             &query_editor_weak,
@@ -1365,6 +1410,25 @@ impl MainView {
 
                         // Query execution can still complete after cancellation,
                         // but WorkspaceState now owns cancellation lifecycle state.
+                    }
+                    QueryEditorEvent::OpenSchemaObject {
+                        connection_id,
+                        database_name,
+                        object,
+                    } => {
+                        tracing::info!(
+                            object = %object.name,
+                            kind = %object.kind,
+                            "Go to definition: opening schema object"
+                        );
+                        _this.open_table_viewer(
+                            *connection_id,
+                            object.name.clone(),
+                            database_name.clone(),
+                            object.is_view(),
+                            window,
+                            cx,
+                        );
                     }
                     QueryEditorEvent::SaveObject { .. } => {
                         // View/procedure/function editors use a separate subscription

@@ -32,6 +32,27 @@ impl BindPlaceholderPolicy {
     }
 }
 
+/// How much a driver's reported affected-row count can be trusted.
+///
+/// A zero count means "the row is gone" only when the driver actually reports
+/// matched rows. MySQL reports *changed* rows unless `CLIENT_FOUND_ROWS` is
+/// negotiated, and some drivers do not report counts at all, so callers must
+/// know which guarantee they have before treating zero as a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AffectedRowCountFidelity {
+    /// The count is the number of rows the statement matched. Zero proves that
+    /// no row matched.
+    #[default]
+    Exact,
+    /// The count is usually correct but can be suppressed by the server (for
+    /// example a SQL Server trigger running `SET NOCOUNT ON`). Zero is
+    /// inconclusive.
+    BestEffort,
+    /// The driver does not report affected-row counts. The value carries no
+    /// information at all.
+    Unavailable,
+}
+
 /// Logical scope requested before selecting a physical/session connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionScope {
@@ -558,10 +579,57 @@ pub struct CellUpdateRequest {
 pub enum RowIdentifier {
     /// Use row index/offset (0-based)
     RowIndex(usize),
-    /// Use primary key value(s)
+    /// Use the values of a key that identifies the row on its own: the primary
+    /// key, or a unique key when the table has no primary key.
     PrimaryKey(Vec<(String, Value)>),
-    /// Use all column values to identify the row uniquely
+    /// Use all column values to identify the row. Tables with duplicate rows
+    /// need [`Connection::single_row_dml_scope`] to keep the statement from
+    /// writing every copy.
     FullRow(Vec<(String, Value)>),
+}
+
+/// How a driver keeps a keyless `UPDATE`/`DELETE` from touching more than one row.
+///
+/// Rows in a table without a primary or unique key are matched on all their
+/// column values, which cannot tell duplicate rows apart. Each dialect narrows
+/// that with whatever it has: a physical row identity (SQLite `rowid`,
+/// PostgreSQL `ctid`) or a statement-level row limit.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SingleRowDmlScope {
+    /// The dialect offers no way to narrow the statement, so every matching
+    /// duplicate is written.
+    #[default]
+    Unsupported,
+    /// Replacement WHERE clause, already narrowed to one physical row.
+    WhereClause(String),
+    /// Clause appended after the WHERE clause, leading space included, such as
+    /// `" LIMIT 1"`.
+    StatementSuffix(&'static str),
+}
+
+impl SingleRowDmlScope {
+    /// Narrow by a physical row-identity expression, e.g. SQLite's `rowid`.
+    pub fn by_row_identity(
+        identity_expression: &str,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> Self {
+        Self::WhereClause(format!(
+            "{identity_expression} IN (SELECT {identity_expression} FROM {qualified_table} WHERE {where_clause} LIMIT 1)"
+        ))
+    }
+
+    /// The WHERE clause to use, plus the clause to append to the statement.
+    ///
+    /// The suffix already carries its leading space, so callers can write
+    /// `format!("... WHERE {where_clause}{suffix}")` unconditionally.
+    pub fn apply<'a>(&'a self, where_clause: &'a str) -> (&'a str, &'a str) {
+        match self {
+            Self::Unsupported => (where_clause, ""),
+            Self::WhereClause(scoped) => (scoped.as_str(), ""),
+            Self::StatementSuffix(suffix) => (where_clause, suffix),
+        }
+    }
 }
 
 /// A database connection
@@ -590,9 +658,36 @@ pub trait Connection: Send + Sync {
         driver_category_from_driver_name(self.driver_name())
     }
 
-    /// Return a lightweight ping SQL statement for this connection.
+    /// Return a lightweight liveness statement for this connection.
+    ///
+    /// Used by connection heartbeats. Non-SQL drivers must override this with
+    /// whatever their `query` implementation accepts as a no-op round trip
+    /// (for example `PING` for Redis), otherwise the heartbeat reports healthy
+    /// connections as failing.
     fn ping_query_sql(&self) -> &'static str {
         "SELECT 1"
+    }
+
+    /// Whether a query is currently occupying this connection.
+    ///
+    /// Drivers that serialise all traffic through a single guarded client should
+    /// report this, because a heartbeat ping would otherwise queue behind a long
+    /// user query and time out. An in-flight query is itself evidence the
+    /// connection is in use, so heartbeats skip a busy connection rather than
+    /// misreading the wait as a dead transport. Drivers that cannot tell return
+    /// `false`.
+    fn is_busy(&self) -> bool {
+        false
+    }
+
+    /// Whether periodic heartbeats keep this connection usable.
+    ///
+    /// Connections that cross a network need regular traffic, because servers,
+    /// connection poolers and NAT gateways all reap idle sessions. Embedded
+    /// engines talking to a local file have no transport to keep warm and
+    /// override this to `false` so the heartbeat skips them.
+    fn requires_heartbeat(&self) -> bool {
+        true
     }
 
     /// Whether this driver requires one connection per logical database.
@@ -913,6 +1008,14 @@ pub trait Connection: Send + Sync {
         false
     }
 
+    /// How much this connection's reported affected-row counts can be trusted.
+    ///
+    /// Callers that treat a zero count as "no row matched" must consult this
+    /// first; see [`AffectedRowCountFidelity`].
+    fn affected_row_count_fidelity(&self) -> AffectedRowCountFidelity {
+        AffectedRowCountFidelity::Exact
+    }
+
     /// Whether a failed table browse should degrade to schema-only metadata.
     fn should_use_schema_only_table_browse_fallback(
         &self,
@@ -935,6 +1038,19 @@ pub trait Connection: Send + Sync {
     /// Generate the driver-specific SQL used to collect performance metrics.
     fn performance_metrics_query_sql(&self) -> Result<String>;
 
+    /// How to keep a keyless `UPDATE`/`DELETE` from touching more than one row.
+    ///
+    /// Only [`RowIdentifier::FullRow`] statements need this: a key already
+    /// matches at most one row. `qualified_table` must be quoted for this
+    /// dialect, and `where_clause` is the keyless match this narrows.
+    fn single_row_dml_scope(
+        &self,
+        _qualified_table: &str,
+        _where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::Unsupported
+    }
+
     /// Update a single cell value
     ///
     /// This is a high-level method that each database driver implements according to
@@ -951,7 +1067,15 @@ pub trait Connection: Send + Sync {
             "updating cell value"
         );
         // Default implementation uses the row identifier to build a WHERE clause
-        // Drivers can override this for database-specific optimizations
+        // Drivers can override this for database-specific optimizations.
+        // The SET value binds first, so WHERE parameters start after it.
+        let mut next_parameter_index = usize::from(request.new_value.is_some());
+        let mut next_placeholder = || {
+            let placeholder = self.format_bind_placeholder(next_parameter_index);
+            next_parameter_index += 1;
+            placeholder
+        };
+
         let (where_clause, mut params) = match &request.row_identifier {
             RowIdentifier::RowIndex(_) => {
                 // This is database-specific and may not work for all databases
@@ -962,7 +1086,9 @@ pub trait Connection: Send + Sync {
             RowIdentifier::PrimaryKey(pk_values) => {
                 let conditions: Vec<String> = pk_values
                     .iter()
-                    .map(|(col, _)| format!("{} = ?", col))
+                    .map(|(col, _)| {
+                        format!("{} = {}", self.quote_identifier(col), next_placeholder())
+                    })
                     .collect();
                 let params: Vec<Value> = pk_values.iter().map(|(_, v)| v.clone()).collect();
                 (conditions.join(" AND "), params)
@@ -972,9 +1098,9 @@ pub trait Connection: Send + Sync {
                     .iter()
                     .map(|(col, val)| {
                         if val == &Value::Null {
-                            format!("{} IS NULL", col)
+                            format!("{} IS NULL", self.quote_identifier(col))
                         } else {
-                            format!("{} = ?", col)
+                            format!("{} = {}", self.quote_identifier(col), next_placeholder())
                         }
                     })
                     .collect();
@@ -987,17 +1113,32 @@ pub trait Connection: Send + Sync {
             }
         };
 
+        let scope = match &request.row_identifier {
+            RowIdentifier::FullRow(_) => {
+                self.single_row_dml_scope(&request.table_name, &where_clause)
+            }
+            _ => SingleRowDmlScope::Unsupported,
+        };
+        let (where_clause, statement_suffix) = scope.apply(&where_clause);
+
         // Build UPDATE statement
         let sql = if let Some(new_val) = &request.new_value {
             params.insert(0, new_val.clone());
             format!(
-                "UPDATE {} SET {} = ? WHERE {}",
-                request.table_name, request.column_name, where_clause
+                "UPDATE {} SET {} = {} WHERE {}{}",
+                request.table_name,
+                self.quote_identifier(&request.column_name),
+                self.format_bind_placeholder(0),
+                where_clause,
+                statement_suffix
             )
         } else {
             format!(
-                "UPDATE {} SET {} = NULL WHERE {}",
-                request.table_name, request.column_name, where_clause
+                "UPDATE {} SET {} = NULL WHERE {}{}",
+                request.table_name,
+                self.quote_identifier(&request.column_name),
+                where_clause,
+                statement_suffix
             )
         };
 
@@ -1069,4 +1210,34 @@ pub trait PreparedStatement: Send + Sync {
 
     /// Close/deallocate the prepared statement
     async fn close(self: Box<Self>) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SingleRowDmlScope;
+
+    #[test]
+    fn row_identity_scope_narrows_a_keyless_match_to_one_row() {
+        let scope = SingleRowDmlScope::by_row_identity("rowid", "\"workflows\"", "\"a\" = ?");
+
+        assert_eq!(
+            scope.apply("\"a\" = ?"),
+            (
+                "rowid IN (SELECT rowid FROM \"workflows\" WHERE \"a\" = ? LIMIT 1)",
+                ""
+            )
+        );
+    }
+
+    #[test]
+    fn statement_suffix_scope_keeps_the_original_where_clause() {
+        let scope = SingleRowDmlScope::StatementSuffix(" LIMIT 1");
+
+        assert_eq!(scope.apply("`a` = ?"), ("`a` = ?", " LIMIT 1"));
+    }
+
+    #[test]
+    fn unsupported_scope_changes_nothing() {
+        assert_eq!(SingleRowDmlScope::Unsupported.apply("a = ?"), ("a = ?", ""));
+    }
 }

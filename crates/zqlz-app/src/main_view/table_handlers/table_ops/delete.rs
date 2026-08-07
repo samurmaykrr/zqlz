@@ -1,5 +1,6 @@
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::ConnectionScope;
 use zqlz_services::DeleteTablesRequest;
 use zqlz_table_workflows::DeleteTablesDecision;
 use zqlz_ui::widgets::{
@@ -8,6 +9,7 @@ use zqlz_ui::widgets::{
 
 use crate::MainView;
 use crate::app::AppState;
+use crate::main_view::table_handlers::table_ops::notify_table_operation_error;
 use crate::workspace_state::RefreshScope;
 
 impl MainView {
@@ -62,23 +64,24 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
-
-        let connection = connection.clone();
+        let connection_service = app_state.connection_service.clone();
         let table_service = app_state.table_service.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let table_name_for_dialog = table_name.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
 
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let connection = connection.clone();
+            let connection_service = connection_service.clone();
             let table_service = table_service.clone();
             let window_handle = window_handle;
             let main_view = main_view.clone();
             let table_name = table_name_for_dialog.clone();
+            let target_database = target_database.clone();
 
             dialog
                 .title("Delete Table")
@@ -106,18 +109,39 @@ impl MainView {
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
-                    let connection = connection.clone();
+                    let connection_service = connection_service.clone();
                     let table_service = table_service.clone();
                     let main_view = main_view.clone();
                     let table_name = table_name.clone();
+                    let target_database = target_database.clone();
 
                     cx.spawn(async move |cx| {
+                        let scope = target_database
+                            .map(ConnectionScope::Database)
+                            .unwrap_or(ConnectionScope::Default);
+                        let resolved_connection = match connection_service
+                            .resolve_connection(connection_id, scope)
+                            .await
+                        {
+                            Ok(resolved_connection) => resolved_connection,
+                            Err(error) => {
+                                tracing::error!(%error, table = %table_name, "Failed to resolve delete-table connection");
+                                notify_table_operation_error(
+                                    &cx,
+                                    window_handle,
+                                    format!("Failed to delete '{}': {}", table_name, error),
+                                );
+                                return;
+                            }
+                        };
+
                         let outcome = table_service
                             .delete_tables(
-                                connection,
+                                resolved_connection.connection,
                                 DeleteTablesRequest {
                                     table_names: vec![table_name.clone()],
                                     continue_on_error: false,
+                                    namespace: resolved_connection.effective_namespace,
                                 },
                             )
                             .await;
@@ -127,6 +151,15 @@ impl MainView {
                                 table = %table_name,
                                 errors = %outcome.errors.join("; "),
                                 "Failed to delete table"
+                            );
+                            notify_table_operation_error(
+                                &cx,
+                                window_handle,
+                                format!(
+                                    "Failed to delete '{}': {}",
+                                    table_name,
+                                    outcome.errors.join("; ")
+                                ),
                             );
                             return;
                         }
@@ -214,16 +247,16 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
-
-        let connection = connection.clone();
+        let connection_service = app_state.connection_service.clone();
         let table_service = app_state.table_service.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
 
         let continue_on_error = Rc::new(RefCell::new(batch_decision.continue_on_error_default));
 
@@ -235,12 +268,13 @@ impl MainView {
         let message = "Are you sure you want to remove the selected tables?".to_string();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let connection = connection.clone();
+            let connection_service = connection_service.clone();
             let window_handle = window_handle;
             let main_view = main_view.clone();
             let table_service = table_service.clone();
             let schema_service = schema_service.clone();
             let table_names = table_names.clone();
+            let target_database = target_database.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
 
@@ -281,20 +315,41 @@ impl MainView {
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
-                    let connection = connection.clone();
+                    let connection_service = connection_service.clone();
                     let main_view = main_view.clone();
                     let table_service = table_service.clone();
                     let schema_service = schema_service.clone();
                     let table_names = table_names.clone();
+                    let target_database = target_database.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
                     cx.spawn(async move |cx| {
+                        let scope = target_database
+                            .map(ConnectionScope::Database)
+                            .unwrap_or(ConnectionScope::Default);
+                        let resolved_connection = match connection_service
+                            .resolve_connection(connection_id, scope)
+                            .await
+                        {
+                            Ok(resolved_connection) => resolved_connection,
+                            Err(error) => {
+                                tracing::error!(%error, "Failed to resolve batch delete connection");
+                                notify_table_operation_error(
+                                    &cx,
+                                    window_handle,
+                                    format!("Failed to delete tables: {}", error),
+                                );
+                                return;
+                            }
+                        };
+
                         let outcome = table_service
                             .delete_tables(
-                                connection,
+                                resolved_connection.connection,
                                 DeleteTablesRequest {
                                     table_names: table_names.clone(),
                                     continue_on_error,
+                                    namespace: resolved_connection.effective_namespace,
                                 },
                             )
                             .await;
@@ -328,6 +383,16 @@ impl MainView {
                                 outcome.deleted_table_names.len(),
                                 table_names.len(),
                                 outcome.errors.join("; ")
+                            );
+                            notify_table_operation_error(
+                                &cx,
+                                window_handle,
+                                format!(
+                                    "Deleted {} of {} tables. {}",
+                                    outcome.deleted_table_names.len(),
+                                    table_names.len(),
+                                    outcome.errors.join("; ")
+                                ),
                             );
                         } else if !outcome.deleted_table_names.is_empty() {
                             tracing::info!(

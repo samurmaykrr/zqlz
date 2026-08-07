@@ -31,6 +31,62 @@ const RESULTS_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
 const RESULTS_MESSAGE_ROW_HEIGHT: f32 = 34.0;
 const RESULTS_LOADING_TICK_MS: u64 = 100;
 
+/// Render a duration for human reading on screen: `0.4ms`, `3ms`, `847ms`, `1.40s`.
+pub fn format_duration_micros(micros: u64) -> String {
+    if micros == 0 {
+        return "0ms".to_string();
+    }
+    if micros < 100 {
+        return "<0.1ms".to_string();
+    }
+    if micros < 1_000 {
+        return format!("{:.1}ms", micros as f64 / 1_000.0);
+    }
+    let milliseconds = (micros as f64 / 1_000.0).round() as u64;
+    if milliseconds < 1_000 {
+        format!("{}ms", milliseconds)
+    } else {
+        format!("{:.2}s", micros as f64 / 1_000_000.0)
+    }
+}
+
+/// A plan cell holding a JSON document rather than a line of plan text.
+fn cell_looks_like_json(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with('[') || trimmed.starts_with('{')
+}
+
+/// Whether an EXPLAIN result is a JSON document rather than rows of plan text.
+fn explain_output_looks_like_json(result: &QueryResult) -> bool {
+    result
+        .rows
+        .first()
+        .and_then(|row| row.values.first())
+        .is_some_and(|value| cell_looks_like_json(&value.to_string()))
+}
+
+/// Flatten an EXPLAIN result's first column into readable plan text, expanding
+/// any JSON document into indented form.
+fn explain_output_as_plan_text(result: &QueryResult) -> String {
+    let mut lines = Vec::new();
+    for row in &result.rows {
+        let Some(value) = row.values.first() else {
+            continue;
+        };
+        let rendered = value.to_string();
+        let expanded = if cell_looks_like_json(&rendered) {
+            serde_json::from_str::<serde_json::Value>(&rendered)
+                .ok()
+                .and_then(|json| serde_json::to_string_pretty(&json).ok())
+                .unwrap_or(rendered)
+        } else {
+            rendered
+        };
+        lines.extend(expanded.lines().map(ToString::to_string));
+    }
+    lines.join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResultTab {
     Message,
@@ -57,6 +113,9 @@ pub enum ExplainSubTab {
 pub struct StatementResult {
     pub sql: String,
     pub duration_ms: u64,
+    /// Wall-clock duration in microseconds; preferred for display since
+    /// sub-millisecond statements floor to `0` in `duration_ms`.
+    pub duration_micros: u64,
     pub result: Option<QueryResult>,
     pub error: Option<String>,
     pub affected_rows: u64,
@@ -69,6 +128,8 @@ pub struct ExplainResult {
     pub sql: String,
     /// Execution time of the EXPLAIN itself
     pub duration_ms: u64,
+    /// Execution time of the EXPLAIN itself, in microseconds.
+    pub duration_micros: u64,
     /// The raw EXPLAIN output as a table (for Op tab - bytecode/opcodes)
     pub raw_output: Option<QueryResult>,
     /// The EXPLAIN QUERY PLAN output (for Plan tab)
@@ -87,6 +148,24 @@ pub struct ExplainResult {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+impl ExplainResult {
+    /// Pick the output the Plan sub-tab should show. PostgreSQL asks for
+    /// `EXPLAIN (FORMAT JSON)` so the Visual and Statistics tabs get actual row
+    /// counts and timings, but that document renders as a single unreadable grid
+    /// cell. Its `raw_output` still holds the indented text plan, so prefer that
+    /// whenever the plan output is a JSON document and a text one is available.
+    fn plan_source(&self) -> Option<&QueryResult> {
+        let query_plan = self.query_plan.as_ref()?;
+        if explain_output_looks_like_json(query_plan)
+            && let Some(raw_output) = self.raw_output.as_ref()
+            && !explain_output_looks_like_json(raw_output)
+        {
+            return Some(raw_output);
+        }
+        Some(query_plan)
+    }
+}
+
 /// Query execution metadata (multiple statements)
 #[derive(Clone)]
 pub struct QueryExecution {
@@ -94,6 +173,8 @@ pub struct QueryExecution {
     pub start_time: chrono::DateTime<chrono::Utc>,
     pub end_time: chrono::DateTime<chrono::Utc>,
     pub duration_ms: u64,
+    /// Wall-clock duration in microseconds across all statements.
+    pub duration_micros: u64,
     pub connection_name: Option<String>,
     pub database_name: Option<String>,
     pub statements: Vec<StatementResult>,
@@ -691,10 +772,14 @@ impl ResultsPanel {
         let Some(query_plan) = self
             .explain_results
             .get(explain_idx)
-            .and_then(|result| result.query_plan.as_ref())
+            .and_then(ExplainResult::plan_source)
         else {
             return;
         };
+
+        if explain_output_looks_like_json(query_plan) {
+            return;
+        }
 
         let delegate = ResultsTableDelegate::new_plan(query_plan);
         let table_state = cx.new(|cx| {
@@ -773,7 +858,7 @@ impl ResultsPanel {
 
     /// Format statement metadata with number, duration, and row count/affected rows
     fn format_statement_metadata(idx: usize, statement: &StatementResult) -> String {
-        let duration_str = format!("{:.3}s", statement.duration_ms as f64 / 1000.0);
+        let duration_str = format_duration_micros(statement.duration_micros);
 
         if let Some(result) = &statement.result {
             // Query with results
@@ -1228,9 +1313,11 @@ impl ResultsPanel {
                                                     .text_color(theme.muted_foreground)
                                                     .child("Elapsed Time:"),
                                             )
-                                            .child(div().text_color(theme.foreground).child(
-                                                format!("{:.3}s", exec.duration_ms as f64 / 1000.0),
-                                            )),
+                                            .child(
+                                                div()
+                                                    .text_color(theme.foreground)
+                                                    .child(format_duration_micros(exec.duration_micros)),
+                                            ),
                                     ),
                             )
                             .child(div().h(px(1.0)).w_full().bg(theme.border))
@@ -1259,13 +1346,6 @@ impl ResultsPanel {
                                             div()
                                                 .text_color(theme.muted_foreground)
                                                 .child("Query Time"),
-                                        ),
-                                    )
-                                    .child(
-                                        h_flex().min_w(px(120.0)).child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Fetch Time"),
                                         ),
                                     ),
                             ),
@@ -1363,20 +1443,10 @@ impl ResultsPanel {
                                                                 .child(
                                                                     h_flex().min_w(px(120.0)).child(
                                                                         div().text_color(theme.foreground).child(
-                                                                            format!(
-                                                                                "{:.3}s",
-                                                                                statement.duration_ms
-                                                                                    as f64
-                                                                                    / 1000.0
+                                                                            format_duration_micros(
+                                                                                statement.duration_micros,
                                                                             ),
                                                                         ),
-                                                                    ),
-                                                                )
-                                                                .child(
-                                                                    h_flex().min_w(px(120.0)).child(
-                                                                        div()
-                                                                            .text_color(theme.foreground)
-                                                                            .child("0.000s"),
                                                                     ),
                                                                 )
                                                                 .into_any_element(),
@@ -1484,10 +1554,11 @@ impl ResultsPanel {
                                                 .text_color(theme.muted_foreground)
                                                 .child("Elapsed Time:"),
                                         )
-                                        .child(div().text_color(theme.foreground).child(format!(
-                                            "{:.3}s",
-                                            exec.duration_ms as f64 / 1000.0
-                                        ))),
+                                        .child(
+                                            div()
+                                                .text_color(theme.foreground)
+                                                .child(format_duration_micros(exec.duration_micros)),
+                                        ),
                                 ),
                         )
                         .child(div().h(px(1.0)).w_full().bg(theme.border))
@@ -1653,7 +1724,7 @@ impl ResultsPanel {
                 )
             };
 
-            div()
+            v_flex()
                 .size_full()
                 .when(is_truncated, |this| {
                     let theme = cx.theme();
@@ -1741,18 +1812,8 @@ impl ResultsPanel {
                         .child(
                             div()
                                 .text_color(theme.foreground)
-                                .child(format!("{:.3}s", exec.duration_ms as f64 / 1000.0)),
+                                .child(format_duration_micros(exec.duration_micros)),
                         ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child("Fetch Time:"),
-                        )
-                        .child(div().text_color(theme.foreground).child("0/s")),
                 )
                 .child(div().h(px(1.0)).w_full().bg(theme.border))
                 .child(
@@ -2033,14 +2094,20 @@ impl ResultsPanel {
         explain_idx: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let plan_source = self
+            .explain_results
+            .get(explain_idx)
+            .and_then(ExplainResult::plan_source);
+
+        if let Some(plan_source) = plan_source
+            && explain_output_looks_like_json(plan_source)
+        {
+            return self.render_explain_plan_text(plan_source, cx);
+        }
+
         if explain_idx < self.explain_plan_table_states.len() {
             let Some(table_state) = self.explain_plan_table_states[explain_idx].as_ref() else {
-                if self
-                    .explain_results
-                    .get(explain_idx)
-                    .and_then(|result| result.query_plan.as_ref())
-                    .is_none()
-                {
+                if plan_source.is_none() {
                     return self
                         .render_explain_no_data("No query plan data available", cx)
                         .into_any_element();
@@ -2065,7 +2132,7 @@ impl ResultsPanel {
                 )
             };
 
-            div()
+            v_flex()
                 .size_full()
                 .when(is_truncated, |this| {
                     let theme = cx.theme();
@@ -2129,7 +2196,7 @@ impl ResultsPanel {
                 )
             };
 
-            div()
+            v_flex()
                 .size_full()
                 .when(is_truncated, |this| {
                     let theme = cx.theme();
@@ -2272,7 +2339,7 @@ impl ResultsPanel {
                             .child(
                                 div()
                                     .text_color(theme.foreground)
-                                    .child(format!("{:.3}s", result.duration_ms as f64 / 1000.0)),
+                                    .child(format_duration_micros(result.duration_micros)),
                             ),
                     )
                     .child(div().h(px(1.0)).w_full().bg(theme.border))
@@ -2321,6 +2388,44 @@ impl ResultsPanel {
     }
 
     /// Render a simple "no data" message for explain views
+    /// Render a plan output as scrollable monospace text, preserving indentation.
+    fn render_explain_plan_text(
+        &self,
+        plan_source: &QueryResult,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let plan_text = explain_output_as_plan_text(plan_source);
+
+        if plan_text.trim().is_empty() {
+            return self
+                .render_explain_no_data("No query plan data available", cx)
+                .into_any_element();
+        }
+
+        div()
+            .id("explain-plan-text")
+            .size_full()
+            .overflow_scroll()
+            .p_3()
+            .child(
+                v_flex().children(
+                    plan_text
+                        .lines()
+                        .map(|line| {
+                            div()
+                                .text_xs()
+                                .whitespace_nowrap()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.foreground)
+                                .child(line.replace(' ', "\u{a0}"))
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_explain_no_data(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -2394,5 +2499,133 @@ impl Panel for ResultsPanel {
 
     fn closable(&self, _cx: &App) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zqlz_core::{QueryResult, Row, Value};
+
+    use super::{
+        ExplainResult, explain_output_as_plan_text, explain_output_looks_like_json,
+        format_duration_micros,
+    };
+
+    #[test]
+    fn formats_sub_millisecond_durations() {
+        assert_eq!(format_duration_micros(0), "0ms");
+        assert_eq!(format_duration_micros(1), "<0.1ms");
+        assert_eq!(format_duration_micros(99), "<0.1ms");
+        assert_eq!(format_duration_micros(120), "0.1ms");
+        assert_eq!(format_duration_micros(400), "0.4ms");
+        assert_eq!(format_duration_micros(950), "0.9ms");
+        assert_eq!(format_duration_micros(999), "1.0ms");
+    }
+
+    #[test]
+    fn formats_millisecond_durations() {
+        assert_eq!(format_duration_micros(1_000), "1ms");
+        assert_eq!(format_duration_micros(3_000), "3ms");
+        assert_eq!(format_duration_micros(847_400), "847ms");
+        assert_eq!(format_duration_micros(999_000), "999ms");
+    }
+
+    #[test]
+    fn formats_second_durations() {
+        assert_eq!(format_duration_micros(1_000_000), "1.00s");
+        assert_eq!(format_duration_micros(1_400_000), "1.40s");
+        assert_eq!(format_duration_micros(75_500_000), "75.50s");
+    }
+
+    fn single_column_result(column: &str, cells: &[&str]) -> QueryResult {
+        let mut result = QueryResult::empty();
+        result.columns = vec![zqlz_core::ColumnMeta {
+            name: column.to_string(),
+            ..Default::default()
+        }];
+        result.rows = cells
+            .iter()
+            .map(|cell| {
+                Row::new(
+                    vec![column.to_string()],
+                    vec![Value::String((*cell).to_string())],
+                )
+            })
+            .collect();
+        result
+    }
+
+    fn explain_result(
+        raw_output: Option<QueryResult>,
+        query_plan: Option<QueryResult>,
+    ) -> ExplainResult {
+        ExplainResult {
+            sql: "SELECT 1".to_string(),
+            duration_ms: 0,
+            duration_micros: 0,
+            raw_output,
+            query_plan,
+            analyzed_plan: None,
+            provider_id: None,
+            error: None,
+            connection_name: None,
+            database_name: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn detects_json_shaped_explain_output() {
+        let json = single_column_result("QUERY PLAN", &["[\n  {\"Plan\": {}}\n]"]);
+        let text = single_column_result("QUERY PLAN", &["Seq Scan on users  (cost=0.00..1.00)"]);
+
+        assert!(explain_output_looks_like_json(&json));
+        assert!(!explain_output_looks_like_json(&text));
+    }
+
+    #[test]
+    fn plan_source_prefers_text_output_over_json_plan() {
+        let text = single_column_result("QUERY PLAN", &["Seq Scan on users"]);
+        let json = single_column_result("QUERY PLAN", &["[{\"Plan\": {}}]"]);
+        let result = explain_result(Some(text), Some(json));
+
+        let source = result.plan_source().expect("plan source");
+        assert!(!explain_output_looks_like_json(source));
+    }
+
+    #[test]
+    fn plan_source_keeps_text_plan_for_text_dialects() {
+        let raw = single_column_result("id", &["0"]);
+        let plan = single_column_result("detail", &["SCAN users"]);
+        let result = explain_result(Some(raw), Some(plan));
+
+        let source = result.plan_source().expect("plan source");
+        assert_eq!(source.rows.len(), 1);
+        assert_eq!(explain_output_as_plan_text(source), "SCAN users");
+    }
+
+    #[test]
+    fn plan_source_is_absent_without_a_query_plan() {
+        let result = explain_result(Some(single_column_result("QUERY PLAN", &["Seq Scan"])), None);
+        assert!(result.plan_source().is_none());
+    }
+
+    #[test]
+    fn plan_text_expands_json_documents() {
+        let json = single_column_result("QUERY PLAN", &["[{\"Plan\":{\"Node Type\":\"Seq Scan\"}}]"]);
+
+        let text = explain_output_as_plan_text(&json);
+        assert!(text.lines().count() > 1);
+        assert!(text.contains("\"Node Type\": \"Seq Scan\""));
+    }
+
+    #[test]
+    fn plan_text_joins_text_rows() {
+        let text = single_column_result("QUERY PLAN", &["Seq Scan on users", "  Filter: (id > 1)"]);
+
+        assert_eq!(
+            explain_output_as_plan_text(&text),
+            "Seq Scan on users\n  Filter: (id > 1)"
+        );
     }
 }

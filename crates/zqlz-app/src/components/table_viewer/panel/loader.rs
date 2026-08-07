@@ -1,4 +1,5 @@
 use super::*;
+use crate::main_view::table_handlers_utils::sql::is_default_searchable_type;
 
 impl TableViewerPanel {
     fn metadata_for_existing_column(&self, column_name: &str) -> Option<&ColumnMeta> {
@@ -57,8 +58,7 @@ impl TableViewerPanel {
                 heavy_count = heavy_count.saturating_add(1);
             }
 
-            let lowered_type = column.data_type.to_ascii_lowercase();
-            if zqlz_services::TableService::is_string_type(&lowered_type) {
+            if is_default_searchable_type(&column.data_type) {
                 if is_heavy {
                     heavy_searchable_columns.push(column.name.clone());
                 } else {
@@ -331,6 +331,14 @@ impl TableViewerPanel {
             self.search_visible = false;
             self.search_input = None;
             self._search_debounce_task = None;
+            // Key metadata belongs to the table that was open before; keeping it
+            // would address rows of the new table by the old table's columns.
+            self.primary_key_columns.clear();
+            self.row_identity = RowIdentity::assumed_for(if is_view {
+                TableType::View
+            } else {
+                TableType::Table
+            });
         }
 
         let viewer_panel_weak = cx.entity().downgrade();
@@ -344,6 +352,7 @@ impl TableViewerPanel {
         delegate.set_auto_commit_mode(self.auto_commit_mode);
         delegate.set_driver_category(driver_category);
         delegate.set_primary_key_columns(self.primary_key_columns.clone());
+        delegate.set_row_identity(self.row_identity.clone());
         self.apply_preserved_column_widths(&mut delegate, &preserved_widths);
         let column_meta = delegate.column_meta.clone();
         TableViewerDelegate::apply_key_value_database_column_widths(

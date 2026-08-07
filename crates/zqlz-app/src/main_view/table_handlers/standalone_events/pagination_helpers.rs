@@ -6,6 +6,8 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
+use zqlz_ui::widgets::WindowExt;
+use zqlz_ui::widgets::notification::Notification;
 
 use crate::app::AppState;
 use crate::components::TableViewerEvent;
@@ -257,7 +259,7 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                 Err(e) => {
                     tracing::error!("Failed to reload table with pagination: {}", e);
 
-                    viewer_entity.update(cx, |viewer, cx| {
+                    if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
                         if viewer.is_current_request(request_generation) {
                             viewer.set_loading(false, cx);
                             if let Some(pag_state) = &viewer.pagination_state {
@@ -266,8 +268,17 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                                     cx.notify();
                                 });
                             }
+                            window.push_notification(
+                                Notification::error(format!(
+                                    "Failed to reload table: {}",
+                                    e
+                                )),
+                                cx,
+                            );
                         }
-                    });
+                    }) {
+                        tracing::debug!(error = %error, "Paginated reload error arrived after viewer dropped");
+                    }
                 }
             }
 

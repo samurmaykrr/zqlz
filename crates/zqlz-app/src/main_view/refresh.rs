@@ -142,12 +142,22 @@ impl MainView {
                 })
                 .await;
 
+            let mut object_features = None;
+
             if refresh.is_ok() {
                 match connection_service
                     .connection_feature_set(connection_id, target_database.clone())
                     .await
                 {
                     Ok(feature_set) => {
+                        object_features = Some(feature_set.objects.clone());
+                        sidebar.update(cx, |sidebar, cx| {
+                            sidebar.set_object_features(
+                                connection_id,
+                                feature_set.objects.clone(),
+                                cx,
+                            );
+                        });
                         if let Err(error) = workspace_state.update(cx, |state, cx| {
                             state.set_connection_feature_set(
                                 connection_id,
@@ -295,6 +305,7 @@ impl MainView {
                                     objects_data,
                                     objects_manifest,
                                     object_capabilities,
+                                    object_features.clone(),
                                     cx,
                                 );
                             });
@@ -346,6 +357,7 @@ impl MainView {
                                     objects_panel_data,
                                     objects_panel_manifest,
                                     payload.object_capabilities,
+                                    object_features.clone(),
                                     cx,
                                 );
                             });
@@ -393,6 +405,7 @@ impl MainView {
                                     objects_panel_data,
                                     objects_panel_manifest,
                                     payload.object_capabilities,
+                                    object_features.clone(),
                                     cx,
                                 );
                             });

@@ -21,8 +21,7 @@ use zqlz_text_editor::syntax::{
     highlight_coverage, render_highlight_runs, syntax_quality_fixtures,
 };
 use zqlz_text_editor::{
-    Cursor, DisplayMap, DisplayTextChunk, Selection, SelectionsCollection, SqlCompletionProvider,
-    TextBuffer,
+    Cursor, DisplayMap, DisplayTextChunk, Selection, SelectionsCollection, TextBuffer,
     editor_core::{EditorCoreSnapshot, LinePrefixEditMode, TextReplacementEdit},
 };
 #[cfg(feature = "syntax-probe-drivers")]

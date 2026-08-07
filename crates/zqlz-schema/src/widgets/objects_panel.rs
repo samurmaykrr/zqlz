@@ -1,12 +1,15 @@
 //! Objects panel - displays database objects using the Table component
 
+use std::collections::{HashMap, HashSet};
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_connection::SidebarObjectCapabilities;
 use zqlz_core::{
-    ObjectsPanelAction, ObjectsPanelColumn, ObjectsPanelColumnAlignment, ObjectsPanelData,
-    ObjectsPanelManifest, ObjectsPanelObjectRef, ObjectsPanelRow,
+    ObjectFeatureSet, ObjectsPanelAction, ObjectsPanelColumn, ObjectsPanelColumnAlignment,
+    ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelObjectRef, ObjectsPanelRow,
+    SINGLE_SELECTION_REASON, objects_panel_action_feature_availability,
 };
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, Sizable, Size, ZqlzIcon, action_icon_from_key,
@@ -50,6 +53,28 @@ struct ObjectsPanelKindMenuEntry {
 struct ObjectsPanelScopeMenuEntry {
     scope_id: Option<String>,
     label: String,
+}
+
+/// Why the connection cannot run `action_id`, or `None` when it can.
+fn object_action_unavailable_reason(
+    features: &ObjectFeatureSet,
+    action_id: &str,
+) -> Option<SharedString> {
+    let availability = objects_panel_action_feature_availability(features, action_id);
+    if availability.available {
+        return None;
+    }
+
+    Some(SharedString::from(availability.reason_or(format!(
+        "The '{action_id}' action is not available for this connection"
+    ))))
+}
+
+/// A row action paired with the reason it cannot be used, if any.
+#[derive(Clone)]
+struct OrderedActionEntry {
+    action: ObjectsPanelAction,
+    disabled_reason: Option<SharedString>,
 }
 
 #[derive(Clone)]
@@ -189,12 +214,19 @@ pub struct ObjectsTableDelegate {
     is_loading: bool,
     /// Effective object capabilities for the active connection.
     object_capabilities: SidebarObjectCapabilities,
+    /// Which object actions the active connection can actually perform, so the
+    /// context menu can explain why an action is unavailable instead of failing
+    /// after the user clicks it.
+    object_features: Option<ObjectFeatureSet>,
     /// Declarative object/action behavior for generic panel rendering.
     manifest: ObjectsPanelManifest,
     /// Currently active object kind.
     active_kind_id: Option<String>,
     /// Currently active scope within the active kind.
     active_scope_id: Option<String>,
+    /// Kinds whose rows have actually been fetched, so an unfetched kind is not
+    /// mistaken for a kind that is genuinely empty.
+    loaded_kind_ids: HashSet<String>,
     /// Current search query applied to the active kind.
     search_text: String,
     /// Cached selected row indices for context menu (populated when context menu opens)
@@ -219,9 +251,11 @@ impl ObjectsTableDelegate {
             panel,
             is_loading: false,
             object_capabilities: SidebarObjectCapabilities::default(),
+            object_features: None,
             manifest: ObjectsPanelManifest::default(),
             active_kind_id: None,
             active_scope_id: None,
+            loaded_kind_ids: HashSet::new(),
             search_text: String::new(),
             context_menu_selected_rows: Vec::new(),
         }
@@ -373,13 +407,16 @@ impl ObjectsTableDelegate {
         objects: &mut Vec<ObjectsPanelRow>,
         kind_id: &str,
         incoming_rows: Vec<ObjectsPanelRow>,
+        already_loaded: bool,
     ) {
         let existing_count = objects
             .iter()
             .filter(|row| row.object_kind_id() == kind_id)
             .count();
 
-        if incoming_rows.is_empty() && existing_count > 0 {
+        // Only protect rows against an empty payload once the kind has been fetched
+        // before; otherwise a first, legitimately-empty load could never settle.
+        if already_loaded && incoming_rows.is_empty() && existing_count > 0 {
             tracing::warn!(
                 kind_id,
                 existing_count,
@@ -449,12 +486,32 @@ impl ObjectsTableDelegate {
         self.connection_id = Some(connection_id);
         self.default_columns = data.columns;
         self.objects = data.rows;
+        // A full payload is self-describing: only the kinds it carries are loaded.
+        // Kinds it omits become "not fetched yet" again so they get re-requested.
+        self.loaded_kind_ids = self
+            .objects
+            .iter()
+            .map(|row| row.object_kind_id().to_string())
+            .collect();
         self.rebuild_active_kind_projection();
     }
 
     /// Set the effective object capabilities for the active connection.
     pub fn set_object_capabilities(&mut self, object_capabilities: SidebarObjectCapabilities) {
         self.object_capabilities = object_capabilities;
+    }
+
+    /// Set which object actions the active connection advertises.
+    pub fn set_object_features(&mut self, object_features: Option<ObjectFeatureSet>) {
+        self.object_features = object_features;
+    }
+
+    /// Why the connection cannot run `action_id`, or `None` when it can. Returns
+    /// `None` while the feature set is still unknown so actions are not blocked by
+    /// a load that has not finished.
+    fn action_unavailable_reason(&self, action_id: &str) -> Option<SharedString> {
+        let features = self.object_features.as_ref()?;
+        object_action_unavailable_reason(features, action_id)
     }
 
     pub fn set_manifest(&mut self, manifest: ObjectsPanelManifest) {
@@ -478,8 +535,14 @@ impl ObjectsTableDelegate {
     }
 
     pub fn replace_kind_objects(&mut self, kind_id: &str, data: ObjectsPanelData) {
-        Self::merge_kind_rows(&mut self.objects, kind_id, data.rows);
+        let already_loaded = self.loaded_kind_ids.contains(kind_id);
+        Self::merge_kind_rows(&mut self.objects, kind_id, data.rows, already_loaded);
+        self.loaded_kind_ids.insert(kind_id.to_string());
         self.rebuild_active_kind_projection();
+    }
+
+    pub fn is_kind_loaded(&self, kind_id: &str) -> bool {
+        self.loaded_kind_ids.contains(kind_id)
     }
 
     fn active_kind_label(&self) -> Option<String> {
@@ -580,6 +643,7 @@ impl ObjectsTableDelegate {
         self.default_columns = default_data.columns.clone();
         self.filtered_objects.clear();
         self.object_capabilities = SidebarObjectCapabilities::default();
+        self.object_features = None;
         self.manifest = ObjectsPanelManifest::default();
         self.active_kind_id = None;
         self.active_scope_id = None;
@@ -761,7 +825,8 @@ impl TableDelegate for ObjectsTableDelegate {
                 );
 
                 let mut last_group: Option<String> = None;
-                for action in &ordered_actions {
+                for entry in &ordered_actions {
+                    let action = &entry.action;
                     if let Some(group) = action.group.as_deref()
                         && last_group.as_deref().is_some()
                         && last_group.as_deref() != Some(group)
@@ -769,23 +834,30 @@ impl TableDelegate for ObjectsTableDelegate {
                         generic_menu = generic_menu.separator();
                     }
 
+                    let disabled_reason = entry
+                        .disabled_reason
+                        .clone()
+                        .or_else(|| self.action_unavailable_reason(&action.id));
+
                     generic_menu = generic_menu.item({
                         let panel = panel.clone();
                         let menu_entity = menu_entity.clone();
                         let action_id = action.id.clone();
                         let object_refs = selected_object_refs.clone();
-                        PopupMenuItem::new(action.label.clone()).on_click(window.listener_for(
-                            &menu_entity,
-                            move |_this, _, _, cx| {
-                                _ = panel.update(cx, |_panel, cx| {
-                                    cx.emit(ObjectsPanelEvent::InvokeAction {
-                                        connection_id,
-                                        action_id: action_id.clone(),
-                                        object_refs: object_refs.clone(),
+                        PopupMenuItem::new(action.label.clone())
+                            .disabled_with_reason(disabled_reason)
+                            .on_click(window.listener_for(
+                                &menu_entity,
+                                move |_this, _, _, cx| {
+                                    _ = panel.update(cx, |_panel, cx| {
+                                        cx.emit(ObjectsPanelEvent::InvokeAction {
+                                            connection_id,
+                                            action_id: action_id.clone(),
+                                            object_refs: object_refs.clone(),
+                                        });
                                     });
-                                });
-                            },
-                        ))
+                                },
+                            ))
                     });
 
                     last_group = action.group.clone();
@@ -848,6 +920,14 @@ pub struct ObjectsPanel {
     database_name: Option<String>,
     /// Search text for filtering
     search_text: String,
+    /// Monotonic ticket source for per-kind loads, so results superseded by a newer
+    /// load cannot overwrite fresher rows.
+    kind_request_counter: u64,
+    /// Ticket taken by the most recent full reload; per-kind results issued before it
+    /// describe data that has since been replaced.
+    last_reload_ticket: u64,
+    /// Latest outstanding ticket per kind.
+    latest_kind_tickets: HashMap<String, u64>,
     /// Context menu for empty area right-click
     empty_area_menu: Option<Entity<PopupMenu>>,
     /// Whether the empty area context menu is visible
@@ -902,14 +982,19 @@ impl ObjectsPanel {
         Self::normalized_toolbar_action_entries(toolbar_actions)
     }
 
+    /// Keep every action visible under multi-selection, marking the ones that need a
+    /// single object so the menu can say why they are unavailable.
     fn ordered_action_entries(
         actions: &[ObjectsPanelAction],
         is_multi: bool,
-    ) -> Vec<ObjectsPanelAction> {
+    ) -> Vec<OrderedActionEntry> {
         actions
             .iter()
-            .filter(|action| !(action.requires_single_selection && is_multi))
-            .cloned()
+            .map(|action| OrderedActionEntry {
+                disabled_reason: (action.requires_single_selection && is_multi)
+                    .then(|| SharedString::from(SINGLE_SELECTION_REASON)),
+                action: action.clone(),
+            })
             .collect()
     }
 
@@ -1008,6 +1093,42 @@ impl ObjectsPanel {
         cx.notify();
     }
 
+    /// Start a per-kind load and return the ticket its result must still hold to be applied.
+    pub fn begin_kind_request(&mut self, kind_id: &str) -> u64 {
+        self.kind_request_counter += 1;
+        self.latest_kind_tickets
+            .insert(kind_id.to_string(), self.kind_request_counter);
+        self.kind_request_counter
+    }
+
+    /// A ticket is current while it is the newest request for its own kind and no
+    /// full reload has replaced the panel's rows since it was issued.
+    pub fn is_kind_request_current(&self, kind_id: &str, ticket: u64) -> bool {
+        ticket > self.last_reload_ticket
+            && self.latest_kind_tickets.get(kind_id) == Some(&ticket)
+    }
+
+    /// Apply per-kind rows only if no newer load has superseded the request.
+    pub fn replace_kind_objects_if_current(
+        &mut self,
+        ticket: u64,
+        kind_id: &str,
+        data: ObjectsPanelData,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_kind_request_current(kind_id, ticket) {
+            tracing::debug!(
+                kind_id,
+                ticket,
+                last_reload_ticket = self.last_reload_ticket,
+                "Dropping superseded objects panel kind result"
+            );
+            return;
+        }
+
+        self.replace_kind_objects(kind_id, data, cx);
+    }
+
     pub fn replace_kind_objects(
         &mut self,
         kind_id: &str,
@@ -1098,6 +1219,9 @@ impl ObjectsPanel {
             connection_name: None,
             database_name: None,
             search_text: String::new(),
+            kind_request_counter: 0,
+            last_reload_ticket: 0,
+            latest_kind_tickets: HashMap::new(),
             empty_area_menu: None,
             empty_area_menu_open: false,
             empty_area_menu_position: Point::default(),
@@ -1115,6 +1239,7 @@ impl ObjectsPanel {
         data: ObjectsPanelData,
         manifest: ObjectsPanelManifest,
         object_capabilities: SidebarObjectCapabilities,
+        object_features: Option<ObjectFeatureSet>,
         cx: &mut Context<Self>,
     ) {
         self.selected_connection_id = Some(connection_id);
@@ -1122,14 +1247,23 @@ impl ObjectsPanel {
         self.database_name = database_name.clone();
         self.has_connection = true;
         self.object_capabilities = object_capabilities;
+        // A full reload replaces every row, so any per-kind request still in flight
+        // is describing data that no longer exists.
+        self.kind_request_counter += 1;
+        self.last_reload_ticket = self.kind_request_counter;
+        self.latest_kind_tickets.clear();
 
         self.table_state.update(cx, |state, cx| {
             state
                 .delegate_mut()
                 .set_object_capabilities(object_capabilities);
-            state.delegate_mut().set_manifest(manifest);
+            state.delegate_mut().set_object_features(object_features);
             state.delegate_mut().set_database_name(database_name);
+            // Rows must land before the manifest so the first active-kind resolution
+            // can prefer a kind that actually has data instead of falling back to the
+            // manifest's first kind.
             state.delegate_mut().set_extended_data(connection_id, data);
+            state.delegate_mut().set_manifest(manifest);
             if !self.search_text.is_empty() {
                 state.delegate_mut().filter(&self.search_text);
             }
@@ -1137,6 +1271,33 @@ impl ObjectsPanel {
         });
 
         cx.notify();
+
+        self.request_active_kind_if_unloaded(cx);
+    }
+
+    /// Fetch the active kind lazily when the payload we just applied did not carry
+    /// its rows. Without this the panel can settle on a kind nobody ever requested
+    /// (e.g. MySQL's leading `database` kind) and render an empty table until the
+    /// user opens the kind menu.
+    fn request_active_kind_if_unloaded(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.selected_connection_id else {
+            return;
+        };
+
+        let delegate = self.table_state.read(cx).delegate();
+        let Some(kind_id) = delegate.active_kind_id().map(ToString::to_string) else {
+            return;
+        };
+        if delegate.is_kind_loaded(&kind_id) {
+            return;
+        }
+        let scope_id = delegate.active_scope_id().map(ToString::to_string);
+
+        cx.emit(ObjectsPanelEvent::ActiveKindChanged {
+            connection_id,
+            kind_id,
+            scope_id,
+        });
     }
 
     /// Clear the objects list (called when connection is closed)
@@ -1272,13 +1433,13 @@ impl ObjectsPanel {
             return;
         }
 
-        let toolbar_actions = self
-            .table_state
-            .read(cx)
-            .delegate()
-            .manifest
-            .toolbar_actions
-            .clone();
+        let (toolbar_actions, object_features) = {
+            let delegate = self.table_state.read(cx).delegate();
+            (
+                delegate.manifest.toolbar_actions.clone(),
+                delegate.object_features.clone(),
+            )
+        };
         let empty_area_actions =
             ObjectsPanel::normalized_action_entries_for_empty_area(&toolbar_actions);
 
@@ -1300,19 +1461,24 @@ impl ObjectsPanel {
 
                 let action_id = action.id.clone();
                 let panel = panel_weak.clone();
-                menu = menu.item(PopupMenuItem::new(action.label.clone()).on_click(
-                    move |_, _, cx| {
-                        if let Err(error) = panel.update(cx, |panel, cx| {
-                            panel.emit_toolbar_action(&action_id, cx);
-                        }) {
-                            tracing::warn!(
-                                %error,
-                                action_id,
-                                "Failed to invoke empty-area action"
-                            );
-                        }
-                    },
-                ));
+                let disabled_reason = object_features
+                    .as_ref()
+                    .and_then(|features| object_action_unavailable_reason(features, &action.id));
+                menu = menu.item(
+                    PopupMenuItem::new(action.label.clone())
+                        .disabled_with_reason(disabled_reason)
+                        .on_click(move |_, _, cx| {
+                            if let Err(error) = panel.update(cx, |panel, cx| {
+                                panel.emit_toolbar_action(&action_id, cx);
+                            }) {
+                                tracing::warn!(
+                                    %error,
+                                    action_id,
+                                    "Failed to invoke empty-area action"
+                                );
+                            }
+                        }),
+                );
 
                 last_group = action.group.clone();
             }
@@ -1580,9 +1746,11 @@ mod tests {
         resolve_destructive_row_action_id, resolve_primary_row_action_id,
         resolve_refresh_action_id,
     };
+    use uuid::Uuid;
+    use gpui::SharedString;
     use zqlz_core::{
-        ObjectsPanelAction, ObjectsPanelManifest, ObjectsPanelObjectKind, ObjectsPanelObjectRef,
-        ObjectsPanelRow,
+        ObjectsPanelAction, ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelObjectKind,
+        ObjectsPanelObjectRef, ObjectsPanelRow, SINGLE_SELECTION_REASON,
     };
 
     fn row(kind_id: &str, name: &str) -> ObjectsPanelRow {
@@ -1626,6 +1794,33 @@ mod tests {
             object_kinds: vec![kind],
             toolbar_actions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ordered_action_entries_keep_single_selection_actions_under_multi_select() {
+        let actions = vec![
+            ObjectsPanelAction::new("open", "Open"),
+            ObjectsPanelAction::new("design", "Design").single_selection(),
+        ];
+
+        let entries = ObjectsPanel::ordered_action_entries(&actions, true);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].disabled_reason, None);
+        assert_eq!(
+            entries[1].disabled_reason,
+            Some(SharedString::from(SINGLE_SELECTION_REASON))
+        );
+    }
+
+    #[test]
+    fn ordered_action_entries_enable_every_action_for_single_selection() {
+        let actions = vec![ObjectsPanelAction::new("design", "Design").single_selection()];
+
+        let entries = ObjectsPanel::ordered_action_entries(&actions, false);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].disabled_reason, None);
     }
 
     #[test]
@@ -1756,11 +1951,81 @@ mod tests {
         assert_eq!(message, "Try changing the kind, scope, or search.");
     }
 
+    fn manifest_with_kinds(kind_ids: &[&str]) -> ObjectsPanelManifest {
+        ObjectsPanelManifest {
+            object_kinds: kind_ids
+                .iter()
+                .map(|kind_id| ObjectsPanelObjectKind::new(*kind_id, "Kind", "Kinds"))
+                .collect(),
+            toolbar_actions: Vec::new(),
+        }
+    }
+
+    fn delegate_with_kinds(kind_ids: &[&str]) -> ObjectsTableDelegate {
+        let mut delegate = ObjectsTableDelegate::new(gpui::WeakEntity::new_invalid());
+        delegate.set_manifest(manifest_with_kinds(kind_ids));
+        delegate
+    }
+
+    fn data(rows: Vec<ObjectsPanelRow>) -> ObjectsPanelData {
+        ObjectsPanelData {
+            columns: Vec::new(),
+            rows,
+        }
+    }
+
+    #[test]
+    fn active_kind_prefers_a_kind_with_rows_over_the_leading_manifest_kind() {
+        // MySQL lists `database` first, but the bootstrap payload only carries tables.
+        // `load_objects` applies rows before the manifest so the resolution sees them.
+        let mut delegate = ObjectsTableDelegate::new(gpui::WeakEntity::new_invalid());
+
+        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("table", "orders")]));
+        delegate.set_manifest(manifest_with_kinds(&["database", "table"]));
+
+        assert_eq!(delegate.active_kind_id(), Some("table"));
+        assert!(delegate.is_kind_loaded("table"));
+        assert!(!delegate.is_kind_loaded("database"));
+    }
+
+    #[test]
+    fn a_sticky_active_kind_without_rows_is_reported_as_unloaded() {
+        // The user's kind choice survives a reload that did not carry its rows, so the
+        // panel must be able to tell "not fetched" from "empty" and re-request it.
+        let mut delegate = delegate_with_kinds(&["database", "table"]);
+        delegate.set_active_kind(Some("database"));
+
+        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("table", "orders")]));
+
+        assert_eq!(delegate.active_kind_id(), Some("database"));
+        assert!(!delegate.is_kind_loaded("database"));
+    }
+
+    #[test]
+    fn full_payload_marks_kinds_it_omits_as_unloaded() {
+        let mut delegate = delegate_with_kinds(&["database", "table"]);
+        delegate.replace_kind_objects("database", data(vec![row("database", "erp_lab")]));
+        assert!(delegate.is_kind_loaded("database"));
+
+        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("table", "orders")]));
+
+        assert!(!delegate.is_kind_loaded("database"));
+    }
+
+    #[test]
+    fn first_kind_load_accepts_a_genuinely_empty_result() {
+        let mut delegate = delegate_with_kinds(&["database"]);
+
+        delegate.replace_kind_objects("database", data(Vec::new()));
+
+        assert!(delegate.is_kind_loaded("database"));
+    }
+
     #[test]
     fn merge_kind_rows_preserves_visible_inventory_when_enrichment_is_empty() {
         let mut rows = vec![row_with_values("table", "orders", &[("name", "orders")])];
 
-        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", Vec::new());
+        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", Vec::new(), true);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].object_name(), "orders");
@@ -1779,7 +2044,7 @@ mod tests {
             &[("name", "orders"), ("owner", "postgres"), ("oid", "123")],
         )];
 
-        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", incoming);
+        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", incoming, true);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(
@@ -1802,7 +2067,7 @@ mod tests {
             &[("name", "refunds"), ("owner", "postgres")],
         )];
 
-        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", incoming);
+        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", incoming, true);
 
         let names = rows.iter().map(|row| row.object_name()).collect::<Vec<_>>();
         assert_eq!(names, vec!["orders", "refunds"]);

@@ -609,6 +609,13 @@ impl CommandPaletteDelegate {
         views: &[String],
         object_capabilities: SidebarObjectCapabilities,
     ) {
+        // An empty payload means the schema is still loading (or failed to
+        // load); keep the previously known commands rather than blanking the
+        // palette.
+        if tables.is_empty() && views.is_empty() {
+            return;
+        }
+
         // Remove existing schema commands for this connection.
         self.commands.retain(|cmd| {
             !matches!(

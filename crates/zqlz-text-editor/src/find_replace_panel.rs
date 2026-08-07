@@ -48,6 +48,7 @@ pub struct FindReplacePanel {
     case_sensitive: bool,
     whole_word: bool,
     use_regex: bool,
+    preserve_case: bool,
     #[allow(dead_code)]
     search_in_selection: bool,
     replace_mode: bool,
@@ -106,6 +107,7 @@ impl FindReplacePanel {
             case_sensitive: false,
             whole_word: false,
             use_regex: false,
+            preserve_case: false,
             search_in_selection: false,
             replace_mode: show_replace,
             total_matches: 0,
@@ -124,6 +126,7 @@ impl FindReplacePanel {
             case_sensitive: self.case_sensitive,
             whole_word: self.whole_word,
             use_regex: self.use_regex,
+            preserve_case: self.preserve_case,
         }
     }
 
@@ -378,6 +381,20 @@ impl Render for FindReplacePanel {
                                     .w_full()
                                     .shadow_none(),
                             ),
+                        )
+                        .child(
+                            Button::new("preserve-case")
+                                .selected(self.preserve_case)
+                                .xsmall()
+                                .compact()
+                                .ghost()
+                                .label("AB")
+                                .tooltip("Preserve Case")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.preserve_case = !this.preserve_case;
+                                    this.emit_query_changed(cx);
+                                    cx.notify();
+                                })),
                         )
                         .child(
                             Button::new("replace-one")

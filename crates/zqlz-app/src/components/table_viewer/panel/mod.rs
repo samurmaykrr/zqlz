@@ -4,7 +4,7 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::{ColumnMeta, DriverCategory, ForeignKeyInfo, QueryResult};
+use zqlz_core::{ColumnMeta, DriverCategory, ForeignKeyInfo, QueryResult, RowIdentity, TableType};
 use zqlz_services::ColumnInfo as SchemaColumnInfo;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Selectable, Sizable,
@@ -164,6 +164,9 @@ pub struct TableViewerPanel {
     /// expensive high-OFFSET scans).
     pub(crate) primary_key_columns: Vec<String>,
 
+    /// How rows of the current table are addressed when edited or deleted.
+    pub(crate) row_identity: RowIdentity,
+
     /// When the current loading operation started (for elapsed time display)
     pub(super) loading_started_at: Option<Instant>,
 
@@ -221,6 +224,7 @@ impl TableViewerPanel {
             transaction_panel_expanded: false,
             foreign_keys: Vec::new(),
             primary_key_columns: Vec::new(),
+            row_identity: RowIdentity::default(),
             loading_started_at: None,
             _loading_timer_task: None,
             active_request_generation: 0,

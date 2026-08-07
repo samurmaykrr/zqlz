@@ -245,3 +245,74 @@ fn test_where_clause_prefers_in_scope_columns_over_keywords() {
         );
     }
 }
+
+#[test]
+fn test_where_clause_offers_json_operators_for_postgres() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT * FROM users WHERE data->");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions_with_trigger(&text, offset, false);
+    let arrow_text_operator = completions
+        .iter()
+        .find(|completion| completion.label.starts_with("->> "))
+        .expect("->> operator completion for postgres");
+
+    assert_eq!(arrow_text_operator.kind, Some(CompletionItemKind::OPERATOR));
+    // The typed `->` stays in the document, so only the remainder is inserted.
+    assert_eq!(arrow_text_operator.insert_text.as_deref(), Some(">"));
+
+    assert!(
+        !completions
+            .iter()
+            .any(|completion| completion.label.starts_with("@> ")),
+        "operators not matching the typed run should be filtered out"
+    );
+}
+
+#[test]
+fn test_where_clause_offers_containment_operators_for_postgres() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT * FROM users WHERE data @");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions_with_trigger(&text, offset, false);
+    assert!(
+        completions
+            .iter()
+            .any(|completion| completion.label.starts_with("@> ")),
+        "@> operator completion for postgres"
+    );
+}
+
+#[test]
+fn test_where_clause_hides_json_operators_for_sqlite() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::SQLite);
+    let text = Rope::from("SELECT * FROM users WHERE data->");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions_with_trigger(&text, offset, false);
+    assert!(
+        !completions
+            .iter()
+            .any(|completion| completion.label.starts_with("->> ")),
+        "JSON operators should not be offered for sqlite"
+    );
+}
+
+#[test]
+fn test_select_list_offers_json_operators_for_postgres() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let sql = "SELECT data-> FROM users";
+    let text = Rope::from(sql);
+    let offset = "SELECT data->".len();
+
+    let completions = lsp.get_completions_with_trigger(&text, offset, false);
+    assert!(
+        completions
+            .iter()
+            .any(|completion| completion.label.starts_with("-> ")
+                || completion.label.starts_with("->> ")),
+        "JSON operator completions should be available in the SELECT list for postgres"
+    );
+}

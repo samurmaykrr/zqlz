@@ -5,8 +5,12 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::ClickHouseCatalog;
 use zqlz_core::{
-    ColumnMeta, CommentStyles, Connection, ConnectionConfig, ConnectionField,
+    AffectedRowCountFidelity, ColumnMeta, CommentStyles, Connection, ConnectionConfig,
+    ConnectionField,
     ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo, DatabaseDriver,
     DialectBundle, DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions,
     DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory,
@@ -26,6 +30,41 @@ fn get_dialect_bundle() -> &'static DialectBundle {
 
 fn value_to_clickhouse_param(value: &Value) -> serde_json::Value {
     value.to_json_value()
+}
+
+/// Substitute `?` placeholders with escaped SQL literals (ClickHouse's HTTP
+/// interface does not accept the crate's JSON-rendered bind parameters).
+fn render_clickhouse_sql(sql: &str, params: &[Value]) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut params = params.iter();
+    for ch in sql.chars() {
+        if ch == '?' {
+            if let Some(param) = params.next() {
+                out.push_str(&clickhouse_literal(param));
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn clickhouse_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        Value::Int8(i) => i.to_string(),
+        Value::Int16(i) => i.to_string(),
+        Value::Int32(i) => i.to_string(),
+        Value::Int64(i) => i.to_string(),
+        Value::Float32(f) => f.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+        other => format!(
+            "'{}'",
+            other.to_string().replace('\\', "\\\\").replace('\'', "\\'")
+        ),
+    }
 }
 
 /// ClickHouse database driver
@@ -134,7 +173,7 @@ impl DatabaseDriver for ClickHouseDriver {
             .map(|s| s == "true" || s == "1")
             .unwrap_or(false);
 
-        let url = build_connection_url(&host, port, &database, &username, &password, use_ssl);
+        let url = clickhouse_base_url(&host, port, use_ssl);
 
         let client = clickhouse::Client::default()
             .with_url(&url)
@@ -226,7 +265,11 @@ impl DatabaseDriver for ClickHouseDriver {
     }
 }
 
-/// Build a ClickHouse HTTP connection URL
+/// Build a human-readable ClickHouse connection string (used for display/help).
+///
+/// NOTE: this is NOT what the `clickhouse` client receives — the client needs
+/// only the `protocol://host:port` base (see [`clickhouse_base_url`]), because
+/// it sets user/password/database through dedicated builder methods.
 fn build_connection_url(
     host: &str,
     port: u16,
@@ -249,20 +292,33 @@ fn build_connection_url(
     }
 }
 
+/// Base URL the `clickhouse` client expects for `with_url`: just the endpoint,
+/// with no credentials or database path.
+fn clickhouse_base_url(host: &str, port: u16, use_ssl: bool) -> String {
+    let protocol = if use_ssl { "https" } else { "http" };
+    format!("{protocol}://{host}:{port}")
+}
+
 /// ClickHouse connection wrapper implementing the Connection trait
 pub struct ClickHouseConnection {
     client: clickhouse::Client,
     database: String,
     closed: AtomicBool,
+    pub(crate) schema_engine: SchemaEngine,
 }
 
 impl ClickHouseConnection {
     /// Create a new ClickHouse connection wrapper
     pub fn new(client: clickhouse::Client, database: String) -> Self {
+        let schema_engine = SchemaEngine::new(
+            Arc::new(ClickHouseCatalog::new(client.clone(), database.clone())),
+            Arc::new(DefaultDialect),
+        );
         Self {
             client,
             database,
             closed: AtomicBool::new(false),
+            schema_engine,
         }
     }
 
@@ -287,6 +343,12 @@ impl Connection for ClickHouseConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("clickhouse")
+    }
+
+    // `execute` reports a hardcoded zero because the HTTP interface returns no
+    // row count, so the value must never be read as "no row matched".
+    fn affected_row_count_fidelity(&self) -> AffectedRowCountFidelity {
+        AffectedRowCountFidelity::Unavailable
     }
 
     async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
@@ -549,98 +611,7 @@ impl Connection for ClickHouseConnection {
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.ensure_not_closed()?;
-        let start = std::time::Instant::now();
-
-        let mut query = self.client.query(sql);
-        for param in params {
-            query = query.bind(value_to_clickhouse_param(param));
-        }
-
-        // Fetch rows as JSONEachRow format for flexibility with dynamic queries
-        let mut cursor = query
-            .fetch_bytes("JSONEachRow")
-            .map_err(|e| ZqlzError::Driver(format!("Query failed: {}", e)))?;
-
-        // Collect all bytes
-        let mut all_bytes = Vec::new();
-        while let Some(chunk) = cursor
-            .next()
-            .await
-            .map_err(|e| ZqlzError::Driver(format!("Failed to read query result: {}", e)))?
-        {
-            all_bytes.extend_from_slice(&chunk);
-        }
-
-        // Parse JSONEachRow format (one JSON object per line)
-        let content = String::from_utf8_lossy(&all_bytes);
-        let mut result: Vec<serde_json::Value> = Vec::new();
-        for line in content.lines() {
-            if !line.trim().is_empty()
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
-            {
-                result.push(value);
-            }
-        }
-
-        // Extract column names from the first row
-        let column_names: Vec<String> = if let Some(first_row) = result.first() {
-            if let Some(obj) = first_row.as_object() {
-                obj.keys().cloned().collect()
-            } else {
-                vec![]
-            }
-        } else {
-            vec![]
-        };
-
-        // Build column metadata
-        let columns: Vec<ColumnMeta> = column_names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| ColumnMeta {
-                name: name.clone(),
-                data_type: "String".to_string(), // Default type
-                nullable: true,
-                ordinal: idx,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            })
-            .collect();
-
-        // Convert rows
-        let rows: Vec<Row> = result
-            .into_iter()
-            .map(|row| {
-                let values: Vec<Value> = column_names
-                    .iter()
-                    .map(|col| row.get(col).map(json_to_value).unwrap_or(Value::Null))
-                    .collect();
-                Row::new(column_names.clone(), values)
-            })
-            .collect();
-
-        let execution_time_ms = start.elapsed().as_millis() as u64;
-        tracing::debug!(
-            row_count = rows.len(),
-            duration_ms = execution_time_ms,
-            "query completed"
-        );
-
-        Ok(QueryResult {
-            id: Uuid::new_v4(),
-            columns,
-            rows,
-            total_rows: None,
-            is_estimated_total: false,
-            affected_rows: 0,
-            execution_time_ms,
-            warnings: Vec::new(),
-        })
+        run_clickhouse_query(&self.client, sql, params).await
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
@@ -663,6 +634,89 @@ impl Connection for ClickHouseConnection {
     fn as_schema_introspection(&self) -> Option<&dyn zqlz_core::SchemaIntrospection> {
         Some(self)
     }
+}
+
+/// Execute a query against a shared ClickHouse client and collect the result.
+/// Shared by `ClickHouseConnection` and the schema-introspection adapter.
+pub(crate) async fn run_clickhouse_query(
+    client: &clickhouse::Client,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let start = std::time::Instant::now();
+
+    // The clickhouse crate's `?` bind renders our serde_json params as JSON
+    // literals (e.g. a string becomes `"x"` instead of `'x'`), which the server
+    // rejects. Inline the parameters as escaped SQL literals instead.
+    let rendered = if params.is_empty() {
+        std::borrow::Cow::Borrowed(sql)
+    } else {
+        std::borrow::Cow::Owned(render_clickhouse_sql(sql, params))
+    };
+    let query = client.query(&rendered);
+
+    // `JSONCompactEachRowWithNames` returns the column names (in SELECT order) on
+    // the first line and each row as an ordered value array, so positional
+    // access in the introspection code is reliable. Plain `JSONEachRow` emits
+    // objects whose key order is not preserved through serde_json.
+    let mut cursor = query
+        .fetch_bytes("JSONCompactEachRowWithNames")
+        .map_err(|e| ZqlzError::Driver(format!("Query failed: {}", e)))?;
+
+    let mut all_bytes = Vec::new();
+    while let Some(chunk) = cursor
+        .next()
+        .await
+        .map_err(|e| ZqlzError::Driver(format!("Failed to read query result: {}", e)))?
+    {
+        all_bytes.extend_from_slice(&chunk);
+    }
+
+    let content = String::from_utf8_lossy(&all_bytes);
+    let mut lines = content.lines().filter(|line| !line.trim().is_empty());
+
+    let column_names: Vec<String> = lines
+        .next()
+        .and_then(|line| serde_json::from_str::<Vec<String>>(line).ok())
+        .unwrap_or_default();
+
+    let columns: Vec<ColumnMeta> = column_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| ColumnMeta {
+            name: name.clone(),
+            data_type: "String".to_string(),
+            nullable: true,
+            ordinal: idx,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        })
+        .collect();
+
+    let rows: Vec<Row> = lines
+        .filter_map(|line| serde_json::from_str::<Vec<serde_json::Value>>(line).ok())
+        .map(|array| {
+            let values: Vec<Value> = array.iter().map(json_to_value).collect();
+            Row::new(column_names.clone(), values)
+        })
+        .collect();
+
+    let execution_time_ms = start.elapsed().as_millis() as u64;
+    Ok(QueryResult {
+        id: Uuid::new_v4(),
+        columns,
+        rows,
+        total_rows: None,
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms,
+        warnings: Vec::new(),
+    })
 }
 
 /// Convert a JSON value to a zqlz-core Value

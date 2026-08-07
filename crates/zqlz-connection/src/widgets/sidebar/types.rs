@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use uuid::Uuid;
 use zqlz_core::{
     DocumentAdminObjectInfo, DocumentCollectionInfo, DocumentFunctionInfo,
-    DocumentGridFsBucketInfo, DocumentIndexInfo, ObjectsPanelManifest,
+    DocumentGridFsBucketInfo, DocumentIndexInfo, ObjectFeatureSet, ObjectsPanelManifest,
 };
 use zqlz_drivers::DriverRegistry;
 
@@ -330,6 +330,9 @@ pub struct ConnectionEntry {
     pub db_type: String,
     pub object_capabilities: SidebarObjectCapabilities,
     pub objects_panel_manifest: Option<ObjectsPanelManifest>,
+    /// Which object actions the connection advertises, so menus can explain why
+    /// an action is unavailable rather than failing after it is clicked.
+    pub object_features: Option<ObjectFeatureSet>,
     pub is_connected: bool,
     pub is_connecting: bool,
     pub is_expanded: bool,
@@ -398,6 +401,7 @@ impl ConnectionEntry {
             db_type,
             object_capabilities,
             objects_panel_manifest: None,
+            object_features: None,
             is_connected: false,
             is_connecting: false,
             is_expanded: false,

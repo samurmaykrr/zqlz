@@ -31,10 +31,12 @@ fn test_subquery_column_reference() {
 
     let completions = lsp.get_completions(&text, offset);
 
-    // Should suggest columns from audit_log
+    // The subquery's own FROM scopes the suggestions, so `audit_log` columns are
+    // offered rather than every column in the schema. (Outer-scope columns for
+    // correlated subqueries are a separate feature; this asserts the inner scope.)
     assert!(
-        completions.iter().any(|c| c.label == "user_id"),
-        "Should suggest columns in subquery. Got: {:?}",
+        completions.iter().any(|c| c.label == "log_id"),
+        "Should suggest audit_log columns in subquery. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
     );
 }

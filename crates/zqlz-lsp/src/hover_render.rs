@@ -16,6 +16,13 @@ pub(crate) fn markdown_hover(hover_text: String) -> Hover {
     }
 }
 
+pub(crate) fn create_json_operator_hover(operator: &zqlz_core::PostgresJsonOperator) -> Hover {
+    markdown_hover(format!(
+        "**`{}` — {}**\n\n{}\n\n```sql\n{}\n```",
+        operator.symbol, operator.name, operator.description, operator.example
+    ))
+}
+
 pub(crate) fn create_column_hover(col: &ColumnInfo, table_name: Option<&str>) -> Hover {
     let mut hover_text = format!("**Column: {}**\n\n", col.name);
 

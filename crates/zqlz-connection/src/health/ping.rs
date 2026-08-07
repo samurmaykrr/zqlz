@@ -3,6 +3,8 @@
 //! Provides lightweight health checking by executing a minimal query
 //! and measuring response time.
 
+use futures::future::{Either, select};
+use gpui::BackgroundExecutor;
 use std::time::{Duration, Instant};
 use zqlz_core::Connection;
 
@@ -69,5 +71,25 @@ pub async fn ping_database(conn: &dyn Connection) -> PingResult {
     match conn.query(ping_query, &[]).await {
         Ok(_) => Ok(start.elapsed()),
         Err(e) => Err(PingError::QueryFailed(e.to_string())),
+    }
+}
+
+/// Ping a database connection, giving up after `timeout`.
+///
+/// A socket that died without a FIN leaves the ping waiting on TCP
+/// retransmission, which takes minutes. Heartbeats ping connections in sequence,
+/// so without a deadline one wedged connection stalls every other connection
+/// behind it.
+pub async fn ping_database_with_timeout(
+    conn: &dyn Connection,
+    executor: &BackgroundExecutor,
+    timeout: Duration,
+) -> PingResult {
+    let ping = Box::pin(ping_database(conn));
+    let deadline = Box::pin(executor.timer(timeout));
+
+    match select(ping, deadline).await {
+        Either::Left((result, _)) => result,
+        Either::Right(((), _)) => Err(PingError::Timeout),
     }
 }

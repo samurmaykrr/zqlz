@@ -1,18 +1,21 @@
 //! DuckDB driver implementation
 
 use async_trait::async_trait;
-use fallible_streaming_iterator::FallibleStreamingIterator;
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::DuckDbCatalog;
 use zqlz_core::{
     AutoIncrementInfo, AutoIncrementStyle, ColumnMeta, CommentStyles, Connection, ConnectionConfig,
     ConnectionField, ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo,
     DatabaseDriver, DialectBundle, DialectInfo, DriverCapabilities, DropTableOptions,
     DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory,
     KeywordCategory, KeywordInfo, QueryResult, ResolvedConnectionScope, Result, Row,
-    SqlFunctionInfo, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
+    SingleRowDmlScope, SqlFunctionInfo, SqlObjectName, StatementResult, Transaction, Value,
+    ZqlzError,
     dialect_bundle_from_legacy_info,
 };
 
@@ -155,18 +158,25 @@ impl DatabaseDriver for DuckDbDriver {
 
 /// DuckDB connection wrapper implementing the Connection trait
 pub struct DuckDbConnection {
-    connection: std::sync::Mutex<duckdb::Connection>,
+    connection: Arc<Mutex<duckdb::Connection>>,
     path: String,
     closed: AtomicBool,
+    pub(crate) schema_engine: SchemaEngine,
 }
 
 impl DuckDbConnection {
     /// Create a new DuckDB connection wrapper
     pub fn new(connection: duckdb::Connection, path: String) -> Self {
+        let connection = Arc::new(Mutex::new(connection));
+        let schema_engine = SchemaEngine::new(
+            Arc::new(DuckDbCatalog::new(connection.clone())),
+            Arc::new(DefaultDialect),
+        );
         Self {
-            connection: std::sync::Mutex::new(connection),
+            connection,
             path,
             closed: AtomicBool::new(false),
+            schema_engine,
         }
     }
 
@@ -196,6 +206,16 @@ impl Connection for DuckDbConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("duckdb")
+    }
+
+    /// DuckDB exposes a `rowid` pseudocolumn on base tables, which identifies a
+    /// row that no key covers.
+    fn single_row_dml_scope(
+        &self,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::by_row_identity("rowid", qualified_table, where_clause)
     }
 
     async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
@@ -461,126 +481,9 @@ impl Connection for DuckDbConnection {
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.ensure_not_closed()?;
-        let start = std::time::Instant::now();
-
-        let conn = self
-            .connection
-            .lock()
-            .map_err(|e| ZqlzError::Driver(format!("Lock poisoned: {}", e)))?;
-
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| ZqlzError::Driver(format!("Prepare failed: {}", e)))?;
-
-        let mut duckdb_rows = if params.is_empty() {
-            stmt.query([])
-                .map_err(|e| ZqlzError::Driver(format!("Query failed: {}", e)))?
-        } else {
-            let duckdb_params = values_to_duckdb_params(params)?;
-            for (idx, param) in duckdb_params.iter().enumerate() {
-                stmt.raw_bind_parameter(idx + 1, param).map_err(|e| {
-                    ZqlzError::Driver(format!("Bind param {} failed: {}", idx + 1, e))
-                })?;
-            }
-            let mut rows = stmt.raw_query();
-            rows.advance()
-                .map_err(|e| ZqlzError::Driver(format!("Query execution failed: {}", e)))?;
-            rows
-        };
-
-        let has_already_advanced = !params.is_empty();
-
-        // Get column names and types from the executed statement
-        let column_names: Vec<String> = duckdb_rows
-            .as_ref()
-            .map(|s| {
-                let count = s.column_count();
-                (0..count)
-                    .filter_map(|idx| s.column_name(idx).ok().cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let column_count = column_names.len();
-
-        let column_types: Vec<String> = duckdb_rows
-            .as_ref()
-            .map(|s| {
-                (0..s.column_count())
-                    .map(|idx| format!("{:?}", s.column_type(idx)))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Build column metadata with proper DuckDB types
-        let columns: Vec<ColumnMeta> = column_names
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| ColumnMeta {
-                name: name.clone(),
-                data_type: column_types
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| "VARCHAR".to_string()),
-                nullable: true,
-                ordinal: idx,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            })
-            .collect();
-
-        // Collect rows
-        let mut raw_rows: Vec<Vec<Value>> = Vec::new();
-
-        // If we already advanced for metadata (params case), get the current row first
-        if has_already_advanced && let Some(row) = duckdb_rows.get() {
-            let mut values = Vec::with_capacity(column_count);
-            for i in 0..column_count {
-                values.push(row_to_value(row, i));
-            }
-            raw_rows.push(values);
-        }
-
-        // Continue iterating remaining rows
-        while let Some(row) = duckdb_rows
-            .next()
-            .map_err(|e| ZqlzError::Driver(format!("Row fetch failed: {}", e)))?
-        {
-            let mut values = Vec::with_capacity(column_count);
-            for i in 0..column_count {
-                values.push(row_to_value(row, i));
-            }
-            raw_rows.push(values);
-        }
-
-        // Convert to Row structs
-        let rows: Vec<Row> = raw_rows
-            .into_iter()
-            .map(|values| Row::new(column_names.clone(), values))
-            .collect();
-
-        let execution_time_ms = start.elapsed().as_millis() as u64;
-        tracing::debug!(
-            row_count = rows.len(),
-            duration_ms = execution_time_ms,
-            "query completed"
-        );
-
-        Ok(QueryResult {
-            id: Uuid::new_v4(),
-            columns,
-            rows,
-            total_rows: None,
-            is_estimated_total: false,
-            affected_rows: 0,
-            execution_time_ms,
-            warnings: Vec::new(),
-        })
+        run_duckdb_query(&self.connection, sql, params)
     }
+
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
         self.ensure_not_closed()?;
@@ -599,9 +502,120 @@ impl Connection for DuckDbConnection {
         self.closed.load(Ordering::SeqCst)
     }
 
+    fn requires_heartbeat(&self) -> bool {
+        false
+    }
+
     fn as_schema_introspection(&self) -> Option<&dyn zqlz_core::SchemaIntrospection> {
         Some(self)
     }
+}
+
+/// Execute a query against a shared DuckDB connection and collect the result.
+/// Shared by `DuckDbConnection` and the schema-introspection adapter.
+pub(crate) fn run_duckdb_query(
+    connection: &Mutex<duckdb::Connection>,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let start = std::time::Instant::now();
+
+    let conn = connection
+        .lock()
+        .map_err(|e| ZqlzError::Driver(format!("Lock poisoned: {}", e)))?;
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| ZqlzError::Driver(format!("Prepare failed: {}", e)))?;
+
+    let mut duckdb_rows = if params.is_empty() {
+        stmt.query([])
+            .map_err(|e| ZqlzError::Driver(format!("Query failed: {}", e)))?
+    } else {
+        let duckdb_params = values_to_duckdb_params(params)?;
+        for (idx, param) in duckdb_params.iter().enumerate() {
+            stmt.raw_bind_parameter(idx + 1, param).map_err(|e| {
+                ZqlzError::Driver(format!("Bind param {} failed: {}", idx + 1, e))
+            })?;
+        }
+        // `raw_query` alone does not execute the statement, which leaves column
+        // metadata unavailable; `raw_execute` runs it before we read the schema.
+        stmt.raw_execute()
+            .map_err(|e| ZqlzError::Driver(format!("Query execution failed: {}", e)))?;
+        stmt.raw_query()
+    };
+
+    let column_names: Vec<String> = duckdb_rows
+        .as_ref()
+        .map(|s| {
+            let count = s.column_count();
+            (0..count)
+                .filter_map(|idx| s.column_name(idx).ok().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let column_count = column_names.len();
+
+    let column_types: Vec<String> = duckdb_rows
+        .as_ref()
+        .map(|s| {
+            (0..s.column_count())
+                .map(|idx| format!("{:?}", s.column_type(idx)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let columns: Vec<ColumnMeta> = column_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| ColumnMeta {
+            name: name.clone(),
+            data_type: column_types
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| "VARCHAR".to_string()),
+            nullable: true,
+            ordinal: idx,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        })
+        .collect();
+
+    let mut raw_rows: Vec<Vec<Value>> = Vec::new();
+
+    while let Some(row) = duckdb_rows
+        .next()
+        .map_err(|e| ZqlzError::Driver(format!("Row fetch failed: {}", e)))?
+    {
+        let mut values = Vec::with_capacity(column_count);
+        for i in 0..column_count {
+            values.push(row_to_value(row, i));
+        }
+        raw_rows.push(values);
+    }
+
+    let rows: Vec<Row> = raw_rows
+        .into_iter()
+        .map(|values| Row::new(column_names.clone(), values))
+        .collect();
+
+    let execution_time_ms = start.elapsed().as_millis() as u64;
+
+    Ok(QueryResult {
+        id: Uuid::new_v4(),
+        columns,
+        rows,
+        total_rows: None,
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms,
+        warnings: Vec::new(),
+    })
 }
 
 enum DuckDbParam {

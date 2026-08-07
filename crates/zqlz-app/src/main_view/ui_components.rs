@@ -12,7 +12,10 @@ use zqlz_ui::widgets::{
     tooltip::Tooltip,
 };
 
-use crate::actions::NewQuery;
+use crate::actions::{
+    NewQuery, ShowCellEditorInspector, ShowKeyEditorInspector, ShowQueryHistoryInspector,
+    ShowSchemaInspector,
+};
 use crate::app::AppState;
 use crate::components::InspectorView;
 use crate::workspace::workspace_title_bar;
@@ -20,7 +23,7 @@ use crate::workspace::workspace_title_bar;
 use super::MainView;
 
 impl MainView {
-    fn activate_inspector_view(
+    pub(super) fn activate_inspector_view(
         &mut self,
         view: InspectorView,
         window: &mut Window,
@@ -40,7 +43,7 @@ impl MainView {
         });
     }
 
-    fn open_key_editor_for_active_selection(
+    pub(super) fn open_key_editor_for_active_selection(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -296,7 +299,20 @@ impl MainView {
             .when(is_active, |style| style.text_color(theme.accent))
             .when(!is_active, |style| style.text_color(theme.muted_foreground))
             .child(Icon::new(icon).small())
-            .tooltip(move |window, cx| Tooltip::new(tooltip_text).build(window, cx))
+            .tooltip(move |window, cx| match view {
+                InspectorView::Schema => Tooltip::new(tooltip_text)
+                    .action(&ShowSchemaInspector, Some("MainView"))
+                    .build(window, cx),
+                InspectorView::CellEditor => Tooltip::new(tooltip_text)
+                    .action(&ShowCellEditorInspector, Some("MainView"))
+                    .build(window, cx),
+                InspectorView::KeyEditor => Tooltip::new(tooltip_text)
+                    .action(&ShowKeyEditorInspector, Some("MainView"))
+                    .build(window, cx),
+                InspectorView::QueryHistory => Tooltip::new(tooltip_text)
+                    .action(&ShowQueryHistoryInspector, Some("MainView"))
+                    .build(window, cx),
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 if view == InspectorView::KeyEditor {
                     this.open_key_editor_for_active_selection(window, cx);

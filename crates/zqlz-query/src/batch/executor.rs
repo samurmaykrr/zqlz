@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use zqlz_core::{Connection, QueryResult, Result, split_sql_statements};
+use zqlz_core::{
+    Connection, QueryResult, Result, ZqlzError, split_sql_statements, sql_protected_range_at,
+    sql_protected_ranges,
+};
 
 use crate::engine::QueryEngine;
 
@@ -392,8 +395,24 @@ impl BatchExecutor {
         let mut rolled_back = false;
         let mut should_stop = false;
 
-        // Start transaction if requested
+        // Start transaction if requested. Statements such as VACUUM cannot run
+        // inside a transaction block, so the batch is refused up front rather
+        // than failing part-way through with a raw server error.
         if self.options.transaction {
+            let offending: Vec<String> = statements
+                .iter()
+                .filter(|sql| statement_cannot_run_in_transaction(sql))
+                .filter_map(|sql| leading_sql_keyword(sql))
+                .collect();
+
+            if !offending.is_empty() {
+                return Err(ZqlzError::Query(format!(
+                    "{} cannot run inside a transaction block; re-run this batch with transaction wrapping disabled, or execute {} as standalone statements",
+                    offending.join(", "),
+                    if offending.len() == 1 { "it" } else { "them" }
+                )));
+            }
+
             transaction = Some(conn.begin_transaction().await?);
         }
 
@@ -586,6 +605,85 @@ async fn execute_single_in_transaction(
     }
 }
 
+/// Collect the leading bare (non string/comment/quoted-identifier) words of a
+/// statement, uppercased.
+fn leading_sql_words(sql: &str, limit: usize) -> Vec<String> {
+    let ranges = sql_protected_ranges(sql);
+    let mut range_index = 0usize;
+    let bytes = sql.as_bytes();
+    let mut words = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() && words.len() < limit {
+        if let Some(range) = sql_protected_range_at(index, &ranges, &mut range_index) {
+            index = range.end;
+            continue;
+        }
+
+        if bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_' {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                && sql_protected_range_at(index, &ranges, &mut range_index).is_none()
+            {
+                index += 1;
+            }
+            words.push(sql[start..index].to_ascii_uppercase());
+        } else {
+            index += 1;
+        }
+    }
+
+    words
+}
+
+/// First bare keyword of a statement, uppercased, ignoring leading whitespace
+/// and comments.
+pub(crate) fn leading_sql_keyword(sql: &str) -> Option<String> {
+    leading_sql_words(sql, 1).into_iter().next()
+}
+
+/// Statements that databases refuse to run inside an explicit transaction
+/// block (PostgreSQL raises SQLSTATE 25001 for these).
+pub(crate) fn statement_cannot_run_in_transaction(sql: &str) -> bool {
+    let words = leading_sql_words(sql, 8);
+    let Some(first) = words.first().map(String::as_str) else {
+        return false;
+    };
+
+    match first {
+        "VACUUM" | "REINDEX" | "CLUSTER" | "DISCARD" => return true,
+        "CREATE" | "DROP" | "ALTER" => {}
+        _ => return false,
+    }
+
+    let mut index = 1usize;
+    while let Some(word) = words.get(index) {
+        match word.as_str() {
+            "OR" | "REPLACE" | "IF" | "NOT" | "EXISTS" | "TEMP" | "TEMPORARY" | "UNLOGGED"
+            | "GLOBAL" | "LOCAL" | "UNIQUE" => index += 1,
+            _ => break,
+        }
+    }
+
+    let object = words.get(index).map(String::as_str);
+
+    if matches!(
+        object,
+        Some("DATABASE") | Some("TABLESPACE") | Some("SUBSCRIPTION")
+    ) {
+        return true;
+    }
+
+    if first == "ALTER" && object == Some("SYSTEM") {
+        return true;
+    }
+
+    words
+        .get(index..(index + 3).min(words.len()))
+        .is_some_and(|window| window.iter().any(|word| word == "CONCURRENTLY"))
+}
+
 pub(crate) fn statement_returns_rows(sql: &str) -> bool {
     QueryEngine::new().is_query(sql)
 }
@@ -595,4 +693,42 @@ pub(crate) fn statement_returns_rows(sql: &str) -> bool {
 /// Splits on semicolons while respecting core SQL protected ranges.
 pub fn split_statements(sql: &str) -> Vec<String> {
     split_sql_statements(sql)
+}
+
+#[cfg(test)]
+mod non_transactable_statement_tests {
+    use super::{leading_sql_keyword, statement_cannot_run_in_transaction};
+
+    #[test]
+    fn leading_sql_keyword_is_comment_and_whitespace_safe() {
+        assert_eq!(leading_sql_keyword("VACUUM t").as_deref(), Some("VACUUM"));
+        assert_eq!(leading_sql_keyword("  \n\t vacuum t").as_deref(), Some("VACUUM"));
+        assert_eq!(leading_sql_keyword("-- x\nVACUUM t").as_deref(), Some("VACUUM"));
+        assert_eq!(leading_sql_keyword("/* x */ VACUUM t").as_deref(), Some("VACUUM"));
+        assert_eq!(leading_sql_keyword("   ").as_deref(), None);
+    }
+
+    #[test]
+    fn detects_statements_that_cannot_run_in_a_transaction() {
+        assert!(statement_cannot_run_in_transaction("VACUUM users;"));
+        assert!(statement_cannot_run_in_transaction("-- x\nvacuum (analyze) users"));
+        assert!(statement_cannot_run_in_transaction("REINDEX TABLE users"));
+        assert!(statement_cannot_run_in_transaction("CREATE DATABASE demo"));
+        assert!(statement_cannot_run_in_transaction("ALTER SYSTEM SET work_mem = '64MB'"));
+        assert!(statement_cannot_run_in_transaction(
+            "CREATE INDEX CONCURRENTLY idx ON users (id)"
+        ));
+    }
+
+    #[test]
+    fn ignores_ordinary_statements() {
+        assert!(!statement_cannot_run_in_transaction("SELECT 1"));
+        assert!(!statement_cannot_run_in_transaction("INSERT INTO t VALUES (1)"));
+        assert!(!statement_cannot_run_in_transaction("CREATE INDEX idx ON users (id)"));
+        assert!(!statement_cannot_run_in_transaction(
+            "INSERT INTO logs (message) VALUES ('VACUUM users')"
+        ));
+        assert!(!statement_cannot_run_in_transaction("-- VACUUM users\nSELECT 1"));
+        assert!(!statement_cannot_run_in_transaction(""));
+    }
 }

@@ -718,6 +718,199 @@ fn sql_identifier_segment_char(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '$')
 }
 
+/// Object kinds whose bodies are compound statements.
+const ROUTINE_OBJECT_KEYWORDS: [&str; 4] = ["FUNCTION", "PROCEDURE", "TRIGGER", "EVENT"];
+
+/// Object kinds that end the search immediately: reaching one of these means the statement is
+/// something else, and a later `FUNCTION`-like word would be an identifier rather than the
+/// object kind (e.g. `CREATE TABLE t (function VARCHAR(10))`).
+const NON_ROUTINE_OBJECT_KEYWORDS: [&str; 11] = [
+    "TABLE",
+    "VIEW",
+    "MATERIALIZED",
+    "INDEX",
+    "DATABASE",
+    "SCHEMA",
+    "USER",
+    "ROLE",
+    "SEQUENCE",
+    "TYPE",
+    "EXTENSION",
+];
+
+/// Words between `CREATE` and the object kind are modifiers we deliberately do not parse:
+/// `OR REPLACE`, `DEFINER=x` / `DEFINER = x`, `ALGORITHM=...`, `SQL SECURITY INVOKER`,
+/// `AGGREGATE`, and so on. Skipping them by count keeps the matcher independent of how each
+/// dialect spells its clauses.
+const MAX_MODIFIER_WORDS: usize = 12;
+
+/// True when `sql` starts a `CREATE ... FUNCTION|PROCEDURE|TRIGGER|EVENT` statement.
+///
+/// Such statements carry a compound body that neither the SQL parsers nor a naive `;` split
+/// handle correctly, so both diagnostics and statement splitting need to recognize them.
+/// Leading comments are skipped.
+pub fn is_compound_routine_header(sql: &str) -> bool {
+    let sql = sql.trim_start_matches(|character: char| character.is_whitespace());
+
+    if let Some(rest) = sql.strip_prefix("--") {
+        let Some((_, after_comment)) = rest.split_once('\n') else {
+            return false;
+        };
+        return is_compound_routine_header(after_comment);
+    }
+
+    if let Some(rest) = sql.strip_prefix("/*") {
+        let Some((_, after_comment)) = rest.split_once("*/") else {
+            return false;
+        };
+        return is_compound_routine_header(after_comment);
+    }
+
+    let mut words = sql.split_whitespace();
+    if !words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
+    {
+        return false;
+    }
+
+    for word in words.take(MAX_MODIFIER_WORDS) {
+        if ROUTINE_OBJECT_KEYWORDS
+            .iter()
+            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+        {
+            return true;
+        }
+
+        if NON_ROUTINE_OBJECT_KEYWORDS
+            .iter()
+            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+        {
+            return false;
+        }
+    }
+
+    false
+}
+
+/// Find where a routine's compound body ends, so it is not split on its internal semicolons.
+///
+/// `SHOW CREATE PROCEDURE` and friends return a body without the `DELIMITER` wrapper a client
+/// would otherwise need to send it back, so splitting on `;` yields fragments the server
+/// rejects (`CREATE ... BEGIN ... INSERT ...;` followed by a bare `END`).
+///
+/// Returns the offset just past the `END` closing the outermost block, or `None` when the
+/// routine has no block at all — a single-statement body ends at its first semicolon like
+/// any other statement.
+fn routine_body_end(
+    sql: &str,
+    start: usize,
+    protected_ranges: &[SqlProtectedRange],
+) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    let mut protected_range_index = 0usize;
+    let mut depth = 0usize;
+    let mut saw_block = false;
+
+    while index < sql.len() {
+        if let Some(protected_range) =
+            sql_protected_range_at(index, protected_ranges, &mut protected_range_index)
+        {
+            index = protected_range.end;
+            continue;
+        }
+
+        if is_identifier_start(bytes.get(index).copied()) {
+            let word_start = index;
+            index += 1;
+            while is_identifier_tail(bytes.get(index).copied()) {
+                index += 1;
+            }
+            let word = &sql[word_start..index];
+
+            if word.eq_ignore_ascii_case("BEGIN") || word.eq_ignore_ascii_case("CASE") {
+                depth += 1;
+                saw_block = true;
+            } else if word.eq_ignore_ascii_case("END") {
+                // `END IF`, `END LOOP`, `END WHILE` and `END REPEAT` close constructs whose
+                // openers were not counted, because those keywords also appear in expressions
+                // (`IF(a, b, c)`) where they open nothing. A bare `END` and `END CASE` do
+                // close a counted block; the trailing `CASE` is consumed so the next pass does
+                // not read it as a fresh opener.
+                match next_word(sql, index, protected_ranges) {
+                    Some((next, next_end))
+                        if next.eq_ignore_ascii_case("IF")
+                            || next.eq_ignore_ascii_case("LOOP")
+                            || next.eq_ignore_ascii_case("WHILE")
+                            || next.eq_ignore_ascii_case("REPEAT") =>
+                    {
+                        index = next_end;
+                        continue;
+                    }
+                    Some((next, next_end)) if next.eq_ignore_ascii_case("CASE") => {
+                        index = next_end;
+                    }
+                    _ => {}
+                }
+
+                depth = depth.saturating_sub(1);
+                if saw_block && depth == 0 {
+                    return Some(index);
+                }
+            }
+            continue;
+        }
+
+        if bytes[index] == b';' && !saw_block {
+            return None;
+        }
+
+        index += 1;
+    }
+
+    saw_block.then_some(sql.len())
+}
+
+/// The next identifier-like word at or after `from`, with the offset just past it, skipping
+/// whitespace and protected text.
+fn next_word<'a>(
+    sql: &'a str,
+    from: usize,
+    protected_ranges: &[SqlProtectedRange],
+) -> Option<(&'a str, usize)> {
+    let bytes = sql.as_bytes();
+    let mut index = from;
+    let mut protected_range_index = 0usize;
+
+    while index < sql.len() {
+        if let Some(protected_range) =
+            sql_protected_range_at(index, protected_ranges, &mut protected_range_index)
+        {
+            index = protected_range.end;
+            continue;
+        }
+
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+
+        if !is_identifier_start(bytes.get(index).copied()) {
+            return None;
+        }
+
+        let word_start = index;
+        index += 1;
+        while is_identifier_tail(bytes.get(index).copied()) {
+            index += 1;
+        }
+        return Some((&sql[word_start..index], index));
+    }
+
+    None
+}
+
 pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
     let mut statements = Vec::new();
     let protected_ranges = sql_protected_ranges(sql);
@@ -768,6 +961,24 @@ pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
         }
 
         if statement_start.is_none() && !character.is_whitespace() {
+            // A routine keeps its body intact rather than breaking at the first `;` inside it.
+            if is_compound_routine_header(&sql[index..])
+                && let Some(routine_end) = routine_body_end(sql, index, &protected_ranges)
+            {
+                let (start_line, start_column) = (line, column);
+                advance_text_position(&sql[index..routine_end], &mut line, &mut column);
+                statements.push(SqlStatementSpan {
+                    start: index,
+                    end: routine_end,
+                    line: start_line,
+                    column: start_column,
+                    end_line: line,
+                    end_column: column,
+                });
+                index = routine_end;
+                continue;
+            }
+
             statement_start = Some((index, line, column));
         }
         index += character.len_utf8();
@@ -1257,6 +1468,74 @@ mod tests {
                 ("DROP stale_sales".to_string(), 2, 0),
             ]
         );
+    }
+
+    #[test]
+    fn routine_body_is_not_split_on_its_internal_semicolons() {
+        let sql = r#"CREATE DEFINER=`root`@`localhost` TRIGGER `trg_orders_audit_insert` AFTER INSERT ON `orders_orders` FOR EACH ROW BEGIN
+    INSERT INTO audit_event_log (
+        tenant_id,
+        table_name
+    ) VALUES (
+        NEW.tenant_id,
+        'orders_orders'
+    );
+END"#;
+        let statements = split_sql_statements(sql);
+
+        assert_eq!(
+            statements.len(),
+            1,
+            "the whole routine must stay one statement, got: {:?}",
+            statements
+        );
+        assert!(statements[0].ends_with("END"));
+    }
+
+    #[test]
+    fn routine_body_keeps_nested_blocks_together() {
+        let sql = r#"CREATE PROCEDURE p()
+BEGIN
+    DECLARE done INT DEFAULT 0;
+    IF done = 0 THEN
+        SELECT 1;
+    END IF;
+    CASE done
+        WHEN 0 THEN SELECT 2;
+    END CASE;
+    SELECT CASE WHEN done = 1 THEN 'a' ELSE 'b' END;
+END;
+SELECT 99;"#;
+        let statements = split_sql_statements(sql);
+
+        assert_eq!(
+            statements.len(),
+            2,
+            "nested IF/CASE blocks must not end the routine early, got: {:?}",
+            statements
+        );
+        assert!(statements[0].starts_with("CREATE PROCEDURE"));
+        assert!(statements[0].ends_with("END"));
+        assert_eq!(statements[1], "SELECT 99");
+    }
+
+    #[test]
+    fn single_statement_trigger_body_still_ends_at_its_semicolon() {
+        let sql =
+            "CREATE TRIGGER t AFTER INSERT ON o FOR EACH ROW INSERT INTO a VALUES (1);\nSELECT 2;";
+        let statements = split_sql_statements(sql);
+
+        assert_eq!(statements.len(), 2, "got: {:?}", statements);
+        assert_eq!(statements[1], "SELECT 2");
+    }
+
+    #[test]
+    fn ordinary_statements_are_unaffected_by_routine_handling() {
+        let sql = "CREATE TABLE t (id int);\nSELECT 1;\nUPDATE t SET id = 2;";
+        let statements = split_sql_statements(sql);
+
+        assert_eq!(statements.len(), 3, "got: {:?}", statements);
+        assert_eq!(statements[1], "SELECT 1");
     }
 
     #[test]

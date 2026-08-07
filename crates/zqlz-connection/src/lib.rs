@@ -10,9 +10,11 @@ pub mod widgets;
 pub use config::SavedConnection;
 pub use health::{
     HealthCheckConfig, HealthCheckResult, HealthChecker, HealthStatus, HealthThresholds, PingError,
-    PingResult, create_shared_checker, ping_database,
+    PingResult, create_shared_checker, ping_database, ping_database_with_timeout,
 };
-pub use manager::ConnectionManager;
+pub use manager::{
+    ConnectionManager, DEFAULT_HEARTBEAT_INTERVAL, HeartbeatOutcome,
+};
 pub use pool::{ConnectionPool, PoolConfig, PoolStats, PooledConnection};
 pub use reconnect::{
     BackoffStrategy, ConnectionFactory, ReconnectConfig, ReconnectEvent, ReconnectingConnection,

@@ -1,3 +1,4 @@
+use gpui::SharedString;
 use std::collections::HashSet;
 use zqlz_core::{DataEditingFeatureSet, FeatureAvailability};
 
@@ -18,6 +19,40 @@ pub(super) fn table_context_menu_action_availability(
         TableContextMenuAction::DeleteRows => features.delete_rows.clone(),
         TableContextMenuAction::InsertRows => features.insert_rows.clone(),
     }
+}
+
+/// Reason to show when a connection cannot perform a data editing action, used
+/// when the feature set itself carries no explanation.
+fn default_unavailable_reason(action: TableContextMenuAction) -> &'static str {
+    match action {
+        TableContextMenuAction::EditCells => "Editing is not supported by this connection",
+        TableContextMenuAction::DeleteRows => "Deleting rows is not supported by this connection",
+        TableContextMenuAction::InsertRows => "Inserting rows is not supported by this connection",
+    }
+}
+
+/// `None` when the action is available; otherwise the reason to show the user.
+pub(super) fn table_action_disabled_reason(
+    features: &DataEditingFeatureSet,
+    action: TableContextMenuAction,
+) -> Option<SharedString> {
+    let availability = table_context_menu_action_availability(features, action);
+    if availability.available {
+        return None;
+    }
+
+    Some(SharedString::from(
+        availability.reason_or(default_unavailable_reason(action)),
+    ))
+}
+
+/// Returns the reason of the first blocking condition, so the user is told the
+/// most fundamental cause rather than an aggregate "unavailable".
+pub(super) fn first_disabled_reason(checks: &[(bool, &'static str)]) -> Option<SharedString> {
+    checks
+        .iter()
+        .find(|(blocked, _)| *blocked)
+        .map(|(_, reason)| SharedString::from(*reason))
 }
 
 pub(super) fn ordered_unique_actual_rows_from_display_rows<F>(
@@ -93,6 +128,52 @@ mod tests {
             table_context_menu_action_availability(&features, TableContextMenuAction::DeleteRows),
             FeatureAvailability::unavailable("delete blocked")
         );
+    }
+
+    #[test]
+    fn table_action_disabled_reason_keeps_connection_reason() {
+        let features = data_editing_features(
+            FeatureAvailability::unavailable("edit blocked"),
+            FeatureAvailability::available(),
+            FeatureAvailability::unavailable(""),
+        );
+
+        assert_eq!(
+            table_action_disabled_reason(&features, TableContextMenuAction::EditCells),
+            Some(SharedString::from("edit blocked"))
+        );
+        assert_eq!(
+            table_action_disabled_reason(&features, TableContextMenuAction::InsertRows),
+            None
+        );
+    }
+
+    #[test]
+    fn table_action_disabled_reason_falls_back_to_default_message() {
+        let features = data_editing_features(
+            FeatureAvailability::available(),
+            FeatureAvailability::available(),
+            FeatureAvailability {
+                available: false,
+                reason: None,
+            },
+        );
+
+        assert_eq!(
+            table_action_disabled_reason(&features, TableContextMenuAction::DeleteRows),
+            Some(SharedString::from(
+                "Deleting rows is not supported by this connection"
+            ))
+        );
+    }
+
+    #[test]
+    fn first_disabled_reason_returns_first_blocking_condition() {
+        assert_eq!(
+            first_disabled_reason(&[(false, "first"), (true, "second"), (true, "third")]),
+            Some(SharedString::from("second"))
+        );
+        assert_eq!(first_disabled_reason(&[(false, "first")]), None);
     }
 
     #[test]

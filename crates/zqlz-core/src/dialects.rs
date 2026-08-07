@@ -230,6 +230,9 @@ pub const SQL_AUTO_CLOSE_PAIRS: &[(char, char)] =
     &[('(', ')'), ('[', ']'), ('{', '}'), ('\'', '\''), ('"', '"')];
 pub const COMMAND_AUTO_CLOSE_PAIRS: &[(char, char)] = &[('"', '"')];
 pub const SQL_COMPLETION_TRIGGERS: &[char] = &['.', ' ', '(', ','];
+/// Postgres additionally triggers on JSON operator characters so `data->` opens
+/// the operator menu mid-token.
+pub const POSTGRES_COMPLETION_TRIGGERS: &[char] = &['.', ' ', '(', ',', '-', '>', '?', '@', '#'];
 pub const SQL_COMPLETION_WORD_CHARS: &[char] = &['$'];
 pub const REDIS_COMPLETION_TRIGGERS: &[char] = &[' '];
 pub const REDIS_COMPLETION_WORD_CHARS: &[char] = &[':', '-'];
@@ -714,6 +717,7 @@ pub fn default_completion_triggers_for_profile(profile: &'static str) -> Vec<cha
     match profile {
         "redis" => REDIS_COMPLETION_TRIGGERS.to_vec(),
         "mongodb" => MONGODB_COMPLETION_TRIGGERS.to_vec(),
+        "postgresql" => POSTGRES_COMPLETION_TRIGGERS.to_vec(),
         _ => SQL_COMPLETION_TRIGGERS.to_vec(),
     }
 }

@@ -18,6 +18,9 @@ pub struct FindOptions {
     pub whole_word: bool,
     /// Whether the pattern is a regular expression.
     pub regex: bool,
+    /// Whether replacements adapt to the case pattern of each match
+    /// (FOO→BAR, Foo→Bar, foo→bar).
+    pub preserve_case: bool,
 }
 
 impl FindOptions {
@@ -41,6 +44,12 @@ impl FindOptions {
     /// Set regex mode.
     pub fn regex(mut self, value: bool) -> Self {
         self.regex = value;
+        self
+    }
+
+    /// Set case-preserving replacement.
+    pub fn preserve_case(mut self, value: bool) -> Self {
+        self.preserve_case = value;
         self
     }
 }
@@ -180,13 +189,24 @@ impl ReplaceResult {
 /// Shared compiled search plan used by both find and replace helpers.
 pub struct SearchEngine {
     regex: Regex,
+    preserve_case: bool,
 }
 
 impl SearchEngine {
     pub fn new(pattern: &str, options: &FindOptions) -> Result<Self, FindError> {
         Ok(Self {
             regex: build_regex(pattern, options)?,
+            preserve_case: options.preserve_case,
         })
+    }
+
+    fn expanded_replacement(&self, replacement: &str, captures: &regex::Captures) -> String {
+        let expanded = expand_replacement(replacement, captures);
+        if !self.preserve_case {
+            return expanded;
+        }
+        let matched = captures.get(0).map(|m| m.as_str()).unwrap_or("");
+        apply_case_pattern(matched, &expanded)
     }
 
     pub fn find_all(&self, text: &str) -> Vec<Match> {
@@ -251,7 +271,7 @@ impl SearchEngine {
             .regex
             .replace_all(text, |captures: &regex::Captures| {
                 count += 1;
-                expand_replacement(replacement, captures)
+                self.expanded_replacement(replacement, captures)
             })
             .into_owned();
         ReplaceResult::new(text, count)
@@ -261,7 +281,7 @@ impl SearchEngine {
         if let Some(matched) = self.regex.find(text)
             && let Some(captures) = self.regex.captures(text)
         {
-            let expanded = expand_replacement(replacement, &captures);
+            let expanded = self.expanded_replacement(replacement, &captures);
             let result = format!(
                 "{}{}{}",
                 &text[..matched.start()],
@@ -284,7 +304,7 @@ impl SearchEngine {
         if let Some(matched) = self.regex.find(search_text)
             && let Some(captures) = self.regex.captures(search_text)
         {
-            let expanded = expand_replacement(replacement, &captures);
+            let expanded = self.expanded_replacement(replacement, &captures);
             let absolute_start = safe_start + matched.start();
             let absolute_end = safe_start + matched.end();
             let result = format!(
@@ -298,6 +318,36 @@ impl SearchEngine {
 
         ReplaceResult::new(text.to_string(), 0)
     }
+}
+
+/// Map the case pattern of `matched` onto `replacement`:
+/// all-uppercase → uppercase, all-lowercase → lowercase,
+/// initial-capital → capitalize first letter, otherwise unchanged.
+pub(crate) fn apply_case_pattern(matched: &str, replacement: &str) -> String {
+    let letters: Vec<char> = matched.chars().filter(|c| c.is_alphabetic()).collect();
+    if letters.is_empty() {
+        return replacement.to_string();
+    }
+
+    if letters.iter().all(|c| c.is_uppercase()) && letters.len() > 1 {
+        return replacement.to_uppercase();
+    }
+    if letters.iter().all(|c| c.is_lowercase()) {
+        return replacement.to_lowercase();
+    }
+
+    let first_upper = letters.first().is_some_and(|c| c.is_uppercase());
+    let rest_lower = letters.iter().skip(1).all(|c| c.is_lowercase());
+    if first_upper && rest_lower {
+        let lowered = replacement.to_lowercase();
+        let mut chars = lowered.chars();
+        return match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => lowered,
+        };
+    }
+
+    replacement.to_string()
 }
 
 pub(crate) fn expand_replacement(replacement: &str, caps: &regex::Captures) -> String {
@@ -346,6 +396,25 @@ pub(crate) fn expand_replacement(replacement: &str, caps: &regex::Captures) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_preserve_case_replacement_maps_match_case() {
+        let options = FindOptions::new().preserve_case(true);
+        let engine = SearchEngine::new("foo", &options).unwrap();
+        let result = engine.replace_all("foo Foo FOO", "bar");
+
+        assert_eq!(result.text, "bar Bar BAR");
+        assert_eq!(result.count, 3);
+    }
+
+    #[test]
+    fn test_preserve_case_disabled_keeps_replacement_verbatim() {
+        let options = FindOptions::new();
+        let engine = SearchEngine::new("foo", &options).unwrap();
+        let result = engine.replace_all("foo Foo FOO", "bar");
+
+        assert_eq!(result.text, "bar bar bar");
+    }
 
     #[test]
     fn test_find_all_case_insensitive() {

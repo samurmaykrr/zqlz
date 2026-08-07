@@ -2,7 +2,9 @@
 
 use gpui::Context;
 use uuid::Uuid;
-use zqlz_core::{DocumentCollectionInfo, DocumentDatabaseObjects, ObjectsPanelManifest};
+use zqlz_core::{
+    DocumentCollectionInfo, DocumentDatabaseObjects, ObjectFeatureSet, ObjectsPanelManifest,
+};
 
 use crate::widgets::sidebar::ConnectionSidebar;
 use crate::widgets::sidebar::types::*;
@@ -549,6 +551,31 @@ impl ConnectionSidebar {
             conn.objects_panel_manifest = Some(manifest);
         }
         cx.notify();
+    }
+
+    /// Record which object actions the connection advertises, so object menus can
+    /// explain why an action is unavailable.
+    pub fn set_object_features(
+        &mut self,
+        id: Uuid,
+        object_features: ObjectFeatureSet,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.object_features = Some(object_features);
+        }
+        cx.notify();
+    }
+
+    /// Which object actions `connection_id` advertises, if known.
+    pub(in crate::widgets) fn connection_object_features(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<ObjectFeatureSet> {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == connection_id)
+            .and_then(|connection| connection.object_features.clone())
     }
 
     /// Pre-populate the sidebar with the known active database immediately after

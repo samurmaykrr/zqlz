@@ -1,5 +1,6 @@
 //! Schema introspection traits and types
 
+mod catalog;
 mod core_types;
 mod driver_category;
 mod key_value;
@@ -8,10 +9,13 @@ mod objects_panel;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
 use crate::{Result, ZqlzError};
 
+pub use catalog::*;
 pub use core_types::*;
 pub use driver_category::*;
 pub use key_value::*;
@@ -44,6 +48,30 @@ pub trait SchemaIntrospection: Send + Sync {
 
     /// Get columns for a table
     async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>>;
+
+    /// Get columns for every table in a schema, keyed by bare table name.
+    ///
+    /// Backends whose catalog exposes columns as a queryable relation answer this in
+    /// one round-trip, which is what makes warming a whole schema for completions
+    /// affordable. `Ok(None)` means the backend has no bulk form and the caller
+    /// should fall back to per-table [`Self::get_columns`]; `Ok(Some(empty))` means
+    /// the schema genuinely has no columns.
+    async fn list_all_columns(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        Ok(None)
+    }
+
+    /// Get foreign keys for every table in a schema, keyed by bare table name.
+    ///
+    /// Same contract as [`Self::list_all_columns`].
+    async fn list_all_foreign_keys(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        Ok(None)
+    }
 
     /// Get indexes for a table
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>>;

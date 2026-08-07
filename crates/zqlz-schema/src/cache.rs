@@ -239,6 +239,17 @@ impl SchemaCache {
         }
     }
 
+    /// Get all cached columns (keyed by table name, possibly schema-qualified)
+    pub fn get_all_columns(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<HashMap<String, Vec<ColumnInfo>>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.columns.clone())
+    }
+
     /// Get all cached indexes (keyed by table name)
     pub fn get_all_indexes(&self, connection_id: Uuid) -> Option<HashMap<String, Vec<IndexInfo>>> {
         self.cache

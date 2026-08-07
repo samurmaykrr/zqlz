@@ -17,6 +17,17 @@ fn is_heavy_search_type(data_type: &str) -> bool {
         .any(|token| lowered.contains(token))
 }
 
+pub(crate) fn is_default_searchable_type(data_type: &str) -> bool {
+    let normalized = data_type.to_ascii_lowercase();
+    normalized.contains("char")
+        || normalized.contains("text")
+        || normalized.contains("name")
+        || normalized.contains("json")
+        || normalized.contains("uuid")
+        || normalized.contains("enum")
+        || normalized.contains("set")
+}
+
 pub(in crate::main_view) fn build_default_searchable_columns(
     column_meta: &[ColumnMeta],
 ) -> Vec<String> {
@@ -24,7 +35,7 @@ pub(in crate::main_view) fn build_default_searchable_columns(
     let mut heavy_columns = Vec::new();
 
     for column in column_meta {
-        if !zqlz_services::TableService::is_string_type(&column.data_type.to_ascii_lowercase()) {
+        if !is_default_searchable_type(&column.data_type) {
             continue;
         }
 
@@ -38,6 +49,39 @@ pub(in crate::main_view) fn build_default_searchable_columns(
     non_heavy_columns.extend(heavy_columns);
     non_heavy_columns.truncate(8);
     non_heavy_columns
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(name: &str, data_type: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_search_columns_include_raw_driver_text_types() {
+        let columns = vec![
+            column("id", "INTEGER"),
+            column("title", "TEXT"),
+            column("description", "VARCHAR(255)"),
+            column("payload", "JSON"),
+            column("created_at", "TIMESTAMP"),
+        ];
+
+        assert_eq!(
+            build_default_searchable_columns(&columns),
+            vec![
+                "description".to_string(),
+                "title".to_string(),
+                "payload".to_string(),
+            ]
+        );
+    }
 }
 
 pub(in crate::main_view) fn resolve_search_columns(

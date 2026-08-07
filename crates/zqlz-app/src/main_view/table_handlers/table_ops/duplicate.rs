@@ -5,6 +5,7 @@ use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
+use zqlz_core::ConnectionScope;
 use zqlz_services::{DuplicateTableOperation, DuplicateTablesRequest};
 use zqlz_table_workflows::DuplicateTablesDecision;
 use zqlz_ui::widgets::{
@@ -16,6 +17,7 @@ use zqlz_ui::widgets::{
 
 use crate::MainView;
 use crate::app::AppState;
+use crate::main_view::table_handlers::table_ops::notify_table_operation_error;
 use crate::main_view::table_handlers_utils::validation::validate_table_name;
 use crate::workspace_state::RefreshScope;
 
@@ -73,16 +75,16 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
-
-        let connection = connection.clone();
+        let connection_service = app_state.connection_service.clone();
         let table_service = app_state.table_service.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let source_table_name_for_dialog = source_table_name.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
 
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New table name"));
         name_input.update(cx, |input, cx| {
@@ -112,11 +114,12 @@ impl MainView {
             let error_message = error_message.clone();
 
             move |dialog, _window, cx| {
-                let connection = connection.clone();
+                let connection_service = connection_service.clone();
                 let window_handle = window_handle;
                 let main_view = main_view.clone();
                 let table_service = table_service.clone();
                 let source_table_name = source_table_name.clone();
+                let target_database = target_database.clone();
                 let name_input = name_input.clone();
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
@@ -165,21 +168,45 @@ impl MainView {
                             return false;
                         }
 
-                        let connection = connection.clone();
+                        let connection_service = connection_service.clone();
                         let main_view = main_view.clone();
                         let table_service = table_service.clone();
                         let source_table_name = source_table_name.clone();
+                        let target_database = target_database.clone();
 
                         cx.spawn(async move |cx| {
+                            let scope = target_database
+                                .map(ConnectionScope::Database)
+                                .unwrap_or(ConnectionScope::Default);
+                            let resolved_connection = match connection_service
+                                .resolve_connection(connection_id, scope)
+                                .await
+                            {
+                                Ok(resolved_connection) => resolved_connection,
+                                Err(error) => {
+                                    tracing::error!(%error, source = %source_table_name, "Failed to resolve duplicate-table connection");
+                                    notify_table_operation_error(
+                                        &cx,
+                                        window_handle,
+                                        format!(
+                                            "Failed to duplicate '{}': {}",
+                                            source_table_name, error
+                                        ),
+                                    );
+                                    return;
+                                }
+                            };
+
                             let outcome = table_service
                                 .duplicate_tables(
-                                    connection,
+                                    resolved_connection.connection,
                                     DuplicateTablesRequest {
                                         operations: vec![DuplicateTableOperation {
                                             source_table_name: source_table_name.clone(),
                                             target_table_name: new_table_name,
                                         }],
                                         continue_on_error: false,
+                                        namespace: resolved_connection.effective_namespace,
                                     },
                                 )
                                 .await;
@@ -189,6 +216,15 @@ impl MainView {
                                     source = %source_table_name,
                                     errors = %outcome.errors.join("; "),
                                     "Failed to duplicate table"
+                                );
+                                notify_table_operation_error(
+                                    &cx,
+                                    window_handle,
+                                    format!(
+                                        "Failed to duplicate '{}': {}",
+                                        source_table_name,
+                                        outcome.errors.join("; ")
+                                    ),
                                 );
                                 return;
                             }
@@ -274,16 +310,16 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
-
-        let connection = connection.clone();
+        let connection_service = app_state.connection_service.clone();
         let table_service = app_state.table_service.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
         let suggested_suffix = batch_decision.suggested_suffix;
         let continue_on_error = Rc::new(RefCell::new(batch_decision.continue_on_error_default));
         let new_names: Vec<String> = table_names
@@ -292,12 +328,13 @@ impl MainView {
             .collect();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
-            let connection = connection.clone();
+            let connection_service = connection_service.clone();
             let window_handle = window_handle;
             let main_view = main_view.clone();
             let table_service = table_service.clone();
             let schema_service = schema_service.clone();
             let table_names = table_names.clone();
+            let target_database = target_database.clone();
             let dialog_suggested_suffix = suggested_suffix.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
@@ -329,11 +366,12 @@ impl MainView {
                         }),
                 )
                 .on_ok(move |_, _window, cx| {
-                    let connection = connection.clone();
+                    let connection_service = connection_service.clone();
                     let main_view = main_view.clone();
                     let table_service = table_service.clone();
                     let schema_service = schema_service.clone();
                     let table_names = table_names.clone();
+                    let target_database = target_database.clone();
                     let suggested_suffix = dialog_suggested_suffix.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
@@ -346,12 +384,32 @@ impl MainView {
                             })
                             .collect();
 
+                        let scope = target_database
+                            .map(ConnectionScope::Database)
+                            .unwrap_or(ConnectionScope::Default);
+                        let resolved_connection = match connection_service
+                            .resolve_connection(connection_id, scope)
+                            .await
+                        {
+                            Ok(resolved_connection) => resolved_connection,
+                            Err(error) => {
+                                tracing::error!(%error, "Failed to resolve batch duplicate connection");
+                                notify_table_operation_error(
+                                    &cx,
+                                    window_handle,
+                                    format!("Failed to duplicate tables: {}", error),
+                                );
+                                return;
+                            }
+                        };
+
                         let outcome = table_service
                             .duplicate_tables(
-                                connection,
+                                resolved_connection.connection,
                                 DuplicateTablesRequest {
                                     operations,
                                     continue_on_error,
+                                    namespace: resolved_connection.effective_namespace,
                                 },
                             )
                             .await;
@@ -393,6 +451,16 @@ impl MainView {
                                 duplicated_tables.len(),
                                 table_names.len(),
                                 outcome.errors.join("; ")
+                            );
+                            notify_table_operation_error(
+                                &cx,
+                                window_handle,
+                                format!(
+                                    "Duplicated {} of {} tables. {}",
+                                    duplicated_tables.len(),
+                                    table_names.len(),
+                                    outcome.errors.join("; ")
+                                ),
                             );
                         }
                     })

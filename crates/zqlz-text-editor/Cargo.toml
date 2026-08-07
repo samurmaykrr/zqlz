@@ -50,3 +50,4 @@ futures.workspace = true
 
 [dev-dependencies]
 indoc.workspace = true
+gpui = { workspace = true, features = ["test-support"] }

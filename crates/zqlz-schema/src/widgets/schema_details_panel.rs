@@ -29,6 +29,8 @@ pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    /// Access method (btree, gin, gist, hash, …); empty when the driver doesn't report it.
+    pub index_type: String,
 }
 
 /// Foreign key information for display
@@ -374,6 +376,18 @@ impl SchemaDetailsPanel {
                                             .text_ellipsis()
                                             .child(idx.name.clone()),
                                     )
+                                    .when(!idx.index_type.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(theme.accent.opacity(0.2))
+                                                .text_color(theme.accent_foreground)
+                                                .flex_shrink_0()
+                                                .child(idx.index_type.to_uppercase()),
+                                        )
+                                    })
                                     .when(idx.unique, |this| {
                                         this.child(
                                             div()

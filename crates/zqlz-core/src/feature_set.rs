@@ -78,6 +78,38 @@ pub fn object_feature_for_action(action_id: &str) -> ObjectActionFeature {
     ObjectActionFeature::Browse
 }
 
+/// Explanation shown when an action needs exactly one selected object.
+pub const SINGLE_SELECTION_REASON: &str = "Select a single item to use this action";
+
+pub fn objects_panel_action_feature_availability(
+    features: &ObjectFeatureSet,
+    action_id: &str,
+) -> FeatureAvailability {
+    // A connection that advertises no actions at all has no manifest to judge
+    // against, which is different from advertising a manifest that excludes this
+    // action. Blocking on it would reject every action the panel offers.
+    if features.available_actions.is_empty() {
+        return FeatureAvailability::available();
+    }
+
+    if !features
+        .available_actions
+        .iter()
+        .any(|available_action| available_action == action_id)
+    {
+        return FeatureAvailability::unavailable(format!(
+            "The '{action_id}' action is not advertised by this connection"
+        ));
+    }
+
+    match object_feature_for_action(action_id) {
+        ObjectActionFeature::Browse => features.browse_objects.clone(),
+        ObjectActionFeature::Create => features.create_objects.clone(),
+        ObjectActionFeature::Edit => features.edit_objects.clone(),
+        ObjectActionFeature::Delete => features.delete_objects.clone(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreFeatureSet {
     pub key_value: FeatureAvailability,
@@ -305,6 +337,88 @@ mod tests {
         assert!(features.objects.create_objects.available);
         assert!(features.objects.edit_objects.available);
         assert!(!features.stores.key_value.available);
+    }
+
+    fn object_features() -> ObjectFeatureSet {
+        ObjectFeatureSet {
+            browse_objects: FeatureAvailability::available(),
+            create_objects: FeatureAvailability::unavailable("create blocked"),
+            edit_objects: FeatureAvailability::available(),
+            delete_objects: FeatureAvailability::unavailable("delete blocked"),
+            available_kinds: vec!["table".to_string()],
+            available_actions: vec![
+                "open".to_string(),
+                "new_table".to_string(),
+                "design".to_string(),
+                "rename".to_string(),
+                "duplicate".to_string(),
+                "empty".to_string(),
+                "delete".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn action_feature_availability_rejects_unadvertised_action() {
+        let availability = objects_panel_action_feature_availability(&object_features(), "drop");
+
+        assert_eq!(
+            availability,
+            FeatureAvailability::unavailable(
+                "The 'drop' action is not advertised by this connection"
+            )
+        );
+    }
+
+    #[test]
+    fn action_feature_availability_allows_actions_when_nothing_is_advertised() {
+        let features = ObjectFeatureSet {
+            browse_objects: FeatureAvailability::available(),
+            create_objects: FeatureAvailability::unavailable("create blocked"),
+            edit_objects: FeatureAvailability::unavailable("edit blocked"),
+            delete_objects: FeatureAvailability::unavailable("delete blocked"),
+            available_kinds: Vec::new(),
+            available_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "delete"),
+            FeatureAvailability::available()
+        );
+    }
+
+    #[test]
+    fn action_feature_availability_maps_action_to_feature_group() {
+        let features = object_features();
+
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "open"),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "new_table"),
+            FeatureAvailability::unavailable("create blocked")
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "rename"),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "design"),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "duplicate"),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "empty"),
+            FeatureAvailability::unavailable("delete blocked")
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "delete"),
+            FeatureAvailability::unavailable("delete blocked")
+        );
     }
 
     #[test]

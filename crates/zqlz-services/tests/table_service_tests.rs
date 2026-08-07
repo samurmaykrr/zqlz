@@ -6,7 +6,7 @@
 mod common;
 
 use std::sync::Arc;
-use zqlz_core::{Connection, RowIdentifier, Value};
+use zqlz_core::{AffectedRowCountFidelity, Connection, RowIdentifier, Value};
 use zqlz_services::{
     BrowseLastPageRequest, BrowseNearEndPageRequest, BrowseTableWithFiltersRequest, CellUpdateData,
     RowDeleteData, RowInsertData, TableService,
@@ -434,6 +434,262 @@ async fn update_cell_does_not_use_partial_or_null_primary_key() {
     ));
 }
 
+/// Without a primary key, a unique key identifies the row just as precisely,
+/// and keeps the statement off every other column.
+#[tokio::test]
+async fn update_cell_falls_back_to_a_unique_key_without_a_primary_key() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("sqlite"));
+    let service = TableService::new(100);
+
+    service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "sessions",
+            None,
+            CellUpdateData {
+                column_name: "token".to_string(),
+                new_value: Some(Value::String("new-token".to_string())),
+                all_column_names: vec!["email".to_string(), "token".to_string()],
+                all_row_values: vec![
+                    Value::String("alice@example.com".to_string()),
+                    Value::String("old-token".to_string()),
+                ],
+                all_column_types: vec!["text".to_string(), "text".to_string()],
+            },
+        )
+        .await
+        .expect("update should succeed");
+
+    let update = conn
+        .last_cell_update()
+        .expect("update request should be captured");
+    assert!(matches!(
+        update.row_identifier,
+        RowIdentifier::PrimaryKey(values)
+            if values == vec![(
+                "email".to_string(),
+                Value::String("alice@example.com".to_string())
+            )]
+    ));
+}
+
+/// A row whose unique key is NULL cannot be matched on it, because NULL never
+/// compares equal to itself.
+#[tokio::test]
+async fn update_cell_skips_a_null_unique_key() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("sqlite"));
+    let service = TableService::new(100);
+
+    service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "sessions",
+            None,
+            CellUpdateData {
+                column_name: "token".to_string(),
+                new_value: Some(Value::String("new-token".to_string())),
+                all_column_names: vec!["email".to_string(), "token".to_string()],
+                all_row_values: vec![Value::Null, Value::String("old-token".to_string())],
+                all_column_types: vec!["text".to_string(), "text".to_string()],
+            },
+        )
+        .await
+        .expect("update should succeed");
+
+    let update = conn
+        .last_cell_update()
+        .expect("update request should be captured");
+    assert!(matches!(
+        update.row_identifier,
+        RowIdentifier::FullRow(values) if values.len() == 2
+    ));
+}
+
+/// The regression test for the false "modified or deleted by another user"
+/// error: on a driver that reports matched rows, zero genuinely means the row
+/// is gone and must stay a hard error.
+#[tokio::test]
+async fn update_cell_zero_affected_rows_errors_on_exact_drivers() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("postgresql")
+            .with_cell_update_affected_rows(0),
+    );
+    let service = TableService::new(100);
+
+    let result = service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            sample_cell_update(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "zero matched rows on an exact-count driver must be an error"
+    );
+}
+
+/// ClickHouse fabricates a zero count, so zero carries no information and must
+/// not be reported as a vanished row.
+#[tokio::test]
+async fn update_cell_zero_affected_rows_is_not_an_error_when_counts_unavailable() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("clickhouse")
+            .with_cell_update_affected_rows(0)
+            .with_affected_row_count_fidelity(AffectedRowCountFidelity::Unavailable),
+    );
+    let service = TableService::new(100);
+
+    let outcome = service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            sample_cell_update(),
+        )
+        .await
+        .expect("drivers without row counts must not fail the update");
+
+    assert!(
+        outcome.unconfirmed_reason.is_some(),
+        "an unconfirmable write should say so"
+    );
+}
+
+/// A SQL Server trigger running `SET NOCOUNT ON` suppresses the count, so zero
+/// is inconclusive rather than a failure.
+#[tokio::test]
+async fn update_cell_zero_affected_rows_warns_on_best_effort() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("mssql")
+            .with_cell_update_affected_rows(0)
+            .with_affected_row_count_fidelity(AffectedRowCountFidelity::BestEffort),
+    );
+    let service = TableService::new(100);
+
+    let outcome = service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            sample_cell_update(),
+        )
+        .await
+        .expect("a suppressed row count must not fail the update");
+
+    assert!(outcome.unconfirmed_reason.is_some());
+}
+
+#[tokio::test]
+async fn update_cell_reports_affected_rows_on_success() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("postgresql"));
+    let service = TableService::new(100);
+
+    let outcome = service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            sample_cell_update(),
+        )
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(outcome.affected_rows, 1);
+    assert!(outcome.unconfirmed_reason.is_none());
+}
+
+/// The database may store something other than what was submitted (a DECIMAL
+/// rounded to scale, a truncated string). The outcome must carry the stored
+/// value so the grid can show the truth instead of the typed value.
+#[tokio::test]
+async fn update_cell_reads_back_the_stored_value() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("postgresql")
+            .with_query_response(
+                "SELECT \"email\"",
+                mock_query_result(
+                    vec!["email"],
+                    vec![vec![Value::String("rounded@example.com".to_string())]],
+                ),
+            ),
+    );
+    let service = TableService::new(100);
+
+    let outcome = service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            sample_cell_update(),
+        )
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(
+        outcome.stored_value,
+        Some(Value::String("rounded@example.com".to_string())),
+        "the value the database actually holds should be reported back"
+    );
+}
+
+/// A full-row identifier matches on the pre-update value of the edited column,
+/// so re-reading with it would select nothing and wrongly blank the cell.
+#[tokio::test]
+async fn update_cell_skips_read_back_without_a_primary_key() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("sqlite"));
+    let service = TableService::new(100);
+
+    let outcome = service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "composite_nullable",
+            None,
+            CellUpdateData {
+                column_name: "builder_document_json".to_string(),
+                new_value: Some(Value::String("{\"new\":true}".to_string())),
+                all_column_names: vec![
+                    "content_id".to_string(),
+                    "status_id".to_string(),
+                    "builder_document_json".to_string(),
+                ],
+                all_row_values: vec![
+                    Value::String("system.brand.logo.primary_logo".to_string()),
+                    Value::Null,
+                    Value::String("{\"old\":true}".to_string()),
+                ],
+                all_column_types: vec!["text".to_string(), "text".to_string(), "text".to_string()],
+            },
+        )
+        .await
+        .expect("update should succeed");
+
+    assert!(
+        outcome.stored_value.is_none(),
+        "read-back must be skipped when the row has no primary key"
+    );
+}
+
+fn sample_cell_update() -> CellUpdateData {
+    CellUpdateData {
+        column_name: "email".to_string(),
+        new_value: Some(Value::String("new@example.com".to_string())),
+        all_column_names: vec!["id".to_string(), "name".to_string(), "email".to_string()],
+        all_row_values: vec![
+            Value::Int32(1),
+            Value::String("Alice".to_string()),
+            Value::String("old@example.com".to_string()),
+        ],
+        all_column_types: vec!["int4".to_string(), "text".to_string(), "text".to_string()],
+    }
+}
+
 // ============ insert_row Tests ============
 
 #[tokio::test]
@@ -570,6 +826,45 @@ async fn delete_rows_with_primary_key() {
         .expect("delete should succeed");
 
     assert_eq!(deleted, 1);
+}
+
+/// A table with no primary key is still editable: the row is matched on all
+/// its columns, and the driver narrows the statement so duplicate rows are not
+/// deleted together.
+#[tokio::test]
+async fn delete_row_without_a_key_is_scoped_to_a_single_row() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("sqlite"));
+    let service = TableService::new(100);
+
+    let delete_data = RowDeleteData {
+        all_column_names: vec!["workflow_id".to_string(), "workflow_jinja".to_string()],
+        rows: vec![vec![
+            Value::String("search_web".to_string()),
+            Value::Null,
+        ]],
+    };
+
+    let deleted = service
+        .delete_rows(
+            conn.clone() as Arc<dyn Connection>,
+            "workflows",
+            None,
+            delete_data,
+        )
+        .await
+        .expect("delete should succeed");
+
+    assert_eq!(deleted, 1);
+    let delete_sql = conn
+        .query_log()
+        .into_iter()
+        .find(|sql| sql.starts_with("DELETE FROM"))
+        .expect("delete statement should be logged");
+    assert_eq!(
+        delete_sql,
+        "DELETE FROM \"workflows\" WHERE rowid IN (SELECT rowid FROM \"workflows\" \
+         WHERE \"workflow_id\" = ? AND \"workflow_jinja\" IS NULL LIMIT 1)"
+    );
 }
 
 #[tokio::test]

@@ -933,6 +933,93 @@ fn test_incomplete_group_by() {
 }
 
 // -----------------------------------------------------------------------------
+// Qualified reference still being typed at the cursor
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_dangling_qualified_reference_at_cursor_is_not_an_error() {
+    let mut lsp = create_test_lsp();
+    let sql = "select u.  from users as u";
+    let text = Rope::from(sql);
+    let cursor = sql.find("u.").expect("dangling reference present") + "u.".len();
+
+    let diagnostics = lsp.validate_sql_at_cursor(&text, Some(cursor));
+
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "Half-typed qualified reference should not report errors, got: {:?}",
+        errors
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.source.as_deref() == Some("tree-sitter")),
+        "Tree-sitter fallback pass should be skipped, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn test_dangling_qualified_reference_without_cursor_still_reports() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("select u.  from users as u");
+
+    let diagnostics = lsp.validate_sql(&text);
+
+    assert_has_error(&diagnostics, "Dangling qualified reference with no cursor");
+}
+
+#[test]
+fn test_cursor_offset_does_not_suppress_unrelated_incomplete_statements() {
+    for sql in [
+        "SELECT FROM users",
+        "SELECT id, name, FROM users",
+        "SELECT * FROM users WHERE",
+        "SELECT * FROM users WHERE id =",
+    ] {
+        let mut lsp = create_test_lsp();
+        let text = Rope::from(sql);
+
+        let diagnostics = lsp.validate_sql_at_cursor(&text, Some(sql.len()));
+
+        assert_has_error(&diagnostics, sql);
+    }
+}
+
+#[test]
+fn test_dangling_dot_suppression_requires_cursor_immediately_after_dot() {
+    let mut lsp = create_test_lsp();
+    let sql = "select u.  from users as u";
+    let text = Rope::from(sql);
+
+    let diagnostics = lsp.validate_sql_at_cursor(&text, Some(sql.len()));
+
+    assert_has_error(&diagnostics, "Cursor away from the dangling dot");
+}
+
+#[test]
+fn test_float_literal_dot_at_cursor_is_not_treated_as_qualified_reference() {
+    let sql = "SELECT 1. FROM users u JOIN";
+    let mut with_cursor = create_test_lsp();
+    let mut without_cursor = create_test_lsp();
+    let text = Rope::from(sql);
+    let cursor = sql.find("1.").expect("float literal present") + "1.".len();
+
+    let with_cursor = with_cursor.validate_sql_at_cursor(&text, Some(cursor));
+    let without_cursor = without_cursor.validate_sql(&text);
+
+    assert_eq!(
+        with_cursor.len(),
+        without_cursor.len(),
+        "A trailing dot on a number is not a qualified reference"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Unbalanced Delimiters (parentheses, quotes)
 // -----------------------------------------------------------------------------
 
@@ -1160,6 +1247,142 @@ END"#,
     assert_no_syntax_errors(
         &diagnostics,
         "SQLite CREATE TRIGGER DDL should not show parser diagnostics",
+    );
+}
+
+#[test]
+fn test_mysql_definer_function_is_not_reported_as_syntax_error() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MySQL);
+    let text = Rope::from(
+        r#"CREATE DEFINER=`root`@`localhost` FUNCTION `current_actor_name`() RETURNS varchar(255) CHARSET utf8mb4
+    READS SQL DATA
+BEGIN
+    DECLARE actor_identifier VARCHAR(255);
+    SELECT actor INTO actor_identifier
+    FROM util_session_context
+    WHERE connection_id = CONNECTION_ID();
+    RETURN COALESCE(actor_identifier, CURRENT_USER());
+END"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "MySQL CREATE DEFINER=... FUNCTION DDL should not show parser diagnostics",
+    );
+}
+
+#[test]
+fn test_mysql_definer_procedure_is_not_reported_as_syntax_error() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MySQL);
+    let text = Rope::from(
+        r#"CREATE DEFINER=`root`@`localhost` PROCEDURE `set_context`(p_tenant_id CHAR(36), p_actor VARCHAR(255))
+BEGIN
+    INSERT INTO util_session_context (connection_id, tenant_id, actor)
+    VALUES (CONNECTION_ID(), p_tenant_id, p_actor)
+    ON DUPLICATE KEY UPDATE
+        tenant_id = VALUES(tenant_id),
+        actor = VALUES(actor),
+        updated_at = CURRENT_TIMESTAMP;
+END"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "MySQL CREATE DEFINER=... PROCEDURE DDL should not show parser diagnostics",
+    );
+}
+
+#[test]
+fn test_mysql_definer_trigger_is_not_reported_as_syntax_error() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MySQL);
+    let text = Rope::from(
+        r#"CREATE DEFINER=`root`@`localhost` TRIGGER `trg_payments_audit_insert` AFTER INSERT ON `payments_payment_intents` FOR EACH ROW
+    INSERT INTO audit_event_log (
+        tenant_id,
+        table_name,
+        operation_name,
+        actor_name,
+        old_row,
+        new_row,
+        changed_at
+    ) VALUES (
+        NEW.tenant_id,
+        'payments_payment_intents',
+        'INSERT',
+        current_actor_name(),
+        NULL,
+        JSON_OBJECT('payment_intent_id', NEW.payment_intent_id, 'status_code', NEW.status_code),
+        NOW()
+    );
+END"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "MySQL CREATE DEFINER=... TRIGGER DDL should not show parser diagnostics",
+    );
+}
+
+#[test]
+fn test_spaced_definer_clause_is_not_reported_as_syntax_error() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MySQL);
+    let text = Rope::from(
+        r#"CREATE DEFINER = `admin`@`%` PROCEDURE `rebuild_totals`()
+BEGIN
+    DECLARE processed INT DEFAULT 0;
+    UPDATE orders SET total = 0 WHERE id > 0;
+END"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "A spaced DEFINER clause should be recognized as a routine header",
+    );
+}
+
+#[test]
+fn test_create_or_replace_function_is_not_reported_as_syntax_error() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let text = Rope::from(
+        r#"CREATE OR REPLACE FUNCTION bump_version() RETURNS trigger AS $$
+BEGIN
+    NEW.version := OLD.version + 1;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "CREATE OR REPLACE FUNCTION should not show parser diagnostics",
+    );
+}
+
+#[test]
+fn test_routine_guard_does_not_swallow_errors_in_other_statements() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MySQL);
+
+    // `function` here is a column name, not the object kind: the guard must bail on TABLE
+    // before reaching it, leaving this statement fully validated.
+    let valid_table = Rope::from("CREATE TABLE t (function VARCHAR(10))");
+    assert_no_syntax_errors(
+        &lsp.validate_sql(&valid_table),
+        "A column named `function` should not be mistaken for a routine header",
+    );
+
+    let broken = Rope::from("SELECT * FORM users");
+    let diagnostics = lsp.validate_sql(&broken);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "A genuine syntax error must still be reported, got: {:?}",
+        diagnostics
     );
 }
 

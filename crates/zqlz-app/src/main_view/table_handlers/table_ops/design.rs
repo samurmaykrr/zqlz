@@ -61,21 +61,54 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
-
         let table_design_service = app_state.table_design_service.clone();
+        let connection_service = app_state.connection_service.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
 
-        let dialect = table_design_service.dialect_for_connection(connection.as_ref());
-        let connection = connection.clone();
         let table_name_clone = table_name.clone();
 
         cx.spawn_in(window, async move |this, cx| {
+            let scope = target_database
+                .map(ConnectionScope::Database)
+                .unwrap_or(ConnectionScope::Default);
+            let resolved_connection = match connection_service
+                .resolve_connection(connection_id, scope)
+                .await
+            {
+                Ok(resolved_connection) => resolved_connection,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to resolve table designer connection");
+
+                    _ = cx.update(|window, cx| {
+                        window.push_notification(
+                            zqlz_ui::widgets::notification::Notification::error(format!(
+                                "Failed to open designer for '{}': {}",
+                                table_name_clone, error
+                            )),
+                            cx,
+                        );
+                    });
+
+                    return anyhow::Ok(());
+                }
+            };
+
+            let dialect = table_design_service
+                .dialect_for_connection(resolved_connection.connection.as_ref());
+            let object_schema = resolved_connection.effective_namespace.clone();
+
             // Load table structure
             match table_design_service
-                .load_table(connection, dialect, None, &table_name_clone)
+                .load_table(
+                    resolved_connection.connection,
+                    dialect,
+                    object_schema.as_deref(),
+                    &table_name_clone,
+                )
                 .await
             {
                 Ok(design) => {
@@ -118,6 +151,16 @@ impl MainView {
                 }
                 Err(e) => {
                     tracing::error!("Failed to load table structure: {}", e);
+
+                    _ = cx.update(|window, cx| {
+                        window.push_notification(
+                            zqlz_ui::widgets::notification::Notification::error(format!(
+                                "Failed to open designer for '{}': {}",
+                                table_name_clone, e
+                            )),
+                            cx,
+                        );
+                    });
                 }
             }
 

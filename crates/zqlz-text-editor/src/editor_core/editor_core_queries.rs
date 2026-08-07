@@ -12,6 +12,7 @@ impl<'a> EditorCore<'a> {
                 case_sensitive: true,
                 whole_word: false,
                 regex: false,
+                preserve_case: false,
             },
         )
         .map(|engine| {
@@ -300,6 +301,7 @@ impl<'a> EditorCore<'a> {
                 case_sensitive: true,
                 whole_word: true,
                 regex: false,
+                preserve_case: false,
             },
         )
         .map(|engine| {

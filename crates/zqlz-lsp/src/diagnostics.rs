@@ -58,6 +58,18 @@ impl SqlDiagnostics {
         schema_cache: Option<&SchemaCache>,
         dialect_config: Option<&DialectConfig>,
     ) -> Vec<Diagnostic> {
+        self.analyze_with_dialect_at_cursor(text, schema_cache, dialect_config, None)
+    }
+
+    /// Same as [`Self::analyze_with_dialect`], but suppresses syntax errors caused
+    /// solely by a qualified reference the user is still typing at `cursor_offset`.
+    pub fn analyze_with_dialect_at_cursor(
+        &mut self,
+        text: &Rope,
+        schema_cache: Option<&SchemaCache>,
+        dialect_config: Option<&DialectConfig>,
+        cursor_offset: Option<usize>,
+    ) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let sql = text.to_string();
 
@@ -77,13 +89,25 @@ impl SqlDiagnostics {
         let sqlparser_dialect: Box<dyn SqlParserDialect> = resolved_sql_dialect
             .map(|dialect| dialect.sqlparser_dialect())
             .unwrap_or_else(|| Box::new(GenericDialect {}));
-        let is_create_trigger_statement =
-            crate::diagnostics_syntax::is_create_trigger_statement(&sql);
+        let is_compound_routine_statement =
+            crate::diagnostics_syntax::is_compound_routine_statement(&sql);
+
+        // `select c.| from t` only fails to parse because the column after the dot
+        // hasn't been typed yet. If filling the caret in makes the statement parse,
+        // the text is merely unfinished — reporting it would paint the line red on
+        // every keystroke. Used purely as a gate: positions from the sanitized string
+        // are shifted and must never be reported.
+        let is_incomplete_at_cursor = !skip_sql
+            && crate::query_sources::sanitize_dangling_qualified_reference(&sql, cursor_offset)
+                .is_some_and(|sanitized| {
+                    sqlparser::parser::Parser::parse_sql(sqlparser_dialect.as_ref(), &sanitized)
+                        .is_ok()
+                });
 
         // Use sqlparser for syntax validation with error location (SQL dialects only).
         // We keep this pass authoritative for SQL syntax because it is dialect-aware
         // (e.g. SQLite bracketed identifiers such as `[table name]`).
-        let sqlparser_diagnostics = if skip_sql {
+        let sqlparser_diagnostics = if skip_sql || is_incomplete_at_cursor {
             Vec::new()
         } else {
             let fallback_range = self.first_tree_sitter_error_range(&sql, text);
@@ -103,9 +127,10 @@ impl SqlDiagnostics {
         // false positives for valid dialect-specific syntax that sqlparser already accepted.
         // Example: SQLite allows bracketed identifiers (`[name]`), while the SQL grammar
         // behind tree-sitter can flag them as ERROR nodes.
-        let should_run_tree_sitter = !is_create_trigger_statement
+        let should_run_tree_sitter = !is_compound_routine_statement
             && !skip_sql
             && !skip_tree_sitter
+            && !is_incomplete_at_cursor
             && (has_sqlparser_syntax_error || using_generic_sqlparser);
         if should_run_tree_sitter {
             diagnostics.extend(self.check_tree_sitter_errors(&sql, text));
@@ -170,7 +195,7 @@ impl SqlDiagnostics {
         let parser = self.ts_parser.as_mut()?;
         let tree = parser.parse(sql, None)?;
         let mut cursor = tree.walk();
-        first_error_node_range(&mut cursor, text)
+        first_error_node_range(&mut cursor, text).map(clamp_range_to_start_line)
     }
 
     /// Check for tree-sitter ERROR nodes with precise positioning
@@ -322,6 +347,20 @@ fn schema_issue_occurrence_key(issue: &crate::ValidationIssue, symbol: &str) -> 
             .map(str::to_ascii_lowercase)
             .unwrap_or_default(),
         symbol.to_ascii_lowercase()
+    )
+}
+
+/// A tree-sitter ERROR node can span an entire unparseable document. Used as a diagnostic
+/// range that becomes one contiguous byte span downstream, underlining every line at once,
+/// so keep the reported span on the line where the error starts.
+fn clamp_range_to_start_line(range: Range) -> Range {
+    if range.end.line == range.start.line {
+        return range;
+    }
+
+    Range::new(
+        range.start,
+        Position::new(range.start.line, range.start.character.saturating_add(1)),
     )
 }
 

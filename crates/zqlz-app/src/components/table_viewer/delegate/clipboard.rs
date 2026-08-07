@@ -1,11 +1,12 @@
 use super::*;
+use zqlz_ui::widgets::{WindowExt as _, notification::Notification};
 
 impl TableViewerDelegate {
     pub fn handle_paste(
         &mut self,
         anchor: zqlz_ui::widgets::table::CellPosition,
         data: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
         // Parse TSV data into rows and columns
@@ -25,6 +26,7 @@ impl TableViewerDelegate {
         let start_col = if anchor.col == 0 { 1 } else { anchor.col };
 
         let mut modified_cells = Vec::new();
+        let mut rejected_cells: Vec<String> = Vec::new();
 
         let display_row_count = if self.is_filtering {
             self.filtered_row_indices.len()
@@ -53,6 +55,14 @@ impl TableViewerDelegate {
                     break;
                 }
 
+                // Pasted text is unvetted, unlike inline edits which validate as
+                // the user types. Skipping the bad cells keeps the rest of the
+                // paste usable instead of failing the whole block.
+                if let Err(message) = self.validate_cell_value(data_col, paste_value) {
+                    rejected_cells.push(message);
+                    continue;
+                }
+
                 let data_type = self
                     .column_meta
                     .get(data_col)
@@ -67,7 +77,7 @@ impl TableViewerDelegate {
                     .cloned()
                     .unwrap_or_default();
 
-                if typed_value != original_value {
+                if !typed_value.is_equivalent_to(&original_value) {
                     modified_cells.push((actual_row, target_col, typed_value));
                 }
             }
@@ -115,5 +125,29 @@ impl TableViewerDelegate {
         self.push_undo(UndoEntry { edits: undo_edits });
         cx.notify();
         tracing::info!("Pasted {} cell(s)", cells_count);
+
+        if !rejected_cells.is_empty() {
+            let detail = rejected_cells
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ");
+            let summary = if rejected_cells.len() > 3 {
+                format!(
+                    "Skipped {} cell(s) that did not match their column type: {}; …",
+                    rejected_cells.len(),
+                    detail
+                )
+            } else {
+                format!(
+                    "Skipped {} cell(s) that did not match their column type: {}",
+                    rejected_cells.len(),
+                    detail
+                )
+            };
+            tracing::warn!("{}", summary);
+            window.push_notification(Notification::warning(summary), cx);
+        }
     }
 }
