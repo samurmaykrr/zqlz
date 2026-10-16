@@ -5,6 +5,7 @@
 //! analytics on large datasets.
 
 mod driver;
+mod explain;
 #[cfg(test)]
 mod driver_tests;
 mod schema;
@@ -12,3 +13,4 @@ mod schema;
 mod schema_tests;
 
 pub use driver::*;
+pub use explain::parse_clickhouse_explain_result;

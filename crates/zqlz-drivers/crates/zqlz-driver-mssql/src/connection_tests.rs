@@ -2,7 +2,7 @@
 
 use crate::connection::{
     MssqlConnectionError, TiberiusParam, column_data_to_value, trust_cert_from_config,
-    values_to_tiberius_params, windows_auth_from_config,
+    format_numeric, split_showplan_batch, values_to_tiberius_params, windows_auth_from_config,
 };
 use tiberius::ColumnData;
 use zqlz_core::{ConnectionConfig, Value, ZqlzError};
@@ -315,4 +315,27 @@ fn test_mssql_connection_debug() {
     // Test the debug format - we can't create a real connection but can test the format string
     let debug_str = format!("{:?}", "MssqlConnection");
     assert!(debug_str.contains("MssqlConnection"));
+}
+
+#[test]
+fn showplan_batch_is_split_into_separate_statements() {
+    let (enable, statement, disable) = split_showplan_batch(
+        "SET SHOWPLAN_ALL ON; SELECT a FROM t WHERE b = 'x'; SET SHOWPLAN_ALL OFF",
+    )
+    .unwrap();
+    assert_eq!(enable, "SET SHOWPLAN_ALL ON");
+    assert_eq!(statement, "SELECT a FROM t WHERE b = 'x'");
+    assert_eq!(disable, "SET SHOWPLAN_ALL OFF");
+
+    assert!(split_showplan_batch("SELECT 1; SELECT 2").is_none());
+    assert!(split_showplan_batch("SET NOCOUNT ON; SELECT 1").is_none());
+}
+
+#[test]
+fn numeric_values_keep_their_sign_and_scale() {
+    assert_eq!(format_numeric(-4242, 2), "-42.42");
+    assert_eq!(format_numeric(1234, 2), "12.34");
+    assert_eq!(format_numeric(5, 2), "0.05");
+    assert_eq!(format_numeric(-5, 2), "-0.05");
+    assert_eq!(format_numeric(42, 0), "42");
 }

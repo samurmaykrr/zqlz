@@ -33,26 +33,14 @@ impl Panel for TableViewerPanel {
     }
 
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
-        if active
-            && let (Some(connection_id), Some(table_name)) =
-                (self.connection_id, self.table_name.clone())
-        {
-            cx.emit(TableViewerEvent::BecameActive {
-                connection_id,
-                table_name,
-                database_name: self.database_name.clone(),
-            });
+        if active && self.connection_id.is_some() && self.table_name.is_some() {
+            cx.emit(TableViewerEvent::BecameActive);
         }
     }
 
     fn on_removed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let (Some(connection_id), Some(table_name)) =
-            (self.connection_id, self.table_name.clone())
-        {
-            cx.emit(TableViewerEvent::BecameInactive {
-                connection_id,
-                table_name,
-            });
+        if self.connection_id.is_some() && self.table_name.is_some() {
+            cx.emit(TableViewerEvent::BecameInactive);
         }
     }
 }

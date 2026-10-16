@@ -3,6 +3,7 @@ use super::*;
 const INLINE_PREVIEW_MAX_CHARS: usize = 120;
 const INLINE_TOOLTIP_TEXT_THRESHOLD: usize = 20;
 const PREVIEW_CACHE_WARM_LIMIT: usize = 2_000;
+const TOOLTIP_TEXT_MAX_CHARS: usize = 800;
 
 #[derive(Clone, Debug)]
 pub(in crate::components::table_viewer) struct InlineCellPreview {
@@ -191,10 +192,21 @@ impl TableViewerDelegate {
     }
 
     pub(super) fn tooltip_text_for_cell_value(value: &Value) -> String {
-        match value {
+        let text = match value {
             Value::Bytes(_) => value.display_for_table(),
             _ => value.display_for_editor(),
+        };
+        Self::truncate_tooltip_text(&text)
+    }
+
+    fn truncate_tooltip_text(text: &str) -> String {
+        if text.chars().count() <= TOOLTIP_TEXT_MAX_CHARS {
+            return text.to_string();
         }
+
+        let mut truncated: String = text.chars().take(TOOLTIP_TEXT_MAX_CHARS).collect();
+        truncated.push('…');
+        truncated
     }
 
     pub fn render_boolean_checkbox(

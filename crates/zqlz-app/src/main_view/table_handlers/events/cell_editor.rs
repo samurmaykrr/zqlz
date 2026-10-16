@@ -21,7 +21,6 @@ use crate::app::AppState;
 use crate::components::CellEditorEvent;
 
 use super::super::super::MainView;
-use super::super::super::table_handlers_utils::conversion::resolve_schema_qualifier;
 
 impl MainView {
     pub(in crate::main_view) fn handle_cell_editor_event(
@@ -55,10 +54,17 @@ impl MainView {
                         .flatten()
                 });
 
-                let Some(connection) = app_state
-                    .connections
-                    .get_for_database_cached(cell_data.connection_id, database_name.as_deref())
-                else {
+                // Relational edits run against the table the viewer resolved.
+                let source_table = source_viewer
+                    .as_ref()
+                    .and_then(|viewer| viewer.read_with(cx, |viewer, _cx| viewer.table()).ok())
+                    .flatten();
+                let Some(connection) = app_state.connections.get_for_database_cached(
+                    cell_data.connection_id,
+                    source_table
+                        .as_ref()
+                        .map_or(database_name.as_deref(), |table| table.database.as_deref()),
+                ) else {
                     tracing::error!("Connection not found: {}", cell_data.connection_id);
                     return;
                 };
@@ -75,18 +81,6 @@ impl MainView {
                 let is_key_value = connection.driver_category() == DriverCategory::KeyValue;
                 let is_document = connection.driver_category() == DriverCategory::Document;
                 let cell_editor_panel = self.cell_editor_panel.clone();
-                let schema_qualifier = if !is_key_value && !is_document {
-                    source_viewer.as_ref().and_then(|v| {
-                        v.read_with(cx, |viewer, _cx| {
-                            let db = viewer.database_name();
-                            resolve_schema_qualifier(&connection, &db)
-                        })
-                        .ok()
-                        .flatten()
-                    })
-                } else {
-                    None
-                };
                 let connection = connection.clone();
 
                 let cell_update_data = zqlz_services::CellUpdateData {
@@ -150,10 +144,13 @@ impl MainView {
                             }
                         }
                     } else {
-                        table_service
-                            .update_cell(connection, &table_name, schema_qualifier.as_deref(), cell_update_data)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{}", e))
+                        match &source_table {
+                            Some(table) => table_service
+                                .update_cell(connection, table, cell_update_data)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e)),
+                            None => Err(anyhow::anyhow!("The table is still opening")),
+                        }
                     };
 
                     match update_result {

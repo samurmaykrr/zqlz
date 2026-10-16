@@ -8,8 +8,8 @@ use crate::widgets::{
 use gpui::{
     App, AppContext as _, ClickEvent, Context, DismissEvent, Entity, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, OwnedMenu, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, anchored,
-    deferred, div, prelude::FluentBuilder, px,
+    Render, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
+    anchored, deferred, div, prelude::FluentBuilder, px,
 };
 
 const CONTEXT: &str = "AppMenuBar";
@@ -120,6 +120,7 @@ impl Render for AppMenuBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .id("app-menu-bar")
+            .role(Role::MenuBar)
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_move_left))
             .on_action(cx.listener(Self::on_move_right))

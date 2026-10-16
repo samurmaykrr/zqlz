@@ -1,7 +1,7 @@
 //! Turso remote connection implementation.
 
-use std::collections::HashMap;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -11,7 +11,8 @@ use zqlz_core::{
     Connection, ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
     DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
     ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities,
-    IndexInfo, ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef,
+    IndexInfo, ObjectKindSupport, ObjectType, ObjectsPanelColumn, ObjectsPanelData,
+    ObjectsPanelObjectRef,
     ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle, QueryResult,
     ResolvedConnectionScope, Result, Row, RowIdentifier, SchemaInfo, SchemaIntrospection,
     SequenceInfo, SingleRowDmlScope, SqlObjectName, StatementResult, TableDetails, TableInfo,
@@ -263,6 +264,14 @@ impl Connection for TursoConnection {
         Some("sqlite")
     }
 
+    fn table_sql_name(&self, table: &zqlz_core::TableRef) -> zqlz_core::SqlObjectName {
+        // `main` is the default; only attached databases are qualified.
+        zqlz_core::SqlObjectName {
+            namespace: table.schema.clone().filter(|schema| schema != "main"),
+            name: table.name.clone(),
+        }
+    }
+
     async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
         let mut resolved = ResolvedConnectionScope::default_scope();
         resolved.requested_scope = scope.clone();
@@ -351,15 +360,9 @@ impl Connection for TursoConnection {
     }
 
     fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {
-        if table_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "Turso does not support schema-qualified RENAME TABLE".to_string(),
-            ));
-        }
-
         Ok(format!(
             "ALTER TABLE {} RENAME TO {}",
-            self.quote_identifier(&table_name.name),
+            self.render_qualified_name(table_name),
             self.quote_identifier(new_table_name)
         ))
     }
@@ -369,11 +372,6 @@ impl Connection for TursoConnection {
         table_name: &SqlObjectName,
         options: DropTableOptions,
     ) -> Result<String> {
-        if table_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "Turso does not support schema-qualified DROP TABLE".to_string(),
-            ));
-        }
         if options.cascade {
             return Err(ZqlzError::NotSupported(
                 "Turso does not support DROP TABLE ... CASCADE".to_string(),
@@ -385,7 +383,7 @@ impl Connection for TursoConnection {
             sql.push_str(" IF EXISTS");
         }
         sql.push(' ');
-        sql.push_str(&self.quote_identifier(&table_name.name));
+        sql.push_str(&self.render_qualified_name(table_name));
         Ok(sql)
     }
 
@@ -395,18 +393,13 @@ impl Connection for TursoConnection {
                 "Turso does not support DROP VIEW ... CASCADE".to_string(),
             ));
         }
-        if view_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "Turso does not support schema-qualified DROP VIEW".to_string(),
-            ));
-        }
 
         let mut sql = String::from("DROP VIEW");
         if options.if_exists {
             sql.push_str(" IF EXISTS");
         }
         sql.push(' ');
-        sql.push_str(&self.quote_identifier(&view_name.name));
+        sql.push_str(&self.render_qualified_name(view_name));
         Ok(sql)
     }
 
@@ -416,11 +409,6 @@ impl Connection for TursoConnection {
         _table_name: Option<&SqlObjectName>,
         options: DropTriggerOptions,
     ) -> Result<String> {
-        if trigger_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "Turso does not support schema-qualified DROP TRIGGER".to_string(),
-            ));
-        }
         if options.cascade {
             return Err(ZqlzError::NotSupported(
                 "Turso does not support DROP TRIGGER ... CASCADE".to_string(),
@@ -432,7 +420,7 @@ impl Connection for TursoConnection {
             sql.push_str(" IF EXISTS");
         }
         sql.push(' ');
-        sql.push_str(&self.quote_identifier(&trigger_name.name));
+        sql.push_str(&self.render_qualified_name(trigger_name));
         Ok(sql)
     }
 
@@ -448,16 +436,10 @@ impl Connection for TursoConnection {
         source_table_name: &SqlObjectName,
         new_table_name: &SqlObjectName,
     ) -> Result<String> {
-        if source_table_name.namespace.is_some() || new_table_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "Turso does not support schema-qualified table duplication".to_string(),
-            ));
-        }
-
         Ok(format!(
             "CREATE TABLE {} AS SELECT * FROM {}",
-            self.quote_identifier(&new_table_name.name),
-            self.quote_identifier(&source_table_name.name)
+            self.render_qualified_name(new_table_name),
+            self.render_qualified_name(source_table_name)
         ))
     }
 
@@ -817,6 +799,14 @@ impl Connection for TursoConnection {
 
 #[async_trait]
 impl SchemaIntrospection for TursoConnection {
+    fn object_kind_support(&self) -> Option<ObjectKindSupport> {
+        Some(crate::driver::OBJECT_KINDS)
+    }
+
+    fn default_schema_name(&self) -> Option<String> {
+        Some("main".to_string())
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         Ok(vec![DatabaseInfo {
             name: "main".to_string(),
@@ -1148,7 +1138,6 @@ impl Transaction for TursoTransaction {
         .await
     }
 }
-
 
 fn object_type_to_sqlite(object_type: &zqlz_core::ObjectType) -> Result<&'static str> {
     match object_type {

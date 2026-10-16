@@ -280,6 +280,48 @@ fn schema_validation_uses_active_sqlparser_dialect() {
 }
 
 #[test]
+fn postgres_views_catalogs_and_refresh_are_not_flagged() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    lsp.schema_cache.views.insert(
+        "zqlz_lab.mv_inventory".to_string(),
+        crate::ViewInfo {
+            name: "zqlz_lab.mv_inventory".to_string(),
+            schema: None,
+            definition: None,
+            is_materialized: true,
+        },
+    );
+    let text = Rope::from(
+        "REFRESH MATERIALIZED VIEW zqlz_lab.mv_inventory;\n\
+         SELECT sku FROM zqlz_lab.mv_inventory;\n\
+         SELECT relname FROM pg_catalog.pg_class;\n\
+         SELECT c.relkind FROM pg_class c;\n\
+         SELECT policyname FROM pg_policies;\n\
+         SELECT table_name FROM information_schema.tables;\n\
+         SELECT * FROM missing_table;",
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    let errors: Vec<&str> = diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.severity,
+                Some(DiagnosticSeverity::ERROR | DiagnosticSeverity::WARNING)
+            )
+        })
+        .map(|d| d.message.as_str())
+        .collect();
+
+    assert_eq!(
+        errors,
+        vec!["Table 'missing_table' does not exist in schema"],
+        "only the genuinely missing table should be flagged, warnings included: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn schema_validation_unknown_column_range_uses_token_location() {
     let mut lsp = create_test_lsp();
     let text = Rope::from("SELECT missing_column FROM users");
@@ -383,6 +425,26 @@ fn schema_validation_same_text_table_and_column_ranges_do_not_share_occurrences(
     assert_eq!(column_diagnostic.range.end.character, 12);
     assert_eq!(table_diagnostic.range.start.character, 18);
     assert_eq!(table_diagnostic.range.end.character, 23);
+}
+
+#[test]
+fn schema_validation_column_range_skips_alias_definitions() {
+    let mut lsp = create_test_lsp();
+    let text =
+        Rope::from("WITH c AS (SELECT user_id AS ghost FROM users) SELECT ghost FROM audit_log");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let ranges: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema") && diagnostic.message.contains("ghost")
+        })
+        .map(|diagnostic| diagnostic.range)
+        .collect();
+
+    assert_eq!(ranges.len(), 1, "got: {:?}", diagnostics);
+    assert_eq!(ranges[0].start.character, 54);
+    assert_eq!(ranges[0].end.character, 59);
 }
 
 #[test]
@@ -623,7 +685,7 @@ fn test_update_without_set() {
 #[test]
 fn test_delete_syntax() {
     let mut lsp = create_test_lsp();
-    let text = Rope::from("DELETE FROM users WHERE id = 1");
+    let text = Rope::from("DELETE FROM users WHERE user_id = 1");
 
     let diagnostics = lsp.validate_sql(&text);
 

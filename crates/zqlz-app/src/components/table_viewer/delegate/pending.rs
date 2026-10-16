@@ -257,8 +257,6 @@ impl TableViewerDelegate {
         cx.defer(move |cx| {
             if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
                 cx.emit(TableViewerEvent::SaveCell {
-                    table_name: request.table_name.clone(),
-                    connection_id: request.connection_id,
                     row: request.row,
                     col: request.data_col,
                     column_name: request.column_name.clone(),

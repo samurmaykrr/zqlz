@@ -6,6 +6,7 @@
 mod connection;
 mod dialect;
 mod driver;
+mod explain;
 mod schema;
 
 #[cfg(test)]
@@ -20,3 +21,4 @@ mod schema_tests;
 pub use connection::{MssqlConnection, MssqlConnectionError};
 pub use dialect::MssqlDialect;
 pub use driver::{MssqlDriver, mssql_dialect};
+pub use explain::parse_mssql_explain_result;

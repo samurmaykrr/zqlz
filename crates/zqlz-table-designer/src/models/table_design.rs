@@ -31,6 +31,10 @@ pub struct TableDesign {
     pub is_new: bool,
     /// Check constraints
     pub check_constraints: Vec<CheckConstraintDesign>,
+    /// Names of unique indexes that are really UNIQUE constraints (Postgres
+    /// reports both as indexes). Dropping those needs `DROP CONSTRAINT`;
+    /// a plain `CREATE UNIQUE INDEX` needs `DROP INDEX`.
+    pub constraint_indexes: HashSet<String>,
 }
 
 impl TableDesign {
@@ -47,6 +51,7 @@ impl TableDesign {
             comment: None,
             is_new: true,
             check_constraints: Vec::new(),
+            constraint_indexes: HashSet::new(),
         }
     }
 
@@ -60,7 +65,24 @@ impl TableDesign {
         let columns = details
             .columns
             .iter()
-            .map(ColumnDesign::from_column_info)
+            .map(|info| {
+                let mut column = ColumnDesign::from_column_info_for(info, dialect);
+                // Same rule as the schema engine's `is_unique` backfill.
+                if info.is_unique {
+                    column.unique_constraint_name = details
+                        .indexes
+                        .iter()
+                        .find(|index| {
+                            index.is_unique
+                                && !index.is_primary
+                                && index.where_clause.is_none()
+                                && index.columns.len() == 1
+                                && index.columns[0] == info.name
+                        })
+                        .map(|index| index.name.clone());
+                }
+                column
+            })
             .collect();
 
         let indexes = details
@@ -93,6 +115,7 @@ impl TableDesign {
             comment: details.info.comment,
             is_new: false,
             check_constraints,
+            constraint_indexes: HashSet::new(),
         }
     }
 
@@ -229,6 +252,15 @@ impl TableDesign {
         let column_names: HashSet<_> = self.columns.iter().map(|c| c.name.to_lowercase()).collect();
         for (i, idx) in self.indexes.iter().enumerate() {
             for col in &idx.columns {
+                // MySQL key parts may be `name(10)` prefixes or `(expr)` functional parts.
+                let col = if self.dialect == DatabaseDialect::Mysql {
+                    match crate::service::mysql_index_part_column(col, &column_names) {
+                        Some(column) => column,
+                        None => continue,
+                    }
+                } else {
+                    col.clone()
+                };
                 if !column_names.contains(&col.to_lowercase()) {
                     errors.push(ValidationError::new(
                         format!("indexes[{}].columns", i),

@@ -1,0 +1,8 @@
+-> Limit: 5 row(s)  (cost=2.48e+9 rows=5) (actual time=958..958 rows=0 loops=1)
+    -> Nested loop inner join  (cost=2.48e+9 rows=24.8e+9) (actual time=958..958 rows=0 loops=1)
+        -> Table scan on orders_orders  (cost=17766 rows=152189) (actual time=0.0275..412 rows=150000 loops=1)
+        -> Single-row index lookup on <subquery2> using <auto_distinct_key> (order_id=orders_orders.order_id)  (cost=73976..73976 rows=1) (actual time=0.00337..0.00337 rows=0 loops=150000)
+            -> Materialize with deduplication  (cost=73976..73976 rows=162736) (actual time=441..441 rows=0 loops=1)
+                -> Filter: (orders_order_items.quantity > 100.0000)  (cost=57702 rows=162736) (actual time=441..441 rows=0 loops=1)
+                    -> Table scan on orders_order_items  (cost=57702 rows=488256) (actual time=0.145..400 rows=450000 loops=1)
+

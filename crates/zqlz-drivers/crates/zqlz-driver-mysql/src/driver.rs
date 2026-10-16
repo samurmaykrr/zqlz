@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, ObjectKindSupport, Result, ZqlzError,
     dialect_bundle_from_legacy_info,
     security::{SshAuthMethod, SshTunnelConfig, TlsConfig, TlsMode},
 };
@@ -13,6 +13,26 @@ use zqlz_core::{
 use crate::{MySqlConnectOptions, MySqlConnection, MysqlSshTunnel, MysqlTlsConnector};
 
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+/// Object kinds MySQL actually lists via `information_schema` and `SHOW`
+/// statements. Sequences are MariaDB-only (`CREATE SEQUENCE`); plain MySQL has
+/// no sequence catalog, so the static answer here is refined at runtime once
+/// the server flavor is known (see `MySqlConnection::object_kind_support`).
+/// MySQL has no materialized views, first-class sequences, custom types,
+/// domains, or extensions to enumerate.
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    materialized_views: false,
+    functions: true,
+    procedures: true,
+    triggers: true,
+    sequences: false,
+    types: false,
+    events: true,
+    domains: false,
+    extensions: false,
+};
 
 fn get_dialect_bundle() -> &'static DialectBundle {
     static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
@@ -58,6 +78,16 @@ impl DatabaseDriver for MySqlDriver {
 
     fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
         Some(get_dialect_bundle())
+    }
+
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        // MySQL databases are the schema-equivalent namespace; there is no
+        // separate default to fall back to when one isn't selected.
+        None
     }
 
     fn capabilities(&self) -> DriverCapabilities {
@@ -120,9 +150,10 @@ impl DatabaseDriver for MySqlDriver {
             ssh_tunnel,
         })
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to connect to MySQL database");
-            ZqlzError::Connection(format!("Failed to connect to MySQL database: {}", e))
+        .inspect_err(|e| {
+            // Already a ZqlzError::Connection naming host:port and carrying the
+            // server/io detail; re-wrapping it would only stack prefixes.
+            tracing::error!(error = %e, host = %host, port = %port, database = ?database, "failed to connect to MySQL database");
         })?;
 
         tracing::info!(host = %host, port = %port, database = ?database, "MySQL connection created");

@@ -1,6 +1,6 @@
 use lsp_types::{Position, Range};
 use sqlparser::dialect::Dialect as SqlParserDialect;
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::Token;
 
 use crate::{ValidationIssue, schema_validation_issue::ValidationSymbolRole};
 
@@ -11,8 +11,7 @@ pub(crate) fn schema_issue_range(
     occurrence: usize,
 ) -> Option<Range> {
     let symbol = issue.symbol.as_deref()?;
-    let mut tokenizer = Tokenizer::new(dialect, sql);
-    let tokens = tokenizer.tokenize_with_location().ok()?;
+    let tokens = crate::diagnostics_syntax::tokenize(dialect, sql).ok()?;
     let mut matched_occurrences = 0usize;
 
     tokens.iter().enumerate().find_map(|(index, token)| {
@@ -110,8 +109,12 @@ fn schema_issue_token_matches_role(
                 .is_some_and(|token| token_starts_table_reference(&token.token))
                 || qualified_table_reference_starts_after_table_keyword(tokens, index)
         }
-        Some(ValidationSymbolRole::Column) => previous_significant_token(tokens, index)
-            .is_none_or(|token| !token_starts_table_reference(&token.token)),
+        // `AS name` defines an alias; it is never the column reference at fault.
+        Some(ValidationSymbolRole::Column) => {
+            previous_significant_token(tokens, index).is_none_or(|token| {
+                !token_starts_table_reference(&token.token) && !token_word_eq(&token.token, "as")
+            })
+        }
         Some(ValidationSymbolRole::Wildcard) | None => true,
     }
 }

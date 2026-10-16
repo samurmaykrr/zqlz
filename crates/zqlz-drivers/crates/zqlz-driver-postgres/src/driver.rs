@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, ObjectKindSupport, Result, ZqlzError,
     dialect_bundle_from_legacy_info,
     security::{SshAuthMethod, SshTunnelConfig},
 };
@@ -13,6 +13,24 @@ use zqlz_core::{
 use crate::{PostgresConnectOptions, PostgresConnection, PostgresSshTunnel};
 
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+/// Object kinds PostgreSQL actually lists via `information_schema`/`pg_catalog`:
+/// tables, views, materialized views, functions, procedures, triggers,
+/// sequences, types, domains, and extensions. PostgreSQL has no scheduled
+/// event objects to enumerate.
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    materialized_views: true,
+    functions: true,
+    procedures: true,
+    triggers: true,
+    sequences: true,
+    types: true,
+    events: false,
+    domains: true,
+    extensions: true,
+};
 
 fn get_dialect_bundle() -> &'static DialectBundle {
     static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
@@ -54,6 +72,14 @@ impl DatabaseDriver for PostgresDriver {
 
     fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
         Some(get_dialect_bundle())
+    }
+
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        Some("public")
     }
 
     fn capabilities(&self) -> DriverCapabilities {
@@ -138,9 +164,10 @@ impl DatabaseDriver for PostgresDriver {
             ssh_tunnel,
         })
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to connect to PostgreSQL database");
-            ZqlzError::Connection(format!("Failed to connect to PostgreSQL database: {}", e))
+        .inspect_err(|e| {
+            // Already a ZqlzError::Connection carrying the server/io detail; re-wrapping
+            // it would only stack prefixes.
+            tracing::error!(error = %e, host = %host, port = %port, database = %database, "failed to connect to PostgreSQL database");
         })?;
 
         tracing::info!(host = %host, port = %port, database = %database, ssl = %ssl_mode, "PostgreSQL connection created");
@@ -338,7 +365,10 @@ fn build_ssh_tunnel(
     PostgresSshTunnel::new(&ssh_config, remote_host, remote_port)
         .map(Some)
         .map_err(|error| {
-            ZqlzError::Connection(format!("Failed to establish SSH tunnel: {}", error))
+            // `{:#}` keeps the anyhow context chain (e.g. the refused host:port).
+            let message = format!("Failed to establish SSH tunnel: {:#}", error);
+            tracing::error!(error = %message, "failed to connect to PostgreSQL database");
+            ZqlzError::Connection(message)
         })
 }
 

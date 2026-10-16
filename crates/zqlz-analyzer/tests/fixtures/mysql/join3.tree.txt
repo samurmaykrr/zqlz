@@ -1,0 +1,7 @@
+-> Limit: 20 row(s)  (cost=148459 rows=20)
+    -> Nested loop inner join  (cost=148459 rows=122958)
+        -> Nested loop inner join  (cost=20859 rows=36735)
+            -> Covering index scan on s using PRIMARY  (cost=1.7 rows=7)
+            -> Index lookup on o using idx_order_tenant_status (tenant_id='6a4fb4a2-5f37-5199-ad1f-70a1760e373c', status_code=s.status_code), with index condition: (o.tenant_id = '6a4fb4a2-5f37-5199-ad1f-70a1760e373c')  (cost=2530 rows=5248)
+        -> Index lookup on i using idx_order_item_order (order_id=o.order_id)  (cost=3.14 rows=3.35)
+

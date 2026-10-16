@@ -17,6 +17,9 @@ use zqlz_ui::widgets::{
 use crate::events::SequenceDesignerEvent;
 use crate::models::SequenceDesign;
 
+#[cfg(test)]
+mod render_tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DesignerTab {
     #[default]
@@ -270,9 +273,21 @@ impl SequenceDesignerPanel {
                 };
                 cx.notify();
             }))
-            .child(Tab::new().label("General"))
-            .child(Tab::new().label("Comment"))
-            .child(Tab::new().label("SQL Preview"))
+            .child(
+                Tab::new()
+                    .label("General")
+                    .debug_selector(|| "tab:general".to_string()),
+            )
+            .child(
+                Tab::new()
+                    .label("Comment")
+                    .debug_selector(|| "tab:comment".to_string()),
+            )
+            .child(
+                Tab::new()
+                    .label("SQL Preview")
+                    .debug_selector(|| "tab:sql-preview".to_string()),
+            )
     }
 
     fn labeled_input(
@@ -298,6 +313,7 @@ impl SequenceDesignerPanel {
             .size_full()
             .p_4()
             .gap_3()
+            .debug_selector(|| "panel:general-tab".to_string())
             .child(Self::labeled_input("Name:", &self.name_input, px(260.0)))
             .child(Self::labeled_input("Owner:", &self.owner_input, px(260.0)))
             .child(Self::labeled_input(
@@ -332,6 +348,7 @@ impl SequenceDesignerPanel {
                     .child(
                         Checkbox::new("no-min-value")
                             .checked(self.no_min_value)
+                            .debug_selector(|| "checkbox:no-min-value".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.no_min_value = !this.no_min_value;
                                 this.mark_dirty(cx);
@@ -351,6 +368,7 @@ impl SequenceDesignerPanel {
                     .child(
                         Checkbox::new("no-max-value")
                             .checked(self.no_max_value)
+                            .debug_selector(|| "checkbox:no-max-value".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.no_max_value = !this.no_max_value;
                                 this.mark_dirty(cx);
@@ -371,6 +389,7 @@ impl SequenceDesignerPanel {
                     .child(
                         Checkbox::new("sequence-cycle")
                             .checked(self.cycle)
+                            .debug_selector(|| "checkbox:cycle".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.cycle = !this.cycle;
                                 this.mark_dirty(cx);
@@ -395,6 +414,7 @@ impl SequenceDesignerPanel {
             .size_full()
             .p_4()
             .gap_2()
+            .debug_selector(|| "panel:comment-tab".to_string())
             .child(
                 div()
                     .text_sm()
@@ -419,6 +439,7 @@ impl SequenceDesignerPanel {
             .size_full()
             .p_4()
             .gap_2()
+            .debug_selector(|| "panel:sql-preview-tab".to_string())
             .child(
                 h_flex()
                     .justify_between()
@@ -433,6 +454,7 @@ impl SequenceDesignerPanel {
                             .label("Refresh Preview")
                             .xsmall()
                             .ghost()
+                            .debug_selector(|| "button:refresh-preview".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.generate_preview(cx);
                             })),
@@ -477,6 +499,7 @@ impl SequenceDesignerPanel {
                             .label("Cancel")
                             .small()
                             .ghost()
+                            .debug_selector(|| "button:cancel".to_string())
                             .on_click(cx.listener(|_this, _, _window, cx| {
                                 cx.emit(SequenceDesignerEvent::Cancel);
                             })),
@@ -491,6 +514,7 @@ impl SequenceDesignerPanel {
                             .small()
                             .primary()
                             .disabled(error.is_some() || !self.is_dirty)
+                            .debug_selector(|| "button:save".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.handle_save(cx);
                             })),

@@ -95,3 +95,6 @@ mod test_create_table_completions;
 
 #[cfg(test)]
 mod test_redis_completions;
+
+#[cfg(test)]
+mod test_mysql_diagnostics;

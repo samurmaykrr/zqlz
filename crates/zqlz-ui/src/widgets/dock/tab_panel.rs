@@ -1714,6 +1714,7 @@ impl TabPanel {
                 Some(
                     Tab::new()
                         .ix(ix)
+                        .debug_selector(move || format!("tab-{ix}"))
                         .tab_bar_prefix(has_extend_dock_button)
                         .when_some(props.tooltip, |this, tooltip| {
                             this.tooltip(move |window, cx| {
@@ -1867,7 +1868,7 @@ impl TabPanel {
                 div()
                     .id("tab-bar-empty-space")
                     .h_full()
-                    .flex_grow()
+                    .flex_grow_1()
                     .min_w_16()
                     .when(state.droppable, |this| {
                         this.drag_over::<DragPanel>(|this, _, _, cx| {
@@ -2280,11 +2281,17 @@ impl Render for TabPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        BulkCloseMode, active_ix_after_move, new_tab_insert_ix, next_active_ix_after_remove,
-        preview_panel_id_for_index, recent_active_ix_after_remove, should_close_for_bulk_mode,
-        should_toggle_pin_for_target,
+        BulkCloseMode, DockArea, Panel, PanelEvent, PanelView, TabPanel, active_ix_after_move,
+        new_tab_insert_ix, next_active_ix_after_remove, preview_panel_id_for_index,
+        recent_active_ix_after_remove, should_close_for_bulk_mode, should_toggle_pin_for_target,
     };
-    use gpui::EntityId;
+    use crate::widgets::dock::DockItem;
+    use gpui::{
+        App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+        IntoElement, Modifiers, ParentElement, Render, SharedString, TestAppContext,
+        VisualTestContext, Window, div, px, size,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn close_active_middle_selects_next_tab() {
@@ -2503,5 +2510,163 @@ mod tests {
         assert!(should_toggle_pin_for_target(false, true));
         assert!(should_toggle_pin_for_target(true, false));
         assert!(!should_toggle_pin_for_target(true, true));
+    }
+
+    /// A minimal `Panel` used to open a real `TabPanel` in a window without
+    /// depending on any concrete panel implementation from another crate.
+    struct RecordingPanel {
+        id: usize,
+        focus_handle: FocusHandle,
+    }
+
+    impl RecordingPanel {
+        fn new(id: usize, cx: &mut App) -> Self {
+            Self {
+                id,
+                focus_handle: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl EventEmitter<PanelEvent> for RecordingPanel {}
+
+    impl Focusable for RecordingPanel {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl Panel for RecordingPanel {
+        fn panel_name(&self) -> &'static str {
+            "RecordingPanel"
+        }
+
+        fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            SharedString::from(format!("panel-{}", self.id))
+        }
+    }
+
+    impl Render for RecordingPanel {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().child(format!("panel-{}", self.id))
+        }
+    }
+
+    #[gpui::test]
+    fn test_tab_panel_builder(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+
+        let window = cx.add_window(|window, cx| {
+            let dock_area = cx.new(|cx| DockArea::new("test-dock-area", None, window, cx));
+            let mut tab_panel = TabPanel::new(None, dock_area.downgrade(), window, cx);
+            for id in 0..3 {
+                let panel = cx.new(|cx| RecordingPanel::new(id, cx));
+                tab_panel.add_panel(Arc::new(panel), window, cx);
+            }
+            tab_panel
+        });
+        cx.run_until_parked();
+
+        let tab_panel = window.root(cx).expect("tab panel should be the window root");
+        tab_panel.read_with(cx, |tab_panel, cx| {
+            assert_eq!(tab_panel.panel_count(), 3, "all added panels should be kept");
+            assert_eq!(
+                tab_panel.active_index(),
+                Some(2),
+                "the most recently added panel should become active by default"
+            );
+            assert!(
+                tab_panel.closable,
+                "a freshly constructed TabPanel should be closable by default"
+            );
+            assert_eq!(
+                tab_panel
+                    .active_panel(cx)
+                    .map(|panel| panel.panel_id(cx)),
+                tab_panel.panels.get(2).map(|panel| panel.panel_id(cx)),
+                "active_panel should resolve to the panel at active_ix"
+            );
+        });
+    }
+
+    /// Open a `DockArea` whose center is a `TabPanel` with `panel_count` `RecordingPanel`
+    /// tabs, and paint it.
+    ///
+    /// The `TabPanel` alone cannot be the window root here: its title bar only paints
+    /// once `self.dock_area` upgrades, and a `WeakEntity<DockArea>` upgrades only while
+    /// some strong `Entity<DockArea>` is still alive. Rooting the window in the
+    /// `DockArea` itself keeps that strong reference alive for the life of the test.
+    fn open_tab_panel(
+        cx: &mut TestAppContext,
+        panel_count: usize,
+    ) -> (Entity<TabPanel>, VisualTestContext) {
+        cx.update(crate::init);
+
+        let window = cx.add_window(|window, cx| DockArea::new("test-dock-area", None, window, cx));
+        let dock_area = window
+            .root(cx)
+            .expect("dock area should be the window root");
+        let weak_dock_area = dock_area.downgrade();
+
+        window
+            .update(cx, |area, window, cx| {
+                let panels: Vec<Arc<dyn PanelView>> = (0..panel_count)
+                    .map(|id| Arc::new(cx.new(|cx| RecordingPanel::new(id, cx))) as Arc<dyn PanelView>)
+                    .collect();
+                let tabs = DockItem::tabs(panels, &weak_dock_area, window, cx);
+                area.set_center(tabs, window, cx);
+            })
+            .expect("window should still be open");
+
+        let tab_panel = dock_area
+            .read_with(cx, |area, _| area.center_tab_panel())
+            .expect("dock area should have a center tab panel");
+
+        let visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.simulate_resize(size(px(600.), px(400.)));
+        visual_cx.run_until_parked();
+        (tab_panel, visual_cx)
+    }
+
+    #[gpui::test]
+    fn clicking_a_tab_header_makes_it_the_active_tab(cx: &mut TestAppContext) {
+        let (tab_panel, mut cx) = open_tab_panel(cx, 3);
+
+        assert_eq!(
+            tab_panel.read_with(&cx, |tab_panel, _| tab_panel.active_index()),
+            Some(0),
+            "the first tab starts active"
+        );
+
+        let third_tab_bounds = cx
+            .debug_bounds("tab-2")
+            .expect("the third tab header should be painted");
+        cx.simulate_click(third_tab_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        tab_panel.read_with(&cx, |tab_panel, cx| {
+            assert_eq!(
+                tab_panel.active_index(),
+                Some(2),
+                "clicking the third tab header should make it active"
+            );
+            assert_eq!(
+                tab_panel.active_panel(cx).map(|panel| panel.panel_id(cx)),
+                tab_panel.panels.get(2).map(|panel| panel.panel_id(cx)),
+                "the active panel should switch along with active_ix"
+            );
+        });
+
+        let second_tab_bounds = cx
+            .debug_bounds("tab-1")
+            .expect("the second tab header should be painted");
+        cx.simulate_click(second_tab_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            tab_panel.read_with(&cx, |tab_panel, _| tab_panel.active_index()),
+            Some(1),
+            "clicking a different tab header should move the active tab again"
+        );
     }
 }

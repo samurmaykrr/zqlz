@@ -1,0 +1,6 @@
+-> Limit: 3 row(s)
+    -> Sort: c DESC, limit input to 3 row(s) per chunk
+        -> Stream results  (cost=32736 rows=5)
+            -> Group aggregate: count(0)  (cost=32736 rows=5)
+                -> Covering index scan on orders_orders using fk_order_status  (cost=17517 rows=152189)
+

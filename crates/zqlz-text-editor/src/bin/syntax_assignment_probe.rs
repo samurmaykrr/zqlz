@@ -4999,9 +4999,11 @@ mod tests {
 
         assert!(!result.check.passed);
         assert!(check_capabilities(&result.check).is_err());
+        // Redis comments with `#`, so the SQL-style `--` above is the wrong value
+        // and the probe should report what the dialect actually declares.
         assert_eq!(
             capability_value(&result, "line_comment_prefix").as_deref(),
-            Some("<none>")
+            Some("#")
         );
         assert_eq!(capability_value(&result, "unknown"), None);
     }

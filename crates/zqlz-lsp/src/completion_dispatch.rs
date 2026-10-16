@@ -179,6 +179,26 @@ pub(crate) fn add_completions_for_context(
         } => {
             tracing::debug!("After dot for table/alias: {}", table_or_alias);
 
+            // `zqlz_w.` / `public.`: the qualifier names the loaded database/schema.
+            // (`FROM zqlz_w.` itself parses as a reference to a table `zqlz_w`.)
+            let names_relation = available_tables.iter().any(|table| {
+                table
+                    .alias
+                    .as_ref()
+                    .is_some_and(|alias| alias.eq_ignore_ascii_case(table_or_alias))
+            }) || relation_is_known(lsp, table_or_alias);
+            let schema = &lsp.schema_cache;
+            if !names_relation
+                && [&schema.database_name, &schema.schema_name]
+                    .into_iter()
+                    .flatten()
+                    .any(|namespace| namespace.eq_ignore_ascii_case(table_or_alias))
+            {
+                lsp.add_filtered_tables(completions);
+                lsp.add_filtered_views(completions);
+                return false;
+            }
+
             let table_name = lsp.resolve_alias_from_context(table_or_alias, available_tables);
             let table_name = if table_name == *table_or_alias {
                 lsp.resolve_alias_to_table(&table_name, text, offset)

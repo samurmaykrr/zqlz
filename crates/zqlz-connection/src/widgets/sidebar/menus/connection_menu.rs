@@ -11,6 +11,7 @@ use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
 
+use crate::AgentAccess;
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
 
 use super::state::ContextMenuState;
@@ -30,6 +31,7 @@ impl ConnectionSidebar {
     /// **Always available:**
     /// - **Open Settings**: Emits `OpenConnectionSettings(conn_id)` to edit connection details
     /// - **Refresh**: Emits `RefreshConnections` to reload connection list
+    /// - **Agent Access**: Emits `SetAgentAccess(conn_id, level)` to limit what MCP agents may do
     /// - **Duplicate Connection**: Emits `DuplicateConnection(conn_id)` to clone this connection
     /// - **Delete Connection**: Emits `DeleteConnection(conn_id)` to remove this connection
     ///
@@ -64,12 +66,13 @@ impl ConnectionSidebar {
 
         let sidebar_weak = cx.entity().downgrade();
         let action_context = self.focus_handle.clone();
+        let agent_access = crate::AgentAccessPolicy::get(cx, conn_id);
 
         if let Some(menu_state) = &self.connection_context_menu {
             menu_state.update(cx, |state, cx| {
                 state.menu_subscription.take();
                 state.position = position;
-                let new_menu = PopupMenu::build(window, cx, |menu, _window, _cx| {
+                let new_menu = PopupMenu::build(window, cx, |menu, window, cx| {
                     let menu = if !is_connected {
                         menu.action_context(action_context.clone())
                             .item(
@@ -128,6 +131,31 @@ impl ConnectionSidebar {
                             });
                         }
                     }))
+                    .submenu("Agent Access", window, cx, {
+                        let sidebar = sidebar_weak.clone();
+                        move |submenu, _window, _cx| {
+                            AgentAccess::ALL
+                                .into_iter()
+                                .fold(submenu, |submenu, access| {
+                                    submenu.item(
+                                        PopupMenuItem::new(access.label())
+                                            .checked(access == agent_access)
+                                            .on_click({
+                                                let sidebar = sidebar.clone();
+                                                move |_event, _window, cx| {
+                                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                                        cx.emit(
+                                                            ConnectionSidebarEvent::SetAgentAccess(
+                                                                conn_id, access,
+                                                            ),
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                })
+                        }
+                    })
                     .separator()
                     .item(PopupMenuItem::new("Duplicate Connection").on_click({
                         let sidebar = sidebar_weak.clone();

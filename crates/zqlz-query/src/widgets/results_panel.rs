@@ -14,7 +14,7 @@ use zqlz_analyzer::QueryAnalysis;
 use zqlz_core::QueryResult;
 use zqlz_explain_visual::{ExplainGraphInput, ExplainGraphState, ExplainGraphView};
 use zqlz_ui::widgets::{
-    ActiveTheme, Selectable, Sizable,
+    ActiveTheme, Disableable, IconName, Selectable, Sizable,
     button::{Button, ButtonRounded, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
@@ -30,6 +30,7 @@ const RESULTS_MAX_MATERIALIZED_ROWS: usize = 20_000;
 const RESULTS_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
 const RESULTS_MESSAGE_ROW_HEIGHT: f32 = 34.0;
 const RESULTS_LOADING_TICK_MS: u64 = 100;
+const SKIPPED_STATUS: &str = "Skipped (previous statement failed)";
 
 /// Render a duration for human reading on screen: `0.4ms`, `3ms`, `847ms`, `1.40s`.
 pub fn format_duration_micros(micros: u64) -> String {
@@ -63,6 +64,22 @@ fn explain_output_looks_like_json(result: &QueryResult) -> bool {
         .first()
         .and_then(|row| row.values.first())
         .is_some_and(|value| cell_looks_like_json(&value.to_string()))
+}
+
+/// Whether the Plan tab should show this EXPLAIN result as scrollable text rather
+/// than a grid: a JSON document, or MySQL's indented tree (`FORMAT=TREE` /
+/// `ANALYZE`), which arrives as one multi-line cell.
+fn explain_output_is_text_document(result: &QueryResult) -> bool {
+    explain_output_looks_like_json(result)
+        || (result.columns.len() == 1
+            && result
+                .rows
+                .first()
+                .and_then(|row| row.values.first())
+                .is_some_and(|value| {
+                    let text = value.to_string();
+                    text.trim_start().starts_with("->") || text.trim().contains('\n')
+                }))
 }
 
 /// Flatten an EXPLAIN result's first column into readable plan text, expanding
@@ -119,6 +136,11 @@ pub struct StatementResult {
     pub result: Option<QueryResult>,
     pub error: Option<String>,
     pub affected_rows: u64,
+    /// Server notices raised by this statement (`RAISE NOTICE`, ...), one entry
+    /// per message. Also set for statements that return no rows.
+    pub warnings: Vec<String>,
+    /// Never sent to the server because an earlier statement in the run failed.
+    pub skipped: bool,
 }
 
 /// EXPLAIN result for UI consumption
@@ -130,7 +152,10 @@ pub struct ExplainResult {
     pub duration_ms: u64,
     /// Execution time of the EXPLAIN itself, in microseconds.
     pub duration_micros: u64,
-    /// The raw EXPLAIN output as a table (for Op tab - bytecode/opcodes)
+    /// The raw EXPLAIN output as a table. For SQLite this is opcode/bytecode
+    /// data (the Op tab); other dialects also populate this as a text-plan
+    /// fallback (see `plan_source`), so don't gate Op-tab visibility on this
+    /// alone — check `provider_id` too.
     pub raw_output: Option<QueryResult>,
     /// The EXPLAIN QUERY PLAN output (for Plan tab)
     pub query_plan: Option<QueryResult>,
@@ -166,6 +191,16 @@ impl ExplainResult {
     }
 }
 
+/// The Op tab shows SQLite's `EXPLAIN` opcode/bytecode table. Other dialects
+/// also populate `raw_output` (Postgres reuses it as the text-plan fallback —
+/// see `ExplainResult::plan_source`), so gating on `raw_output.is_some()`
+/// alone would show that same plan text under a tab labeled for opcodes.
+/// Only SQLite/SQLite-compatible connections (Turso) actually produce
+/// opcode data.
+fn explain_result_supports_op(result: &ExplainResult) -> bool {
+    result.raw_output.is_some() && result.provider_id.as_deref() == Some("sqlite")
+}
+
 /// Query execution metadata (multiple statements)
 #[derive(Clone)]
 pub struct QueryExecution {
@@ -182,7 +217,14 @@ pub struct QueryExecution {
 
 impl QueryExecution {
     pub fn success_count(&self) -> usize {
-        self.statements.iter().filter(|s| s.error.is_none()).count()
+        self.statements
+            .iter()
+            .filter(|s| s.error.is_none() && !s.skipped)
+            .count()
+    }
+
+    pub fn skipped_count(&self) -> usize {
+        self.statements.iter().filter(|s| s.skipped).count()
     }
 
     pub fn error_count(&self) -> usize {
@@ -536,7 +578,7 @@ impl ResultsPanel {
     pub fn set_execution(
         &mut self,
         execution: QueryExecution,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Reset lazy table state slots for statements with results
@@ -552,10 +594,23 @@ impl ResultsPanel {
             }
         }
 
+        // Land on the last result set (what the user just asked for); fall back to the
+        // message log when nothing returned rows (DDL, writes, errors).
+        let last_result = execution
+            .statements
+            .iter()
+            .rposition(|statement| statement.result.is_some());
+
         self.execution = Some(execution);
         self.message_scroll_handle = UniformListScrollHandle::new();
         self.is_loading = false;
-        self.active_tab = ResultTab::Message;
+        self.active_tab = match last_result {
+            Some(idx) => {
+                self.ensure_result_table_state(idx, window, cx);
+                ResultTab::Result(idx)
+            }
+            None => ResultTab::Message,
+        };
         cx.notify();
     }
 
@@ -777,7 +832,7 @@ impl ResultsPanel {
             return;
         };
 
-        if explain_output_looks_like_json(query_plan) {
+        if explain_output_is_text_document(query_plan) {
             return;
         }
 
@@ -860,6 +915,10 @@ impl ResultsPanel {
     fn format_statement_metadata(idx: usize, statement: &StatementResult) -> String {
         let duration_str = format_duration_micros(statement.duration_micros);
 
+        if statement.skipped {
+            return format!("Statement {} - {}", idx + 1, SKIPPED_STATUS);
+        }
+
         if let Some(result) = &statement.result {
             // Query with results
             let row_count = result.rows.len();
@@ -887,6 +946,20 @@ impl ResultsPanel {
             // DDL or other statement without row counts
             format!("Statement {} - {}", idx + 1, duration_str)
         }
+    }
+
+    /// "OK" followed by any server notices on one line (the message list rows
+    /// have a fixed height), e.g. `OK - NOTICE: hello | WARNING: careful`.
+    fn status_with_notices(warnings: &[String]) -> String {
+        if warnings.is_empty() {
+            return "OK".to_string();
+        }
+        let notices = warnings
+            .iter()
+            .map(|warning| warning.replace('\n', " "))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!("OK - {notices}")
     }
 
     /// Return the first SQL line, truncated to a fixed character count for compact row rendering.
@@ -1215,6 +1288,7 @@ impl ResultsPanel {
 
         let success_count = exec.success_count();
         let error_count = exec.error_count();
+        let skipped_count = exec.skipped_count();
         let total_count = exec.statements.len();
 
         v_flex()
@@ -1277,6 +1351,22 @@ impl ResultsPanel {
                                                     .child(error_count.to_string()),
                                             ),
                                     )
+                                    .when(skipped_count > 0, |this| {
+                                        this.child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child("Skipped:"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_color(theme.foreground)
+                                                        .child(skipped_count.to_string()),
+                                                ),
+                                        )
+                                    })
                                     .child(
                                         h_flex()
                                             .gap_2()
@@ -1423,6 +1513,10 @@ impl ResultsPanel {
                                                                     h_flex().min_w(px(120.0)).child(
                                                                         div()
                                                                             .text_color(if statement
+                                                                                .skipped
+                                                                            {
+                                                                                theme.muted_foreground
+                                                                            } else if statement
                                                                                 .error
                                                                                 .is_none()
                                                                             {
@@ -1431,12 +1525,19 @@ impl ResultsPanel {
                                                                                 theme.danger
                                                                             })
                                                                             .child(if statement
+                                                                                .skipped
+                                                                            {
+                                                                                SKIPPED_STATUS
+                                                                                    .to_string()
+                                                                            } else if statement
                                                                                 .error
                                                                                 .is_none()
                                                                             {
-                                                                                "OK"
+                                                                                Self::status_with_notices(
+                                                                                    &statement.warnings,
+                                                                                )
                                                                             } else {
-                                                                                "Error"
+                                                                                "Error".to_string()
                                                                             }),
                                                                     ),
                                                                 )
@@ -1456,7 +1557,7 @@ impl ResultsPanel {
                                             },
                                         ),
                                     )
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .size_full()
                                     .pr(px(RESULTS_LIST_SCROLLBAR_WIDTH))
                                     .track_scroll(&self.message_scroll_handle)
@@ -1546,6 +1647,22 @@ impl ResultsPanel {
                                                 .child(exec.error_count().to_string()),
                                         ),
                                 )
+                                .when(exec.skipped_count() > 0, |this| {
+                                    this.child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Skipped:"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(theme.foreground)
+                                                    .child(exec.skipped_count().to_string()),
+                                            ),
+                                    )
+                                })
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -1555,9 +1672,9 @@ impl ResultsPanel {
                                                 .child("Elapsed Time:"),
                                         )
                                         .child(
-                                            div()
-                                                .text_color(theme.foreground)
-                                                .child(format_duration_micros(exec.duration_micros)),
+                                            div().text_color(theme.foreground).child(
+                                                format_duration_micros(exec.duration_micros),
+                                            ),
                                         ),
                                 ),
                         )
@@ -2041,7 +2158,7 @@ impl ResultsPanel {
     fn explain_supports_op(&self, explain_idx: usize) -> bool {
         self.explain_results
             .get(explain_idx)
-            .is_some_and(|result| result.raw_output.is_some())
+            .is_some_and(explain_result_supports_op)
     }
 
     /// Render Visual sub-tab with Summary, Plan Tree, and Suggestions
@@ -2100,7 +2217,7 @@ impl ResultsPanel {
             .and_then(ExplainResult::plan_source);
 
         if let Some(plan_source) = plan_source
-            && explain_output_looks_like_json(plan_source)
+            && explain_output_is_text_document(plan_source)
         {
             return self.render_explain_plan_text(plan_source, cx);
         }
@@ -2131,9 +2248,26 @@ impl ResultsPanel {
                     delegate.rows_count(cx),
                 )
             };
+            let plan_text = plan_source.map(explain_output_as_plan_text);
 
             v_flex()
                 .size_full()
+                .child(
+                    h_flex().w_full().justify_end().px_2().py_1().child(
+                        Button::new("explain-plan-copy-as-text")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Copy)
+                            .label("Copy as Text")
+                            .tooltip("Copy the query plan as plain text")
+                            .disabled(plan_text.is_none())
+                            .on_click(move |_, _, cx| {
+                                if let Some(plan_text) = plan_text.clone() {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(plan_text));
+                                }
+                            }),
+                    ),
+                )
                 .when(is_truncated, |this| {
                     let theme = cx.theme();
                     this.child(
@@ -2504,10 +2638,14 @@ impl Panel for ResultsPanel {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext, px, size};
     use zqlz_core::{QueryResult, Row, Value};
 
     use super::{
-        ExplainResult, explain_output_as_plan_text, explain_output_looks_like_json,
+        ExplainResult, QueryExecution, ResultsPanel, StatementResult, explain_output_as_plan_text,
+        explain_output_is_text_document, explain_output_looks_like_json, explain_result_supports_op,
         format_duration_micros,
     };
 
@@ -2559,6 +2697,14 @@ mod tests {
         raw_output: Option<QueryResult>,
         query_plan: Option<QueryResult>,
     ) -> ExplainResult {
+        explain_result_with_provider(raw_output, query_plan, None)
+    }
+
+    fn explain_result_with_provider(
+        raw_output: Option<QueryResult>,
+        query_plan: Option<QueryResult>,
+        provider_id: Option<&str>,
+    ) -> ExplainResult {
         ExplainResult {
             sql: "SELECT 1".to_string(),
             duration_ms: 0,
@@ -2566,12 +2712,41 @@ mod tests {
             raw_output,
             query_plan,
             analyzed_plan: None,
-            provider_id: None,
+            provider_id: provider_id.map(ToOwned::to_owned),
             error: None,
             connection_name: None,
             database_name: None,
             timestamp: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn op_tab_supported_for_sqlite_with_raw_output() {
+        let result = explain_result_with_provider(
+            Some(single_column_result("opcode", &["Init"])),
+            None,
+            Some("sqlite"),
+        );
+        assert!(explain_result_supports_op(&result));
+    }
+
+    #[test]
+    fn op_tab_not_supported_for_postgres_even_with_raw_output() {
+        let result = explain_result_with_provider(
+            Some(single_column_result("QUERY PLAN", &["Seq Scan on users"])),
+            None,
+            Some("postgresql"),
+        );
+        assert!(
+            !explain_result_supports_op(&result),
+            "Postgres reuses raw_output as a text-plan fallback, not opcodes"
+        );
+    }
+
+    #[test]
+    fn op_tab_not_supported_without_raw_output() {
+        let result = explain_result_with_provider(None, None, Some("sqlite"));
+        assert!(!explain_result_supports_op(&result));
     }
 
     #[test]
@@ -2581,6 +2756,21 @@ mod tests {
 
         assert!(explain_output_looks_like_json(&json));
         assert!(!explain_output_looks_like_json(&text));
+    }
+
+    #[test]
+    fn mysql_tree_plans_render_as_text_not_a_grid() {
+        let tree = single_column_result(
+            "EXPLAIN",
+            &["-> Limit: 5 row(s)  (cost=1 rows=5)\n    -> Table scan on t  (cost=1 rows=9)\n"],
+        );
+        let postgres_rows = single_column_result("QUERY PLAN", &["Seq Scan on users", "  Filter: (id > 1)"]);
+        let sqlite = single_column_result("detail", &["SCAN users"]);
+
+        assert!(explain_output_is_text_document(&tree));
+        assert!(explain_output_as_plan_text(&tree).contains("    -> Table scan on t"));
+        assert!(!explain_output_is_text_document(&postgres_rows));
+        assert!(!explain_output_is_text_document(&sqlite));
     }
 
     #[test]
@@ -2606,13 +2796,17 @@ mod tests {
 
     #[test]
     fn plan_source_is_absent_without_a_query_plan() {
-        let result = explain_result(Some(single_column_result("QUERY PLAN", &["Seq Scan"])), None);
+        let result = explain_result(
+            Some(single_column_result("QUERY PLAN", &["Seq Scan"])),
+            None,
+        );
         assert!(result.plan_source().is_none());
     }
 
     #[test]
     fn plan_text_expands_json_documents() {
-        let json = single_column_result("QUERY PLAN", &["[{\"Plan\":{\"Node Type\":\"Seq Scan\"}}]"]);
+        let json =
+            single_column_result("QUERY PLAN", &["[{\"Plan\":{\"Node Type\":\"Seq Scan\"}}]"]);
 
         let text = explain_output_as_plan_text(&json);
         assert!(text.lines().count() > 1);
@@ -2627,5 +2821,102 @@ mod tests {
             explain_output_as_plan_text(&text),
             "Seq Scan on users\n  Filter: (id > 1)"
         );
+    }
+
+    /// Fakes the query-service response a real execution would hand back to
+    /// `run_execute_query_workflow`, so the fake background task below only
+    /// needs to stand in for the I/O boundary, not the whole service.
+    fn fake_query_execution_outcome() -> QueryExecution {
+        let completed_at = chrono::Utc::now();
+        QueryExecution {
+            sql: "SELECT id FROM users".to_string(),
+            start_time: completed_at,
+            end_time: completed_at,
+            duration_ms: 5,
+            duration_micros: 5_000,
+            connection_name: Some("fake-connection".to_string()),
+            database_name: Some("fake-db".to_string()),
+            statements: vec![StatementResult {
+                sql: "SELECT id FROM users".to_string(),
+                duration_ms: 5,
+                duration_micros: 5_000,
+                result: Some(single_column_result("id", &["1", "2"])),
+                error: None,
+                affected_rows: 0,
+                warnings: Vec::new(),
+                skipped: false,
+            }],
+        }
+    }
+
+    /// Mirrors `query_handlers.rs`'s real dispatch shape: mark the panel
+    /// loading, hand a fake I/O boundary to `cx.background_spawn`, then land
+    /// the terminal UI state through `update_in` once it resolves. This
+    /// covers the wiring the pure-logic tests above can't: that a real
+    /// `set_loading`/`set_execution` pair driven across an async boundary in
+    /// a window actually clears the loading flag and populates results.
+    #[gpui::test]
+    fn async_query_execution_lands_in_results_panel_after_background_work(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(zqlz_ui::init);
+
+        let window = cx.add_window(|_window, cx| ResultsPanel::new(cx));
+        let panel = window
+            .root(cx)
+            .expect("results panel should be the window root");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(900.), px(600.)));
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| panel.set_loading(true, cx));
+        assert!(
+            panel.read_with(&cx, |panel, _cx| panel.is_loading),
+            "starting a query should mark the panel as loading"
+        );
+        assert!(
+            panel.read_with(&cx, |panel, _cx| panel.execution.is_none()),
+            "no results should be shown before the query resolves"
+        );
+
+        panel.update_in(&mut cx, |_panel, window, cx| {
+            cx.spawn_in(window, async move |panel, cx| {
+                // Use the test dispatcher's own virtual-clock timer rather than a
+                // real-time one, so `advance_clock` below can resolve it deterministically.
+                let background_executor = cx.background_executor().clone();
+                let outcome = cx
+                    .background_spawn(async move {
+                        background_executor.timer(Duration::from_millis(20)).await;
+                        fake_query_execution_outcome()
+                    })
+                    .await;
+
+                if let Err(error) = panel.update_in(cx, |panel, window, cx| {
+                    panel.set_execution(outcome, window, cx);
+                }) {
+                    tracing::warn!(%error, "results panel dropped before fake execution landed");
+                }
+            })
+            .detach();
+        });
+
+        // The fake execution above waits on a timer, which the test dispatcher
+        // virtualizes rather than sleeping in real time.
+        cx.executor().advance_clock(Duration::from_millis(20));
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, _cx| {
+            assert!(
+                !panel.is_loading,
+                "loading flag should clear once the execution lands"
+            );
+            let execution = panel
+                .execution
+                .as_ref()
+                .expect("execution should be populated after the background work resolves");
+            assert_eq!(execution.success_count(), 1);
+            assert_eq!(execution.error_count(), 0);
+            assert_eq!(execution.total_rows_returned(), 2);
+        });
     }
 }

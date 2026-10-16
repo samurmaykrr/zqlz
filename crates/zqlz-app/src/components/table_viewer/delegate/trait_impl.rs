@@ -361,8 +361,6 @@ impl TableDelegate for TableViewerDelegate {
                         .gap_1()
                         .w_full()
                         .when_some(fk_info.clone(), |this, fk| {
-                            let referenced_table = fk.referenced_table.clone();
-                            let connection_id = self.connection_id;
                             let viewer_panel = self.viewer_panel.clone();
                             let fk_icon_id = actual_row_ix * 10000 + col_ix;
                             this.child(
@@ -378,10 +376,22 @@ impl TableDelegate for TableViewerDelegate {
                                     )
                                     .on_click(move |_, _window, cx| {
                                         if let Err(e) = viewer_panel.update(cx, |panel, cx| {
+                                            // The key's own schema wins, so a
+                                            // cross-schema key opens its real target.
+                                            let current =
+                                                panel.table.clone().unwrap_or_else(|| {
+                                                    zqlz_core::TableRef::new(
+                                                        panel.database_name.clone(),
+                                                        None,
+                                                        "",
+                                                    )
+                                                });
                                             cx.emit(TableViewerEvent::NavigateToFkTable {
-                                                connection_id,
-                                                referenced_table: referenced_table.clone(),
-                                                database_name: panel.database_name.clone(),
+                                                table: zqlz_core::TableRef::new(
+                                                    current.database,
+                                                    fk.referenced_schema.clone().or(current.schema),
+                                                    fk.referenced_table.clone(),
+                                                ),
                                             });
                                         }) {
                                             tracing::error!(
@@ -399,7 +409,11 @@ impl TableDelegate for TableViewerDelegate {
                 this.tooltip(move |window, cx| {
                     let tooltip_text =
                         TableViewerDelegate::tooltip_text_for_cell_value(&tooltip_value);
-                    Tooltip::new(tooltip_text).build(window, cx)
+                    Tooltip::new(tooltip_text)
+                        .max_w(px(420.))
+                        .max_h(px(260.))
+                        .overflow_hidden()
+                        .build(window, cx)
                 })
             })
             .into_any_element()
@@ -547,22 +561,19 @@ impl TableDelegate for TableViewerDelegate {
         self.infinite_scroll_enabled && self.has_more_data && !self.is_loading_more
     }
 
-    fn load_more(&mut self, _window: &mut Window, cx: &mut Context<TableState<Self>>) {
+    fn load_more(&mut self, window: &mut Window, cx: &mut Context<TableState<Self>>) {
         if self.is_loading_more {
             return;
         }
         self.is_loading_more = true;
         let viewer_panel = self.viewer_panel.clone();
-        let current_row_count = self.rows.len();
-        cx.spawn_in(_window, async move |_this, cx| {
-            if let Err(e) = viewer_panel.update_in(cx, |_panel, _window, cx| {
-                cx.emit(TableViewerEvent::LoadMore {
-                    current_offset: current_row_count,
-                });
+        // Deferred: the viewer reads this table's rows, which are mid-update here.
+        cx.spawn_in(window, async move |_this, cx| {
+            if let Err(error) = viewer_panel.update_in(cx, |panel, window, cx| {
+                panel.reload(zqlz_services::FetchMode::LoadMore, window, cx);
             }) {
-                tracing::error!("Failed to emit LoadMore event: {:?}", e);
+                tracing::debug!(%error, "Load-more requested after the viewer closed");
             }
-            anyhow::Ok(())
         })
         .detach();
     }

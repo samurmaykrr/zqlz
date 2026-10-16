@@ -47,6 +47,7 @@ pub enum ObjectsPanelEvent {
 struct ObjectsPanelKindMenuEntry {
     kind_id: String,
     label: String,
+    advanced: bool,
 }
 
 #[derive(Clone)]
@@ -222,6 +223,9 @@ pub struct ObjectsTableDelegate {
     manifest: ObjectsPanelManifest,
     /// Currently active object kind.
     active_kind_id: Option<String>,
+    /// Whether `active_kind_id` was picked by the user. Only a picked kind is
+    /// kept across reloads; a defaulted one is re-resolved as data arrives.
+    active_kind_is_explicit: bool,
     /// Currently active scope within the active kind.
     active_scope_id: Option<String>,
     /// Kinds whose rows have actually been fetched, so an unfetched kind is not
@@ -254,6 +258,7 @@ impl ObjectsTableDelegate {
             object_features: None,
             manifest: ObjectsPanelManifest::default(),
             active_kind_id: None,
+            active_kind_is_explicit: false,
             active_scope_id: None,
             loaded_kind_ids: HashSet::new(),
             search_text: String::new(),
@@ -262,7 +267,8 @@ impl ObjectsTableDelegate {
     }
 
     fn resolve_active_kind_id(&self) -> Option<String> {
-        if let Some(active_kind_id) = self.active_kind_id.as_deref()
+        if self.active_kind_is_explicit
+            && let Some(active_kind_id) = self.active_kind_id.as_deref()
             && self
                 .manifest
                 .object_kinds
@@ -272,20 +278,22 @@ impl ObjectsTableDelegate {
             return Some(active_kind_id.to_string());
         }
 
-        self.manifest
-            .object_kinds
-            .iter()
+        // Default to an everyday kind: rows for advanced kinds such as Postgres'
+        // built-in languages can arrive first and must not become the default.
+        let everyday_kinds = || self.manifest.object_kinds.iter().filter(|kind| !kind.advanced);
+        everyday_kinds()
             .find(|kind| {
                 self.objects
                     .iter()
                     .any(|row| row.object_kind_id() == kind.id.as_str())
             })
+            .or_else(|| everyday_kinds().next())
+            .or_else(|| self.manifest.object_kinds.first())
             .map(|kind| kind.id.clone())
             .or_else(|| {
-                self.manifest
-                    .object_kinds
+                self.objects
                     .first()
-                    .map(|kind| kind.id.clone())
+                    .map(|row| row.object_kind_id().to_string())
             })
             .or_else(|| {
                 self.objects
@@ -483,6 +491,16 @@ impl ObjectsTableDelegate {
 
     /// Load extended data directly from the driver
     pub fn set_extended_data(&mut self, connection_id: Uuid, data: ObjectsPanelData) {
+        if self.connection_id != Some(connection_id) {
+            // Switching to a different connection: the Kind/Scope the user had
+            // selected belongs to the previous connection and may not make sense
+            // here (e.g. it stuck on an advanced kind like Languages forever).
+            // Refreshes of the same connection pass the same id, so this leaves
+            // the user's current view alone.
+            self.active_kind_id = None;
+            self.active_kind_is_explicit = false;
+            self.active_scope_id = None;
+        }
         self.connection_id = Some(connection_id);
         self.default_columns = data.columns;
         self.objects = data.rows;
@@ -525,6 +543,7 @@ impl ObjectsTableDelegate {
 
     pub fn set_active_kind(&mut self, kind_id: Option<&str>) {
         self.active_kind_id = kind_id.map(ToString::to_string);
+        self.active_kind_is_explicit = kind_id.is_some();
         self.rebuild_active_kind_projection();
     }
 
@@ -576,6 +595,7 @@ impl ObjectsTableDelegate {
             .map(|kind| ObjectsPanelKindMenuEntry {
                 kind_id: kind.id.clone(),
                 label: kind.label_plural.clone(),
+                advanced: kind.advanced,
             })
             .collect()
     }
@@ -646,6 +666,7 @@ impl ObjectsTableDelegate {
         self.object_features = None;
         self.manifest = ObjectsPanelManifest::default();
         self.active_kind_id = None;
+        self.active_kind_is_explicit = false;
         self.active_scope_id = None;
         self.search_text.clear();
         let (columns, column_ids) = Self::build_ui_columns(&default_data.columns);
@@ -1548,7 +1569,22 @@ impl Render for ObjectsPanel {
                 let panel_entity = panel_entity.clone();
                 move |menu, _window, _cx| {
                     let mut menu = menu.scrollable(true).max_h(px(420.));
+                    let has_advanced = kind_menu_entries.iter().any(|entry| entry.advanced);
+                    let mut printed_common_label = false;
+                    let mut printed_advanced_label = false;
                     for entry in &kind_menu_entries {
+                        if has_advanced {
+                            if entry.advanced {
+                                if !printed_advanced_label {
+                                    menu = menu.separator().label("Advanced");
+                                    printed_advanced_label = true;
+                                }
+                            } else if !printed_common_label {
+                                menu = menu.label("Common");
+                                printed_common_label = true;
+                            }
+                        }
+
                         let kind_id = entry.kind_id.clone();
                         let panel = panel_entity.clone();
                         menu = menu.item(
@@ -1990,15 +2026,47 @@ mod tests {
 
     #[test]
     fn a_sticky_active_kind_without_rows_is_reported_as_unloaded() {
-        // The user's kind choice survives a reload that did not carry its rows, so the
-        // panel must be able to tell "not fetched" from "empty" and re-request it.
+        // The user's kind choice survives a reload of the *same* connection that did
+        // not carry its rows, so the panel must be able to tell "not fetched" from
+        // "empty" and re-request it.
+        let connection_id = Uuid::new_v4();
         let mut delegate = delegate_with_kinds(&["database", "table"]);
+        delegate.set_extended_data(connection_id, data(Vec::new()));
         delegate.set_active_kind(Some("database"));
 
-        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("table", "orders")]));
+        delegate.set_extended_data(connection_id, data(vec![row("table", "orders")]));
 
         assert_eq!(delegate.active_kind_id(), Some("database"));
         assert!(!delegate.is_kind_loaded("database"));
+    }
+
+    #[test]
+    fn advanced_rows_arriving_before_the_manifest_do_not_become_the_default_kind() {
+        // A Postgres database with no tables in its default schema bootstraps with only
+        // the built-in languages, and `load_objects` applies rows before the manifest.
+        let mut delegate = ObjectsTableDelegate::new(gpui::WeakEntity::new_invalid());
+        let mut manifest = manifest_with_kinds(&["table", "view", "language"]);
+        manifest.object_kinds[2].advanced = true;
+
+        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("language", "plpgsql")]));
+        delegate.set_manifest(manifest);
+
+        assert_eq!(delegate.active_kind_id(), Some("table"));
+        assert!(!delegate.is_kind_loaded("table"));
+    }
+
+    #[test]
+    fn switching_connections_resets_a_sticky_active_kind() {
+        // Selecting an advanced kind (e.g. Languages) on one connection must not leak
+        // into a different connection's default Kind selection.
+        let mut delegate = delegate_with_kinds(&["language", "table"]);
+        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("table", "orders")]));
+        delegate.set_active_kind(Some("language"));
+        assert_eq!(delegate.active_kind_id(), Some("language"));
+
+        delegate.set_extended_data(Uuid::new_v4(), data(vec![row("table", "customers")]));
+
+        assert_eq!(delegate.active_kind_id(), Some("table"));
     }
 
     #[test]

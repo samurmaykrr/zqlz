@@ -309,7 +309,11 @@ fn test_select_list_is_scoped_to_the_from_clause() {
     let cases: [(&str, usize, Vec<(&str, Option<&str>)>); 6] = [
         ("select  from audit_log", 7, vec![("audit_log", None)]),
         ("select x from audit_log", 7, vec![("audit_log", None)]),
-        ("select  from audit_log where 1=1", 7, vec![("audit_log", None)]),
+        (
+            "select  from audit_log where 1=1",
+            7,
+            vec![("audit_log", None)],
+        ),
         ("select a, from audit_log", 10, vec![("audit_log", None)]),
         ("select  from users u", 7, vec![("users", Some("u"))]),
         (

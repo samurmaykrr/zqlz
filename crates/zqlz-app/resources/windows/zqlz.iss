@@ -60,7 +60,6 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
 Source: "{#ResourcesDir}\ZQLZ.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
-Source: "{#ResourcesDir}\zqlz.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion; Check: FileExists(ExpandConstant('{#ResourcesDir}\zqlz.exe'))
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('{#ResourcesDir}\bin'))
 
 [Icons]
@@ -117,7 +116,9 @@ Root: HKCU; Subkey: "Software\Classes\zqlz\DefaultIcon"; ValueType: string; Valu
 Root: HKCU; Subkey: "Software\Classes\zqlz\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""; Flags: uninsdeletekey
 
 ; PATH environment variable
-Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Tasks: addtopath; Check: NeedsAddPath(ExpandConstant('{app}'))
+; Only {app}\bin goes on PATH. It holds the console-subsystem CLI shim and nothing
+; else, so `zqlz` can never case-insensitively resolve to {app}\ZQLZ.exe (the GUI).
+Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}\bin"; Tasks: addtopath; Check: NeedsAddPath(ExpandConstant('{app}\bin'))
 
 [Code]
 function GetInstallDir(Param: String): String;
@@ -153,4 +154,52 @@ begin
     exit;
   end;
   Result := Pos(';' + Param + ';', ';' + OrigPath + ';') = 0;
+end;
+
+procedure Explode(var Dest: TArrayOfString; Text: String; Separator: String);
+var
+  i, p: Integer;
+begin
+  i := 0;
+  repeat
+    SetArrayLength(Dest, i+1);
+    p := Pos(Separator, Text);
+    if p > 0 then begin
+      Dest[i] := Copy(Text, 1, p-1);
+      Text := Copy(Text, p + Length(Separator), Length(Text));
+      i := i + 1;
+    end else begin
+      Dest[i] := Text;
+      Text := '';
+    end;
+  until Length(Text)=0;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Path: string;
+  InstalledPath: string;
+  Parts: TArrayOfString;
+  NewPath: string;
+  i: Integer;
+begin
+  if CurUninstallStep <> usUninstall then begin
+    exit;
+  end;
+  if not RegQueryStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Path) then begin
+    exit;
+  end;
+  NewPath := '';
+  InstalledPath := ExpandConstant('{app}\bin');
+  Explode(Parts, Path, ';');
+  for i:=0 to GetArrayLength(Parts)-1 do begin
+    if CompareText(Parts[i], InstalledPath) <> 0 then begin
+      NewPath := NewPath + Parts[i];
+
+      if i < GetArrayLength(Parts) - 1 then begin
+        NewPath := NewPath + ';';
+      end;
+    end;
+  end;
+  RegWriteExpandStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', NewPath);
 end;

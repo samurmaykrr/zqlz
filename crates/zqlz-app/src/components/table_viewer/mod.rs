@@ -26,7 +26,7 @@ mod sorting;
 
 pub use delegate::{CellValue, PendingCellChange};
 pub use events::TableViewerEvent;
-pub use filter_types::{FilterCondition, FilterOperator, SortCriterion, SortDirection};
+pub use filter_types::{FilterOperator, SortCriterion, SortDirection};
 pub use panel::{
     CloseColumnVisibility, CopySelection, CutSelection, OpenRowEditor, PasteClipboard,
     SelectAllSelection, SelectColumnVisibilityNext, SelectColumnVisibilityPrevious,

@@ -77,7 +77,17 @@ impl IndexDesign {
     }
 
     pub fn auto_name(&self, table_name: &str) -> String {
-        let cols = self.columns.join("_");
+        // Columns may carry a prefix length or be an expression: `name(10)`.
+        let cols = self
+            .columns
+            .iter()
+            .map(|c| {
+                c.chars()
+                    .filter(|ch| ch.is_alphanumeric() || *ch == '_')
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("_");
         let prefix = if self.is_unique { "uq" } else { "ix" };
         format!("{}_{table_name}_{cols}", prefix)
     }

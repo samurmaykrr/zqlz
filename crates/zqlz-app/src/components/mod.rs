@@ -39,6 +39,5 @@ pub use zqlz_schema::{
 pub use zqlz_settings::{SettingsPanel, SettingsPanelEvent};
 // Re-export TableDesigner from zqlz-table-designer for backward compatibility
 pub use table_viewer::{
-    CellValue, FilterCondition, PendingCellChange, SortCriterion, SortDirection, TableViewerEvent,
-    TableViewerPanel,
+    CellValue, PendingCellChange, SortDirection, TableViewerEvent, TableViewerPanel,
 };

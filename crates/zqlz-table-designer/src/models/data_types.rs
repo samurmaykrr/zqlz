@@ -77,6 +77,35 @@ pub fn get_data_types(dialect: &DatabaseDialect) -> Vec<DataTypeInfo> {
         .collect()
 }
 
+/// Options for a column's type select plus the index to preselect. A declared
+/// type the dialect list doesn't know is appended so an existing column never
+/// renders blank and keeps its type unless the user picks another one.
+pub fn type_select_options(
+    data_types: &[DataTypeInfo],
+    declared: &str,
+) -> (Vec<DataTypeInfo>, Option<usize>) {
+    let mut options = data_types.to_vec();
+    if declared.trim().is_empty() {
+        return (options, None);
+    }
+    if let Some(index) = options
+        .iter()
+        .position(|data_type| data_type.name.eq_ignore_ascii_case(declared))
+    {
+        return (options, Some(index));
+    }
+    options.push(DataTypeInfo {
+        name: declared.to_string(),
+        display_name: declared.to_string(),
+        category: DataTypeCategory::Other,
+        supports_length: false,
+        supports_precision: false,
+        is_common: false,
+    });
+    let index = options.len() - 1;
+    (options, Some(index))
+}
+
 /// Convert from zqlz_core::DataTypeCategory to local DataTypeCategory
 fn convert_data_type_category(category: &zqlz_core::DataTypeCategory) -> DataTypeCategory {
     match category {
@@ -144,5 +173,29 @@ impl SelectItem for DataTypeInfo {
                 .display_name
                 .to_lowercase()
                 .contains(&query.to_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected_name(declared: &str) -> Option<String> {
+        let data_types = get_data_types(&DatabaseDialect::Sqlite);
+        let (options, selected) = type_select_options(&data_types, declared);
+        selected.map(|index| options[index].name.clone())
+    }
+
+    #[test]
+    fn sqlite_select_shows_declared_types() {
+        assert_eq!(selected_name("INT").as_deref(), Some("INT"));
+        assert_eq!(selected_name("timestamp").as_deref(), Some("TIMESTAMP"));
+        assert_eq!(selected_name("VARCHAR").as_deref(), Some("VARCHAR"));
+        assert_eq!(selected_name("DECIMAL").as_deref(), Some("DECIMAL"));
+        assert_eq!(
+            selected_name("BLOB SUB_TYPE TEXT").as_deref(),
+            Some("BLOB SUB_TYPE TEXT")
+        );
+        assert_eq!(selected_name(""), None);
     }
 }

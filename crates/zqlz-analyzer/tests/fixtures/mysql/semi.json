@@ -1,0 +1,85 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "232707.45"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders_orders",
+          "access_type": "ALL",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "rows_examined_per_scan": 152189,
+          "rows_produced_per_join": 152189,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "2298.13",
+            "eval_cost": "15218.90",
+            "prefix_cost": "17517.03",
+            "data_read_per_join": "208M"
+          },
+          "used_columns": [
+            "order_id",
+            "tenant_id",
+            "account_id",
+            "contact_id",
+            "legal_entity_id",
+            "order_number",
+            "status_code",
+            "order_timestamp",
+            "order_valid_from",
+            "order_valid_to",
+            "subtotal_amount",
+            "tax_amount",
+            "shipping_amount",
+            "total_amount",
+            "currency_code",
+            "metadata"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "<subquery2>",
+          "access_type": "eq_ref",
+          "key": "<auto_distinct_key>",
+          "key_length": "144",
+          "ref": [
+            "erp_lab.orders_orders.order_id"
+          ],
+          "rows_examined_per_scan": 1,
+          "materialized_from_subquery": {
+            "using_temporary_table": true,
+            "query_block": {
+              "table": {
+                "table_name": "orders_order_items",
+                "access_type": "ALL",
+                "possible_keys": [
+                  "uq_order_line",
+                  "idx_order_item_order"
+                ],
+                "rows_examined_per_scan": 488256,
+                "rows_produced_per_join": 162735,
+                "filtered": "33.33",
+                "cost_info": {
+                  "read_cost": "41434.50",
+                  "eval_cost": "16273.57",
+                  "prefix_cost": "57708.07",
+                  "data_read_per_join": "95M"
+                },
+                "used_columns": [
+                  "order_id",
+                  "quantity"
+                ],
+                "attached_condition": "(`erp_lab`.`orders_order_items`.`quantity` > 100.0000)"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

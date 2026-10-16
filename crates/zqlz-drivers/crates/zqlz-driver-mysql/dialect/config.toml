@@ -34,7 +34,7 @@ indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
 auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
 
 [syntax_terms]
-keywords = ["ANALYZE", "AUTO_INCREMENT", "CHARSET", "COLLATE", "DUPLICATE", "ENGINE", "FORCE", "IGNORE", "KEY", "LOCK", "MODIFY", "OPTIMIZE", "REGEXP", "REPLACE", "SQL_CALC_FOUND_ROWS", "STRAIGHT_JOIN", "UNLOCK", "UNSIGNED", "ZEROFILL"]
+keywords = ["ANALYZE", "AUTO_INCREMENT", "CHARSET", "COLLATE", "DUPLICATE", "ENGINE", "FORCE", "IGNORE", "KEY", "LOCK", "MODIFY", "OPTIMIZE", "REGEXP", "REPLACE", "SQL_CALC_FOUND_ROWS", "STRAIGHT_JOIN", "UNLOCK", "UNSIGNED", "ZEROFILL", "AFTER", "CALL", "DEALLOCATE", "DELIMITER", "EXECUTE", "FIRST", "HANDLER", "INTERVAL", "LATERAL", "LOCKED", "NOWAIT", "OUTFILE", "OVER", "PARTITION", "PREPARE", "RENAME", "SHARE", "SKIP", "STORED", "VIRTUAL"]
 functions = ["CONCAT", "CONNECTION_ID", "DATE_FORMAT", "DATEDIFF", "DENSE_RANK", "GROUP_CONCAT", "IF", "JSON_ARRAY", "JSON_CONTAINS", "JSON_EXTRACT", "JSON_LENGTH", "JSON_OBJECT", "NOW", "ROW_NUMBER", "TIMESTAMPDIFF", "UUID"]
 types = ["BIGINT", "BINARY", "DATETIME", "ENUM", "JSON", "LONGBLOB", "LONGTEXT", "MEDIUMBLOB", "MEDIUMINT", "MEDIUMTEXT", "TINYBLOB", "TINYINT", "TINYTEXT", "UNSIGNED", "VARBINARY", "ZEROFILL"]
 
@@ -42,6 +42,11 @@ types = ["BIGINT", "BINARY", "DATETIME", "ENUM", "JSON", "LONGBLOB", "LONGTEXT",
 line_comment = "--"
 block_comment_start = "/*"
 block_comment_end = "*/"
+
+[auto_increment]
+keyword = "AUTO_INCREMENT"
+style = "suffix"
+description = "Add AUTO_INCREMENT after column definition for auto-incrementing values"
 
 [syntax_quality]
 text = """

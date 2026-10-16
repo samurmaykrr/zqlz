@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, Row as TiberiusRow};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -217,6 +217,10 @@ impl Connection for MssqlConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("mssql")
+    }
+
+    fn connected_database(&self) -> Option<String> {
+        self.database.clone()
     }
 
     // A trigger or procedure running `SET NOCOUNT ON` suppresses @@ROWCOUNT, so
@@ -662,6 +666,9 @@ impl Connection for MssqlConnection {
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.ensure_not_closed()?;
+        if let Some((enable, statement, disable)) = split_showplan_batch(sql) {
+            return run_mssql_showplan(&self.client, enable, statement, disable).await;
+        }
         run_mssql_query(&self.client, sql, params).await
     }
 
@@ -691,6 +698,39 @@ impl Connection for MssqlConnection {
     }
 }
 
+/// Splits `SET SHOWPLAN_x ON; <sql>; SET SHOWPLAN_x OFF` into its three
+/// statements. SQL Server only accepts a SHOWPLAN switch as a batch of its own.
+pub(crate) fn split_showplan_batch(sql: &str) -> Option<(&str, &str, &str)> {
+    let sql = sql.trim().trim_end_matches(';').trim();
+    if !sql.to_ascii_uppercase().starts_with("SET SHOWPLAN_") {
+        return None;
+    }
+    let (enable, rest) = sql.split_once(';')?;
+    let (statement, disable) = rest.rsplit_once(';')?;
+    if !disable.trim().to_ascii_uppercase().starts_with("SET SHOWPLAN_") {
+        return None;
+    }
+    Some((enable.trim(), statement.trim(), disable.trim()))
+}
+
+/// Runs a statement under a SHOWPLAN switch, one batch per request on the same
+/// session, and always switches the setting back off.
+// ponytail: the session lock is released between the three requests, so a
+// concurrent query on this connection could be planned instead of executed.
+async fn run_mssql_showplan(
+    client: &MssqlClient,
+    enable: &str,
+    statement: &str,
+    disable: &str,
+) -> Result<QueryResult> {
+    run_mssql_batch(client, enable).await?;
+    let plan = run_mssql_batch(client, statement).await;
+    let restored = run_mssql_batch(client, disable).await;
+    let plan = plan?;
+    restored?;
+    Ok(plan)
+}
+
 /// Execute a query against a shared MS SQL Server client and collect the
 /// result. Shared by `MssqlConnection` and the schema-introspection adapter.
 pub(crate) async fn run_mssql_query(
@@ -698,10 +738,27 @@ pub(crate) async fn run_mssql_query(
     sql: &str,
     params: &[Value],
 ) -> Result<QueryResult> {
+    fetch_mssql_result(client, sql, params, false).await
+}
+
+/// Sends `sql` as a plain batch instead of through `sp_executesql`, which
+/// scopes `SET` options (such as SHOWPLAN) to that one call.
+async fn run_mssql_batch(client: &MssqlClient, sql: &str) -> Result<QueryResult> {
+    fetch_mssql_result(client, sql, &[], true).await
+}
+
+async fn fetch_mssql_result(
+    client: &MssqlClient,
+    sql: &str,
+    params: &[Value],
+    plain_batch: bool,
+) -> Result<QueryResult> {
     let start = std::time::Instant::now();
     let mut client = client.lock().await;
 
-    let stream = if params.is_empty() {
+    let stream = if plain_batch {
+        client.simple_query(sql).await
+    } else if params.is_empty() {
         client.query(sql, &[]).await
     } else {
         let tiberius_params = values_to_tiberius_params(params)?;
@@ -748,9 +805,63 @@ pub(crate) async fn run_mssql_query(
     })
 }
 
+/// Renders a scaled integer as a decimal string. tiberius' own `Display` prints
+/// the fraction with its sign for negatives (`-42.-42`).
+pub(crate) fn format_numeric(value: i128, scale: u8) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let magnitude = value.unsigned_abs();
+    if scale == 0 {
+        return format!("{sign}{magnitude}");
+    }
+    let divisor = 10u128.pow(u32::from(scale));
+    format!(
+        "{sign}{}.{:0width$}",
+        magnitude / divisor,
+        magnitude % divisor,
+        width = usize::from(scale)
+    )
+}
+
+/// T-SQL name of a result column's wire type, so grid headers read `int` and
+/// `decimal` rather than tiberius' `Int4` and `Decimaln`.
+fn sql_type_name(column_type: tiberius::ColumnType) -> String {
+    use tiberius::ColumnType::*;
+    match column_type {
+        Bit | Bitn => "bit",
+        Int1 => "tinyint",
+        Int2 => "smallint",
+        Int4 | Intn => "int",
+        Int8 => "bigint",
+        Float4 => "real",
+        Float8 | Floatn => "float",
+        Decimaln | Numericn => "decimal",
+        Money | Money4 => "money",
+        Datetime | Datetimen => "datetime",
+        Datetime4 => "smalldatetime",
+        Datetime2 => "datetime2",
+        Daten => "date",
+        Timen => "time",
+        DatetimeOffsetn => "datetimeoffset",
+        Guid => "uniqueidentifier",
+        BigVarChar => "varchar",
+        BigChar => "char",
+        NVarchar => "nvarchar",
+        NChar => "nchar",
+        BigVarBin => "varbinary",
+        BigBinary => "binary",
+        Text => "text",
+        NText => "ntext",
+        Image => "image",
+        Xml => "xml",
+        SSVariant => "sql_variant",
+        other => return format!("{other:?}").to_lowercase(),
+    }
+    .to_string()
+}
+
 /// Convert a tiberius column to ColumnMeta
 fn tiberius_column_to_meta(col: &tiberius::Column, ordinal: usize) -> ColumnMeta {
-    let data_type = format!("{:?}", col.column_type());
+    let data_type = sql_type_name(col.column_type());
 
     ColumnMeta {
         name: col.name().to_string(),
@@ -803,7 +914,7 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
         ColumnData::Binary(None) => Ok(Value::Null),
         ColumnData::Binary(Some(v)) => Ok(Value::Bytes(v.into_owned())),
         ColumnData::Numeric(None) => Ok(Value::Null),
-        ColumnData::Numeric(Some(v)) => Ok(Value::Decimal(v.to_string())),
+        ColumnData::Numeric(Some(v)) => Ok(Value::Decimal(format_numeric(v.value(), v.scale()))),
         ColumnData::DateTime(None) => Ok(Value::Null),
         ColumnData::DateTime(Some(v)) => {
             let dt = chrono::NaiveDateTime::new(

@@ -74,33 +74,6 @@ pub fn connection_supports_create_or_replace_view(connection: &dyn Connection) -
     dialect_supports_create_or_replace_view(connection.dialect_id())
 }
 
-/// Resolve the schema qualifier for SQL operations from a dialect identifier
-/// and optional database target.
-///
-/// For drivers that model database/catalog as the SQL qualification scope
-/// (MySQL, MariaDB, ClickHouse, SQL Server), this returns the provided
-/// `database_name`. For dialects with separate schema semantics (PostgreSQL) or
-/// no schema support (SQLite/Redis), this returns `None`.
-pub fn resolve_schema_qualifier_for_dialect(
-    dialect_id: Option<&str>,
-    database_name: Option<&str>,
-) -> Option<String> {
-    match dialect_id {
-        Some("mysql") | Some("mariadb") | Some("clickhouse") | Some("mssql")
-        | Some("sqlserver") => database_name.map(ToOwned::to_owned),
-        _ => None,
-    }
-}
-
-/// Resolve the schema qualifier for SQL operations from a connection and
-/// optional database target.
-pub fn resolve_schema_qualifier_for_connection(
-    connection: &dyn Connection,
-    database_name: Option<&str>,
-) -> Option<String> {
-    resolve_schema_qualifier_for_dialect(connection.dialect_id(), database_name)
-}
-
 /// Resolve the metadata/introspection namespace used for schema-scoped objects.
 ///
 /// Some dialects expose sequence and object metadata under the selected
@@ -147,7 +120,6 @@ mod tests {
         default_database_label_for_driver, dialect_is_mysql_compatible, dialect_is_postgres,
         dialect_supports_create_or_replace_view, driver_category_from_driver_name,
         extension_supports_database_file_open, resolve_metadata_scope_for_dialect,
-        resolve_schema_qualifier_for_dialect,
     };
     use crate::DriverCategory;
 
@@ -220,26 +192,6 @@ mod tests {
         assert!(dialect_supports_create_or_replace_view(Some("mariadb")));
         assert!(!dialect_supports_create_or_replace_view(Some("sqlite")));
         assert!(!dialect_supports_create_or_replace_view(None));
-    }
-
-    #[test]
-    fn schema_qualifier_resolution_matches_database_scoped_dialects() {
-        assert_eq!(
-            resolve_schema_qualifier_for_dialect(Some("mysql"), Some("sakila")),
-            Some("sakila".to_string())
-        );
-        assert_eq!(
-            resolve_schema_qualifier_for_dialect(Some("clickhouse"), Some("analytics")),
-            Some("analytics".to_string())
-        );
-        assert_eq!(
-            resolve_schema_qualifier_for_dialect(Some("postgres"), Some("public")),
-            None
-        );
-        assert_eq!(
-            resolve_schema_qualifier_for_dialect(Some("sqlite"), Some("main")),
-            None
-        );
     }
 
     #[test]

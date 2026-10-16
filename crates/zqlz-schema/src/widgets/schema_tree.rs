@@ -5,7 +5,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
-use zqlz_connection::SidebarObjectCapabilities;
+use zqlz_connection::{SidebarObjectCapabilities, SidebarSection};
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
@@ -173,7 +173,7 @@ impl DatabaseSchemaData {
         }
 
         // Views folder
-        if object_capabilities.supports_views && !self.views.is_empty() {
+        if object_capabilities.supports_section(SidebarSection::Views) && !self.views.is_empty() {
             let view_nodes: Vec<SchemaNode> = self
                 .views
                 .into_iter()
@@ -187,7 +187,7 @@ impl DatabaseSchemaData {
         }
 
         // Triggers folder
-        if object_capabilities.supports_triggers && !self.triggers.is_empty() {
+        if object_capabilities.supports_section(SidebarSection::Triggers) && !self.triggers.is_empty() {
             let trigger_nodes: Vec<SchemaNode> = self
                 .triggers
                 .into_iter()
@@ -201,7 +201,7 @@ impl DatabaseSchemaData {
         }
 
         // Functions folder
-        if object_capabilities.supports_functions && !self.functions.is_empty() {
+        if object_capabilities.supports_section(SidebarSection::Functions) && !self.functions.is_empty() {
             let function_nodes: Vec<SchemaNode> = self
                 .functions
                 .into_iter()
@@ -215,7 +215,7 @@ impl DatabaseSchemaData {
         }
 
         // Procedures folder
-        if object_capabilities.supports_procedures && !self.procedures.is_empty() {
+        if object_capabilities.supports_section(SidebarSection::Procedures) && !self.procedures.is_empty() {
             let procedure_nodes: Vec<SchemaNode> = self
                 .procedures
                 .into_iter()
@@ -470,6 +470,7 @@ impl SchemaTreePanel {
         let node_type = node.node_type.clone();
         let node_type_for_toggle = node.node_type.clone();
         let node_type_for_menu = node.node_type.clone();
+        let node_type_for_selector = node.node_type.clone();
         let connection_id = self.connection_id;
 
         v_flex()
@@ -477,6 +478,7 @@ impl SchemaTreePanel {
             .child(
                 h_flex()
                     .id(format!("schema-node-{:?}-{}", node.node_type, level))
+                    .debug_selector(move || format!("schema-node:{node_type_for_selector:?}"))
                     .w_full()
                     .h(px(28.0))
                     .px(px(indent as f32 + 8.0))
@@ -512,6 +514,7 @@ impl SchemaTreePanel {
                             .when(has_children, |this| {
                                 let expanded = node.expanded;
                                 let node_type_clone = node_type_for_toggle.clone();
+                                let node_type_for_toggle_selector = node_type_clone.clone();
                                 this.child(
                                     Button::new(format!("expand-{:?}", node_type_clone))
                                         .ghost()
@@ -520,6 +523,9 @@ impl SchemaTreePanel {
                                             IconName::ChevronDown
                                         } else {
                                             IconName::ChevronRight
+                                        })
+                                        .debug_selector(move || {
+                                            format!("schema-toggle:{node_type_for_toggle_selector:?}")
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.toggle_node(&node_type_clone, cx);
@@ -1038,5 +1044,120 @@ impl Panel for SchemaTreePanel {
 
     fn closable(&self, _cx: &App) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaNode, SchemaNodeType, SchemaTreePanel};
+
+    /// Flattens visible nodes (respecting `expanded`) into depth-indented
+    /// labels, mirroring Zed's `project_panel_tests.rs::visible_entries_as_strings()`.
+    fn visible_nodes_as_strings(nodes: &[SchemaNode]) -> Vec<String> {
+        fn walk(nodes: &[SchemaNode], depth: usize, out: &mut Vec<String>) {
+            for node in nodes {
+                out.push(format!(
+                    "{}{}",
+                    "  ".repeat(depth),
+                    node.node_type.display_name()
+                ));
+                if node.expanded {
+                    walk(&node.children, depth + 1, out);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(nodes, 0, &mut out);
+        out
+    }
+
+    /// A database with a Tables folder (two tables) and a Views folder (one
+    /// view), both collapsed by default.
+    fn fixture_tree() -> Vec<SchemaNode> {
+        vec![
+            SchemaNode::new_with_children(
+                SchemaNodeType::TablesFolder,
+                vec![
+                    SchemaNode::new(SchemaNodeType::Table("orders".to_string())),
+                    SchemaNode::new(SchemaNodeType::Table("users".to_string())),
+                ],
+            ),
+            SchemaNode::new_with_children(
+                SchemaNodeType::ViewsFolder,
+                vec![SchemaNode::new(SchemaNodeType::View(
+                    "recent_orders".to_string(),
+                ))],
+            ),
+        ]
+    }
+
+    #[test]
+    fn visible_nodes_as_strings_reflects_expanded_state() {
+        let mut nodes = fixture_tree();
+
+        assert_eq!(visible_nodes_as_strings(&nodes), &["Tables", "Views"]);
+
+        nodes[0].expanded = true;
+
+        assert_eq!(
+            visible_nodes_as_strings(&nodes),
+            &["Tables", "  orders", "  users", "Views"],
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_the_tables_toggle_expands_and_collapses_its_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(zqlz_ui::init);
+
+        let window = cx.add_window(|_window, cx| {
+            let mut panel = SchemaTreePanel::new(cx);
+            panel.root_nodes = fixture_tree();
+            panel
+        });
+        let panel = window
+            .root(cx)
+            .expect("schema tree panel should be the window root");
+        let mut visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.simulate_resize(gpui::size(gpui::px(320.0), gpui::px(600.0)));
+        visual_cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(&visual_cx, |panel, _| visible_nodes_as_strings(
+                &panel.root_nodes
+            )),
+            vec!["Tables".to_string(), "Views".to_string()],
+            "both folders start collapsed"
+        );
+
+        let toggle_bounds = visual_cx
+            .debug_bounds("schema-toggle:TablesFolder")
+            .expect("Tables toggle should be painted");
+        visual_cx.simulate_click(toggle_bounds.center(), gpui::Modifiers::none());
+        visual_cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(&visual_cx, |panel, _| visible_nodes_as_strings(
+                &panel.root_nodes
+            )),
+            vec![
+                "Tables".to_string(),
+                "  orders".to_string(),
+                "  users".to_string(),
+                "Views".to_string(),
+            ],
+            "clicking the Tables toggle should reveal its tables"
+        );
+
+        visual_cx.simulate_click(toggle_bounds.center(), gpui::Modifiers::none());
+        visual_cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(&visual_cx, |panel, _| visible_nodes_as_strings(
+                &panel.root_nodes
+            )),
+            vec!["Tables".to_string(), "Views".to_string()],
+            "clicking the Tables toggle again should collapse it"
+        );
     }
 }

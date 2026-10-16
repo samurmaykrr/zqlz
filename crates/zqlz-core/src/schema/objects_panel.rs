@@ -169,6 +169,11 @@ pub struct ObjectsPanelObjectKind {
     pub row_actions: Vec<ObjectsPanelAction>,
     /// Optional default action id used for double-click / Enter.
     pub default_row_action_id: Option<String>,
+    /// Whether this kind is a rarely-used/internal catalog kind that should be
+    /// visually grouped under "Advanced" in the Kind picker rather than mixed
+    /// in with everyday kinds like tables and views.
+    #[serde(default)]
+    pub advanced: bool,
 }
 
 impl ObjectsPanelObjectKind {
@@ -185,11 +190,17 @@ impl ObjectsPanelObjectKind {
             columns: Vec::new(),
             row_actions: Vec::new(),
             default_row_action_id: None,
+            advanced: false,
         }
     }
 
     pub fn icon_key(mut self, icon_key: impl Into<String>) -> Self {
         self.icon_key = Some(icon_key.into());
+        self
+    }
+
+    pub fn advanced(mut self) -> Self {
+        self.advanced = true;
         self
     }
 

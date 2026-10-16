@@ -56,6 +56,28 @@ pub fn parse_explain_plan(
                 None
             }
         }
+        ExplainParserKind::Raw if dialect_id == Some("mssql") => {
+            #[cfg(feature = "mssql")]
+            {
+                query_plan.and_then(crate::mssql::parse_mssql_explain_result)
+            }
+            #[cfg(not(feature = "mssql"))]
+            {
+                let _ = query_plan;
+                None
+            }
+        }
+        ExplainParserKind::Raw if dialect_id == Some("clickhouse") => {
+            #[cfg(feature = "clickhouse")]
+            {
+                query_plan.and_then(crate::clickhouse::parse_clickhouse_explain_result)
+            }
+            #[cfg(not(feature = "clickhouse"))]
+            {
+                let _ = query_plan;
+                None
+            }
+        }
         ExplainParserKind::Raw | ExplainParserKind::None => None,
     }
 }

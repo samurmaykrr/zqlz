@@ -1,8 +1,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
+    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
+    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Toggled, Window, div,
     prelude::FluentBuilder as _,
 };
 use smallvec::{SmallVec, smallvec};
@@ -138,6 +138,12 @@ impl RenderOnce for Toggle {
 
         div()
             .id(self.id)
+            .role(Role::Button)
+            .aria_toggled(if self.checked {
+                Toggled::True
+            } else {
+                Toggled::False
+            })
             .flex()
             .flex_row()
             .items_center()
@@ -270,6 +276,7 @@ impl RenderOnce for ToggleGroup {
 
         h_flex()
             .id(self.id)
+            .role(Role::Toolbar)
             .gap_1()
             .refine_style(&self.style)
             .children(self.items.into_iter().enumerate().map({

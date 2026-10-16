@@ -17,6 +17,12 @@ pub struct StatementResult {
     pub result: Option<QueryResult>,
     pub error: Option<String>,
     pub affected_rows: u64,
+    /// Server notices raised by this statement (`RAISE NOTICE`, ...), one entry
+    /// per message. Also set for statements that return no rows.
+    pub warnings: Vec<String>,
+    /// Never sent to the server because an earlier statement in the same run
+    /// failed and the run was not set to continue on error. `error` stays `None`.
+    pub skipped: bool,
 }
 
 /// Query execution result for UI consumption (supports multiple statements)

@@ -244,16 +244,12 @@ impl TableViewerDelegate {
         });
 
         let viewer_panel = self.viewer_panel.clone();
-        let table_name = self.table_name.clone();
-        let connection_id = self.connection_id;
 
         if let Some(col_meta) = column_meta {
             let col_meta = col_meta.clone();
             cx.defer(move |cx| {
                 if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                     cx.emit(TableViewerEvent::EditCell {
-                        table_name,
-                        connection_id,
                         row,
                         col: data_col,
                         column_meta: col_meta.clone(),

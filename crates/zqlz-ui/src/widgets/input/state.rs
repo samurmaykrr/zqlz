@@ -2479,7 +2479,7 @@ impl Render for InputState {
             .id("input-state")
             .flex_1()
             .when(self.mode.is_multi_line(), |this| this.h_full())
-            .flex_grow()
+            .flex_grow_1()
             .overflow_x_hidden()
             .on_mouse_move(window.listener_for(&cx.entity(), InputState::on_mouse_move))
             .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))

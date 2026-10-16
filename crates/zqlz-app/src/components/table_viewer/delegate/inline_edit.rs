@@ -262,7 +262,6 @@ impl TableViewerDelegate {
             schema_name: fk_info.referenced_schema.clone(),
             cache_key: fk_cache_key.clone(),
             referenced_columns: fk_info.referenced_columns.clone(),
-            connection_id: self.connection_id,
             viewer_panel: self.viewer_panel.clone(),
             request_id,
         };
@@ -295,7 +294,6 @@ impl TableViewerDelegate {
         if self.get_fk_values(&fk_cache_key).is_none() {
             self.fk_loading = true;
             let viewer_panel = self.viewer_panel.clone();
-            let connection_id = self.connection_id;
             let referenced_table = fk_info.referenced_table.clone();
             let referenced_schema = fk_info.referenced_schema.clone();
             let cache_key = fk_cache_key;
@@ -303,7 +301,6 @@ impl TableViewerDelegate {
             cx.defer(move |cx| {
                 if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
                     cx.emit(TableViewerEvent::LoadFkValues {
-                        connection_id,
                         referenced_table,
                         referenced_schema,
                         cache_key,

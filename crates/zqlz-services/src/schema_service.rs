@@ -12,7 +12,7 @@ use zqlz_core::{
     connection_is_postgres, ColumnInfo as SchemaColumnInfo, Connection, ConnectionScope,
     DatabaseObject, FunctionInfo, ObjectFormDdlRequest, ObjectFormSpec, ObjectFormSpecRequest,
     ObjectType, ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelRow, ProcedureInfo,
-    SchemaIntrospection, TableInfo, TableType, TriggerInfo, TypeKind, ViewInfo,
+    SchemaIntrospection, TableInfo, TableRef, TableType, TriggerInfo, TypeKind, ViewInfo,
 };
 use zqlz_schema::SchemaCache;
 
@@ -33,11 +33,29 @@ pub enum SidebarSectionLoadData {
     Extensions(Vec<String>),
 }
 
-type ScopedObjectCacheKey = (Uuid, String, Option<String>);
+/// `(connection, database, object name, schema)`: one connection id can browse
+/// several databases, each with its own `public.users`.
+type ScopedObjectCacheKey = (Uuid, Option<String>, String, Option<String>);
 type TableDetailsCacheMap = HashMap<ScopedObjectCacheKey, TableDetails>;
 type DdlCacheMap = HashMap<ScopedObjectCacheKey, String>;
 type ObjectsPanelKindCacheKey = (Uuid, Option<String>, String, Option<String>);
 type ObjectsPanelKindCacheMap = HashMap<ObjectsPanelKindCacheKey, ObjectsPanelData>;
+
+type SchemaLoadKey = (Uuid, Option<String>, Option<String>);
+type SchemaLoadReceiver = tokio::sync::watch::Receiver<Option<ServiceResult<DatabaseSchema>>>;
+
+/// Removes a single-flight entry when its leader finishes — or is dropped
+/// mid-load — so waiters never hang on a load that will not complete.
+struct InFlightSchemaLoadGuard<'a> {
+    loads: &'a parking_lot::Mutex<HashMap<SchemaLoadKey, SchemaLoadReceiver>>,
+    key: &'a SchemaLoadKey,
+}
+
+impl Drop for InFlightSchemaLoadGuard<'_> {
+    fn drop(&mut self) {
+        self.loads.lock().remove(self.key);
+    }
+}
 
 /// Batch size for prefetching table details. Small enough to avoid saturating
 /// remote connection poolers (e.g. Neon PgBouncer) while still providing
@@ -78,6 +96,11 @@ pub struct SchemaService {
     /// Still gated on the snapshot's TTL, unlike `table_details_cache`.
     ddl_cache: RwLock<DdlCacheMap>,
     objects_panel_kind_cache: RwLock<ObjectsPanelKindCacheMap>,
+    /// Single-flight registry for full schema loads. Concurrent callers with
+    /// the same (connection, database, schema) target — e.g. the sidebar
+    /// bootstrap and the LSP refresh — await one introspection pass instead
+    /// of racing each other on the connection.
+    in_flight_schema_loads: parking_lot::Mutex<HashMap<SchemaLoadKey, SchemaLoadReceiver>>,
 }
 
 impl SchemaService {
@@ -179,6 +202,47 @@ impl SchemaService {
         }
     }
 
+    /// Split a caller-supplied relation reference into a bare name and a scope.
+    ///
+    /// Callers reach this service from two directions: `TableService` resolves the
+    /// relation first and passes the halves separately, while the table-viewer
+    /// lifecycle passes the joined `"database.table"` string the sidebar built. Left
+    /// unsplit, the joined form matches no catalog entry and no cache key — every
+    /// lookup misses, falls through to a live `list_tables`/`list_views` pair that
+    /// also cannot match, and any generated DDL names a table that does not exist.
+    /// Normalizing here makes both callers agree on one key.
+    ///
+    /// An explicit scope means the caller already split the name, so a dot left in
+    /// it belongs to the name (`gui_a` + `odd.name`); only a repeated `scope.`
+    /// prefix is dropped.
+    fn normalize_relation_reference(
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> (String, Option<String>) {
+        if let Some(scope) = Self::normalize_scope(schema) {
+            let name = table_name
+                .strip_prefix(scope.as_str())
+                .and_then(|remainder| remainder.strip_prefix('.'))
+                .filter(|remainder| !remainder.is_empty())
+                .unwrap_or(table_name);
+            return (name.to_string(), Some(scope));
+        }
+        // Without a scope the name may be a label from PostgreSQL's all-schemas
+        // listing, `schema.name`: the schema never holds a dot, the name may.
+        match table_name.split_once('.') {
+            Some((schema, name)) if !schema.is_empty() && !name.is_empty() => {
+                // A label joined twice (`analytics.analytics.dim_dates`) names it once.
+                let name = name
+                    .strip_prefix(schema)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .filter(|rest| !rest.is_empty())
+                    .unwrap_or(name);
+                (name.to_string(), Some(schema.to_string()))
+            }
+            _ => (table_name.to_string(), None),
+        }
+    }
+
     async fn resolve_database_name_for_connection(
         connection: &Arc<dyn Connection>,
     ) -> Option<String> {
@@ -192,6 +256,7 @@ impl SchemaService {
             table_details_cache: RwLock::new(HashMap::new()),
             ddl_cache: RwLock::new(HashMap::new()),
             objects_panel_kind_cache: RwLock::new(HashMap::new()),
+            in_flight_schema_loads: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -201,6 +266,7 @@ impl SchemaService {
             cache,
             table_details_cache: RwLock::new(HashMap::new()),
             ddl_cache: RwLock::new(HashMap::new()),
+            in_flight_schema_loads: parking_lot::Mutex::new(HashMap::new()),
             objects_panel_kind_cache: RwLock::new(HashMap::new()),
         }
     }
@@ -263,10 +329,6 @@ impl SchemaService {
         target_database: Option<&str>,
         target_schema: Option<&str>,
     ) -> ServiceResult<DatabaseSchema> {
-        let schema = connection
-            .as_schema_introspection()
-            .ok_or(ServiceError::SchemaNotSupported)?;
-
         let target_database = target_database
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -275,6 +337,72 @@ impl SchemaService {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned);
+        let key: SchemaLoadKey = (connection_id, target_database.clone(), target_schema.clone());
+
+        loop {
+            let leader_sender = {
+                let mut in_flight = self.in_flight_schema_loads.lock();
+                match in_flight.get(&key) {
+                    Some(receiver) => Err(receiver.clone()),
+                    None => {
+                        let (sender, receiver) = tokio::sync::watch::channel(None);
+                        in_flight.insert(key.clone(), receiver);
+                        Ok(sender)
+                    }
+                }
+            };
+
+            match leader_sender {
+                Ok(sender) => {
+                    let _guard = InFlightSchemaLoadGuard {
+                        loads: &self.in_flight_schema_loads,
+                        key: &key,
+                    };
+                    let result = self
+                        .load_database_schema_uncoalesced(
+                            connection,
+                            connection_id,
+                            target_database,
+                            target_schema,
+                        )
+                        .await;
+                    sender.send_replace(Some(result.clone()));
+                    return result;
+                }
+                Err(mut receiver) => {
+                    if let Some(result) = receiver.borrow().clone() {
+                        return result;
+                    }
+                    // `Err` means the leader was dropped without publishing a
+                    // result; loop back and become the leader ourselves.
+                    if receiver.changed().await.is_ok() {
+                        if let Some(result) = receiver.borrow().clone() {
+                            tracing::debug!(
+                                connection_id = %connection_id,
+                                "Joined in-flight schema load instead of issuing a duplicate"
+                            );
+                            return result;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The actual introspection pass behind the single-flight registry in
+    /// [`Self::load_database_schema_for_database_and_schema`]. Targets arrive
+    /// already trimmed and non-empty.
+    async fn load_database_schema_uncoalesced(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        target_database: Option<String>,
+        target_schema: Option<String>,
+    ) -> ServiceResult<DatabaseSchema> {
+        let schema = connection
+            .as_schema_introspection()
+            .ok_or(ServiceError::SchemaNotSupported)?;
+
         let bypass_cache = target_database.is_some() || target_schema.is_some();
 
         if bypass_cache {
@@ -495,16 +623,35 @@ impl SchemaService {
             Vec::new()
         });
 
-        // Load indexes for each table (best effort)
-        let mut table_indexes = std::collections::HashMap::new();
-        for table in &tables {
-            if let Ok(indexes) = schema
-                .get_indexes(introspection_schema.as_deref(), &table.name)
-                .await
-            {
-                table_indexes.insert(table.name.clone(), indexes);
+        // Load indexes for the whole schema (best effort). Prefer the one-query
+        // bulk form; a per-table walk costs one round-trip per table, which is
+        // prohibitive on remote connections with hundreds of tables.
+        let table_indexes = match schema
+            .list_all_indexes(introspection_schema.as_deref())
+            .await
+        {
+            Ok(Some(indexes_by_table)) => indexes_by_table,
+            Ok(None) => {
+                let mut table_indexes = std::collections::HashMap::new();
+                for table in &tables {
+                    if let Ok(indexes) = schema
+                        .get_indexes(introspection_schema.as_deref(), &table.name)
+                        .await
+                    {
+                        table_indexes.insert(table.name.clone(), indexes);
+                    }
+                }
+                table_indexes
             }
-        }
+            Err(error) => {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    %error,
+                    "Failed to load indexes in bulk"
+                );
+                std::collections::HashMap::new()
+            }
+        };
 
         // Cache tables and all other schema objects for future use
         if !tables.is_empty() && !bypass_cache {
@@ -697,7 +844,7 @@ impl SchemaService {
         self.cache.set_tables(connection_id, tables.clone());
         self.table_details_cache
             .write()
-            .retain(|(conn_id, _, _), _| *conn_id != connection_id);
+            .retain(|(conn_id, _, _, _), _| *conn_id != connection_id);
         tracing::debug!(
             "Cached {} tables for connection {}",
             tables.len(),
@@ -719,16 +866,15 @@ impl SchemaService {
         &self,
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
-    ) -> ServiceResult<(Vec<TableInfo>, Vec<String>)> {
+    ) -> ServiceResult<(Vec<TableInfo>, Vec<ViewInfo>)> {
         let tables = self
             .load_tables_only(Arc::clone(&connection), connection_id)
             .await?;
 
-        let view_names = match self.load_views(connection, connection_id).await {
+        let views = match self.load_views(connection, connection_id).await {
             Ok(views) => {
-                let names = views.iter().map(|view| view.name.clone()).collect();
-                self.cache.set_views(connection_id, views);
-                names
+                self.cache.set_views(connection_id, views.clone());
+                views
             }
             Err(error) => {
                 // Views are optional for the palette; tables are the critical
@@ -738,12 +884,11 @@ impl SchemaService {
                     "failed to refresh views for command palette: {}",
                     error
                 );
-                self.get_cached_view_names_allow_stale(connection_id)
-                    .unwrap_or_default()
+                self.cache.get_views(connection_id).unwrap_or_default()
             }
         };
 
-        Ok((tables, view_names))
+        Ok((tables, views))
     }
 
     /// Load views for a connection
@@ -1139,9 +1284,12 @@ impl SchemaService {
         // purge — gating them on the connection-wide snapshot's TTL would make
         // them unreadable for every database-scoped connection, whose snapshot
         // is invalidated on each targeted load and never written back.
-        let normalized_scope = Self::normalize_scope(schema);
+        let (table_name, normalized_scope) = Self::normalize_relation_reference(table_name, schema);
+        let table_name = table_name.as_str();
+        let schema = normalized_scope.as_deref();
         let cache_key = (
             connection_id,
+            connection.connected_database(),
             table_name.to_string(),
             normalized_scope.clone(),
         );
@@ -1331,10 +1479,10 @@ impl SchemaService {
         self.invalidate_schema_snapshot(connection_id);
         self.table_details_cache
             .write()
-            .retain(|(conn_id, _, _), _| *conn_id != connection_id);
+            .retain(|(conn_id, _, _, _), _| *conn_id != connection_id);
         self.ddl_cache
             .write()
-            .retain(|(conn_id, _, _), _| *conn_id != connection_id);
+            .retain(|(conn_id, _, _, _), _| *conn_id != connection_id);
         self.objects_panel_kind_cache
             .write()
             .retain(|(conn_id, _, _, _), _| *conn_id != connection_id);
@@ -1362,12 +1510,12 @@ impl SchemaService {
             .invalidate_columns_for_table(connection_id, table_name);
         self.table_details_cache
             .write()
-            .retain(|(conn_id, cached_table_name, _), _| {
+            .retain(|(conn_id, _, cached_table_name, _), _| {
                 *conn_id != connection_id || cached_table_name != table_name
             });
         self.ddl_cache
             .write()
-            .retain(|(conn_id, cache_identifier, _), _| {
+            .retain(|(conn_id, _, cache_identifier, _), _| {
                 !(*conn_id == connection_id
                     && cache_identifier.ends_with(&format!(":{table_name}")))
             });
@@ -1380,14 +1528,20 @@ impl SchemaService {
     /// spinner when data is already warm.
     pub fn peek_table_details_cache(
         &self,
+        connection: &dyn Connection,
         connection_id: Uuid,
         table_name: &str,
         schema: Option<&str>,
     ) -> Option<TableDetails> {
-        let normalized_scope = Self::normalize_scope(schema);
+        let (table_name, normalized_scope) = Self::normalize_relation_reference(table_name, schema);
         self.table_details_cache
             .read()
-            .get(&(connection_id, table_name.to_string(), normalized_scope))
+            .get(&(
+                connection_id,
+                connection.connected_database(),
+                table_name,
+                normalized_scope,
+            ))
             .cloned()
     }
 
@@ -1405,6 +1559,26 @@ impl SchemaService {
         preferred_object_type: Option<ObjectType>,
     ) -> Option<String> {
         let schema_introspection = connection.as_schema_introspection()?;
+        let (object_name, normalized_scope) =
+            Self::normalize_relation_reference(object_name, schema);
+        let object_name = object_name.as_str();
+        let schema = normalized_scope.as_deref();
+
+        // Probe the cache before resolving the object type: resolution can cost two
+        // catalog round-trips, which is a steep price for a value we already hold.
+        // The type is only part of the key, so match on the name and scope instead.
+        if self.cache.is_valid(connection_id) {
+            if let Some(cached) = self.cached_ddl_for_object(
+                connection_id,
+                connection.connected_database(),
+                object_name,
+                normalized_scope.as_ref(),
+            ) {
+                tracing::debug!("DDL cache hit for {}", object_name);
+                return Some(cached);
+            }
+        }
+
         let object_type = self
             .resolve_object_type(
                 connection,
@@ -1416,16 +1590,12 @@ impl SchemaService {
             )
             .await;
         let cache_identifier = format!("{:?}:{}", object_type, object_name);
-        let normalized_scope = Self::normalize_scope(schema);
-        let cache_key = (connection_id, cache_identifier, normalized_scope.clone());
-
-        // Fast path: return cached DDL if the main schema cache is still valid
-        if self.cache.is_valid(connection_id) {
-            if let Some(cached) = self.ddl_cache.read().get(&cache_key).cloned() {
-                tracing::debug!("DDL cache hit for {}", object_name);
-                return Some(cached);
-            }
-        }
+        let cache_key = (
+            connection_id,
+            connection.connected_database(),
+            cache_identifier,
+            normalized_scope.clone(),
+        );
 
         let db_object = DatabaseObject {
             object_type,
@@ -1447,6 +1617,54 @@ impl SchemaService {
         }
     }
 
+    /// Synchronous cache-only read of an object's DDL — no database round-trip.
+    ///
+    /// Lets a caller that already holds warm `TableDetails` render a complete panel
+    /// without awaiting anything.
+    pub fn peek_ddl_cache(
+        &self,
+        connection: &dyn Connection,
+        connection_id: Uuid,
+        object_name: &str,
+        schema: Option<&str>,
+    ) -> Option<String> {
+        let (object_name, normalized_scope) =
+            Self::normalize_relation_reference(object_name, schema);
+        self.cached_ddl_for_object(
+            connection_id,
+            connection.connected_database(),
+            &object_name,
+            normalized_scope.as_ref(),
+        )
+    }
+
+    /// Look up cached DDL for an object without knowing its `ObjectType`.
+    ///
+    /// The cache identifier is `"{ObjectType:?}:{name}"`, so an exact lookup needs a
+    /// type the caller can only learn from the catalog. Matching on the name suffix
+    /// keeps a warm cache free.
+    fn cached_ddl_for_object(
+        &self,
+        connection_id: Uuid,
+        database: Option<String>,
+        object_name: &str,
+        normalized_scope: Option<&String>,
+    ) -> Option<String> {
+        let name_suffix = format!(":{object_name}");
+        self.ddl_cache
+            .read()
+            .iter()
+            .find(
+                |((cached_connection_id, cached_database, cache_identifier, cached_scope), _)| {
+                    *cached_connection_id == connection_id
+                        && *cached_database == database
+                        && cached_scope.as_ref() == normalized_scope
+                        && cache_identifier.ends_with(&name_suffix)
+                },
+            )
+            .map(|(_, ddl)| ddl.clone())
+    }
+
     /// Warm the column cache for a whole schema, preferring a single bulk query.
     ///
     /// Completions only need columns and foreign keys, and every SQL driver can
@@ -1460,6 +1678,8 @@ impl SchemaService {
         table_names: Vec<String>,
         schema: Option<String>,
     ) -> HashMap<String, TableColumnSummary> {
+        // Same scope the table list was loaded with, so the keys line up with `table_names`.
+        let schema = Self::sidebar_introspection_scope(connection.as_ref(), schema);
         if table_names.len() <= BULK_COLUMN_TABLE_LIMIT {
             if let Some(summaries) = self
                 .warm_schema_columns_in_bulk(&connection, connection_id, schema.as_deref())
@@ -1516,6 +1736,14 @@ impl SchemaService {
         schema: Option<&str>,
     ) -> Option<HashMap<String, TableColumnSummary>> {
         let introspection = connection.as_schema_introspection()?;
+
+        // PostgreSQL lists relations across every schema (`schema.table` names), so a
+        // bulk fetch scoped to the default schema would miss tables living elsewhere.
+        let schema = Self::sidebar_introspection_scope(
+            connection.as_ref(),
+            schema.map(ToOwned::to_owned),
+        );
+        let schema = schema.as_deref();
 
         let columns_by_table = match introspection.list_all_columns(schema).await {
             Ok(Some(columns)) => columns,
@@ -1638,8 +1866,8 @@ impl SchemaService {
         let cache = self.table_details_cache.read();
         let details: HashMap<String, TableDetails> = cache
             .iter()
-            .filter(|((conn_id, _, _), _)| *conn_id == connection_id)
-            .map(|((_, table_name, _), details)| (table_name.clone(), details.clone()))
+            .filter(|((conn_id, _, _, _), _)| *conn_id == connection_id)
+            .map(|((_, _, table_name, _), details)| (table_name.clone(), details.clone()))
             .collect();
 
         if details.is_empty() {
@@ -1706,10 +1934,8 @@ impl SchemaService {
     }
 
     /// Get cached view names for a connection even when the cache entry is stale.
-    pub fn get_cached_view_names_allow_stale(&self, connection_id: Uuid) -> Option<Vec<String>> {
-        self.cache
-            .get_views(connection_id)
-            .map(|views| views.into_iter().map(|view| view.name).collect())
+    pub fn get_cached_views_allow_stale(&self, connection_id: Uuid) -> Option<Vec<ViewInfo>> {
+        self.cache.get_views(connection_id)
     }
 
     /// Get cached view names for a connection if available
@@ -1812,6 +2038,17 @@ impl SchemaService {
         preferred_object_type.unwrap_or(ObjectType::Table)
     }
 
+    /// Whether a catalog entry names the relation being looked up, whether the
+    /// catalog lists it bare or as `schema.name`.
+    fn relation_name_matches(
+        catalog_name: &str,
+        catalog_schema: Option<&str>,
+        object_name: &str,
+    ) -> bool {
+        TableRef::from_listing(None, catalog_schema.map(Into::into), catalog_name).name
+            == object_name
+    }
+
     async fn lookup_relation_info(
         &self,
         connection: &Arc<dyn Connection>,
@@ -1820,13 +2057,20 @@ impl SchemaService {
         object_name: &str,
         schema: Option<&str>,
     ) -> Option<TableInfo> {
+        let (object_name, normalized_scope) =
+            Self::normalize_relation_reference(object_name, schema);
+        let object_name = object_name.as_str();
+        let schema = normalized_scope.as_deref();
+
         if self.cache.is_valid(connection_id) {
             if let Some(info) = self
                 .cache
                 .get_tables(connection_id)
                 .unwrap_or_default()
                 .into_iter()
-                .find(|info| info.name == object_name)
+                .find(|info| {
+                    Self::relation_name_matches(&info.name, info.schema.as_deref(), object_name)
+                })
             {
                 return Some(info);
             }
@@ -1836,7 +2080,9 @@ impl SchemaService {
                 .get_views(connection_id)
                 .unwrap_or_default()
                 .iter()
-                .any(|view| view.name == object_name)
+                .any(|view| {
+                    Self::relation_name_matches(&view.name, view.schema.as_deref(), object_name)
+                })
             {
                 return Some(Self::placeholder_table_info(
                     object_name,
@@ -1850,7 +2096,9 @@ impl SchemaService {
                 .get_materialized_views(connection_id)
                 .unwrap_or_default()
                 .iter()
-                .any(|view| view.name == object_name)
+                .any(|view| {
+                    Self::relation_name_matches(&view.name, view.schema.as_deref(), object_name)
+                })
             {
                 return Some(Self::placeholder_table_info(
                     object_name,
@@ -1861,14 +2109,22 @@ impl SchemaService {
         }
 
         if let Ok(tables) = schema_introspection.list_tables(schema).await {
-            if let Some(info) = tables.iter().find(|info| info.name == object_name).cloned() {
+            if let Some(info) = tables
+                .iter()
+                .find(|info| {
+                    Self::relation_name_matches(&info.name, info.schema.as_deref(), object_name)
+                })
+                .cloned()
+            {
                 self.cache.set_tables(connection_id, tables);
                 return Some(info);
             }
         }
 
         if let Ok(views) = schema_introspection.list_views(schema).await {
-            if views.iter().any(|view| view.name == object_name) {
+            if views.iter().any(|view| {
+                Self::relation_name_matches(&view.name, view.schema.as_deref(), object_name)
+            }) {
                 return Some(Self::placeholder_table_info(
                     object_name,
                     schema,
@@ -1879,7 +2135,9 @@ impl SchemaService {
 
         if connection.supports_materialized_views() {
             if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
-                if views.iter().any(|view| view.name == object_name) {
+                if views.iter().any(|view| {
+                    Self::relation_name_matches(&view.name, view.schema.as_deref(), object_name)
+                }) {
                     return Some(Self::placeholder_table_info(
                         object_name,
                         schema,
@@ -2119,6 +2377,56 @@ impl Default for SchemaService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relation_references_split_listing_labels_but_not_scoped_names() {
+        let split = |name: &str, scope: Option<&str>| {
+            SchemaService::normalize_relation_reference(name, scope)
+        };
+        let owned = |name: &str, scope: Option<&str>| (name.to_string(), scope.map(String::from));
+
+        assert_eq!(split("public.users", None), owned("users", Some("public")));
+        assert_eq!(
+            split("audit.odd.name", None),
+            owned("odd.name", Some("audit"))
+        );
+        assert_eq!(
+            split("analytics.analytics.dim_dates", None),
+            owned("dim_dates", Some("analytics"))
+        );
+        assert_eq!(
+            split("seekunique-dev.accounting_payments", None),
+            owned("accounting_payments", Some("seekunique-dev"))
+        );
+        assert_eq!(split("users", None), owned("users", None));
+        assert_eq!(split(".users", None), owned(".users", None));
+        assert_eq!(
+            split("odd.name", Some("gui_a")),
+            owned("odd.name", Some("gui_a"))
+        );
+        assert_eq!(
+            split("gui_a.odd.name", Some("gui_a")),
+            owned("odd.name", Some("gui_a"))
+        );
+    }
+
+    #[test]
+    fn relation_reference_keeps_dots_inside_a_scoped_name() {
+        let normalize = SchemaService::normalize_relation_reference;
+        assert_eq!(
+            normalize("odd.name", Some("gui_a")),
+            ("odd.name".to_string(), Some("gui_a".to_string()))
+        );
+        assert_eq!(
+            normalize("gui_a.items", Some("gui_a")),
+            ("items".to_string(), Some("gui_a".to_string()))
+        );
+        assert_eq!(
+            normalize("sales.items", None),
+            ("items".to_string(), Some("sales".to_string()))
+        );
+        assert_eq!(normalize("items", None), ("items".to_string(), None));
+    }
     use zqlz_core::ObjectsPanelObjectRef;
 
     fn make_row(kind_id: &str, name: &str) -> ObjectsPanelRow {

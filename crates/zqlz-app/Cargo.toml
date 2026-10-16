@@ -69,9 +69,19 @@ futures.workspace = true
 tokio.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+async-trait.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa.workspace = true
 objc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

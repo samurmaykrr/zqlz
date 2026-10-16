@@ -1,0 +1,2 @@
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	UPDATE	orders_orders	NULL	range	PRIMARY	PRIMARY	144	const	1	100.00	Using where

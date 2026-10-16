@@ -32,3 +32,5 @@ rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
 indoc = { workspace = true }
+gpui = { workspace = true, features = ["test-support"] }
+zqlz-test-support = { workspace = true }

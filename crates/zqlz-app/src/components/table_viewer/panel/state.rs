@@ -7,6 +7,7 @@ impl TableViewerPanel {
         self.table_state = None;
         self.connection_id = None;
         self.table_name = None;
+        self.table = None;
         self.database_name = None;
         self.row_count = 0;
         self.is_loading = false;
@@ -22,6 +23,8 @@ impl TableViewerPanel {
         self.search_visible = false;
         self.search_text.clear();
         self.pagination_state = None;
+        self.fetch_task = None;
+        self.counted_where_clauses.clear();
         self.active_request_generation = 0;
         self.selection_stats = None;
         self.performance_profile = None;
@@ -99,6 +102,12 @@ impl TableViewerPanel {
 
     pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
         self.is_loading = loading;
+        if let Some(pagination) = &self.pagination_state {
+            pagination.update(cx, |pagination, cx| {
+                pagination.is_loading = loading;
+                cx.notify();
+            });
+        }
         if loading {
             self.loading_started_at = Some(std::time::Instant::now());
             let table_name = self.table_name.clone();
@@ -284,72 +293,16 @@ impl TableViewerPanel {
     }
 
     pub fn refresh(&self, cx: &mut Context<Self>) {
-        if let (Some(connection_id), Some(table_name)) = (self.connection_id, &self.table_name) {
+        if let (Some(_), Some(table_name)) = (self.connection_id, &self.table_name) {
             tracing::info!(
                 "TableViewerPanel: Refreshing table '{}' (driver={:?})",
                 table_name,
                 self.driver_category
             );
-            cx.emit(TableViewerEvent::RefreshTable {
-                connection_id,
-                table_name: table_name.clone(),
-                driver_category: self.driver_category,
-                database_name: self.database_name.clone(),
-            });
+            cx.emit(TableViewerEvent::RefreshTable);
         } else {
             tracing::debug!("Cannot refresh: no table loaded");
         }
-    }
-
-    /// Update the total row count from a background count task.
-    ///
-    /// Called when a `CountCompleted` event arrives after the initial data
-    /// load (for slow-count drivers where the count is decoupled from the
-    /// data query for faster display).
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_total_rows(
-        &mut self,
-        connection_id: Uuid,
-        total_rows: u64,
-        is_estimated: bool,
-        table_name: &str,
-        database_name: Option<&str>,
-        request_generation: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let current_connection_id = self.connection_id;
-        let is_same_connection = current_connection_id == Some(connection_id);
-        let current_table_name = self.table_name.as_deref();
-        let is_same_table = current_table_name == Some(table_name);
-        let current_database_name = self.database_name.as_deref();
-        let is_same_database = current_database_name == database_name;
-        let is_current_request = self.is_current_request(request_generation);
-
-        // Background count completions can arrive after a user has already
-        // switched viewers. Keep the existing stale-update suppression behavior,
-        // but log skip context so asynchronous ownership decisions are observable.
-        if !is_same_connection || !is_same_table || !is_same_database || !is_current_request {
-            tracing::debug!(
-                connection_id = %connection_id,
-                current_connection_id = ?current_connection_id,
-                table_name,
-                current_table_name = ?current_table_name,
-                database_name,
-                current_database_name = ?current_database_name,
-                request_generation,
-                current_request_generation = self.current_request_generation(),
-                "Skipped stale background-count total-row update"
-            );
-            return;
-        }
-        if let Some(ref pagination_state) = self.pagination_state {
-            pagination_state.update(cx, |state, cx| {
-                state.total_records = Some(total_rows);
-                state.is_estimated = is_estimated;
-                cx.notify();
-            });
-        }
-        cx.notify();
     }
 
     pub fn set_auto_commit_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {

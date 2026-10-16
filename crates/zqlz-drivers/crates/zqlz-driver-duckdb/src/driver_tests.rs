@@ -353,3 +353,50 @@ async fn test_duckdb_execute_query() {
     assert_eq!(query_result.columns[0].name, "id");
     assert_eq!(query_result.columns[1].name, "name");
 }
+
+#[tokio::test]
+async fn test_duckdb_reads_temporal_and_nested_values_by_type() {
+    use zqlz_core::Value;
+
+    let driver = DuckDbDriver::new();
+    let conn = driver
+        .connect(&ConnectionConfig::new("duckdb", "Test"))
+        .await
+        .unwrap();
+    let result = conn
+        .query(
+            "SELECT TIMESTAMP '2026-04-01 08:30:00' AS ts,
+                    TIMESTAMPTZ '2026-04-01 08:30:00+00' AS tstz,
+                    DATE '2026-04-01' AS d,
+                    12.50::DECIMAL(12, 2) AS amount,
+                    INTERVAL 30 DAY AS trial,
+                    {'city': 'London', 'n': 3} AS address,
+                    ['vip', 'beta'] AS tags,
+                    MAP {'theme': 'dark'} AS prefs",
+            &[],
+        )
+        .await
+        .unwrap();
+    let row = &result.rows[0].values;
+    let at = chrono::NaiveDate::from_ymd_opt(2026, 4, 1)
+        .unwrap()
+        .and_hms_opt(8, 30, 0)
+        .unwrap();
+    assert_eq!(row[0], Value::DateTime(at));
+    assert_eq!(row[1], Value::DateTimeUtc(at.and_utc()));
+    assert_eq!(row[2], Value::Date(at.date()));
+    assert_eq!(row[3], Value::Decimal("12.50".to_string()));
+    assert_eq!(row[4], Value::String("30 days".to_string()));
+    assert_eq!(
+        row[5],
+        Value::Json(serde_json::json!({"city": "London", "n": 3}))
+    );
+    assert_eq!(
+        row[6],
+        Value::Array(vec![
+            Value::String("vip".into()),
+            Value::String("beta".into())
+        ])
+    );
+    assert_eq!(row[7], Value::Json(serde_json::json!({"theme": "dark"})));
+}

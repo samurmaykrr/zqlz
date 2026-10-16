@@ -124,8 +124,8 @@ impl FilterOperator {
     /// If needs_value is true, the value should be bound as a parameter
     /// If is_pattern is true, the value should be wrapped with % for LIKE
     #[allow(clippy::wrong_self_convention)]
-    pub fn to_sql_fragment(&self, column: &str, value: &str, value2: Option<&str>) -> String {
-        let escaped_col = format!("\"{}\"", column.replace("\"", "\"\""));
+    /// `escaped_col` arrives quoted for the target dialect.
+    pub fn to_sql_fragment(&self, escaped_col: &str, value: &str, value2: Option<&str>) -> String {
         let escaped_val = escape_sql_value(value);
 
         match self {
@@ -180,6 +180,27 @@ impl FilterOperator {
             Self::Custom => value.to_string(),
         }
     }
+}
+
+/// Join the filters that render into one WHERE condition, each joined to the
+/// next by its own logical operator.
+pub fn combine_filter_sql(
+    filters: &[FilterCondition],
+    render: impl Fn(&FilterCondition) -> Option<String>,
+) -> Option<String> {
+    let mut clause = String::new();
+    let mut previous: Option<&FilterCondition> = None;
+    for filter in filters {
+        let Some(sql) = render(filter) else {
+            continue;
+        };
+        if let Some(previous) = previous {
+            clause.push_str(&format!(" {} ", previous.logical_operator.sql()));
+        }
+        clause.push_str(&format!("({sql})"));
+        previous = Some(filter);
+    }
+    (!clause.is_empty()).then_some(clause)
 }
 
 /// Escape a value for SQL (wraps in quotes and escapes internal quotes)
@@ -244,8 +265,17 @@ impl FilterCondition {
         }
     }
 
-    /// Convert this condition to SQL WHERE clause fragment
+    /// Convert this condition to a SQL WHERE fragment with ANSI-quoted columns.
     pub fn to_sql(&self) -> Option<String> {
+        self.to_sql_quoted(&|column| format!("\"{}\"", column.replace('"', "\"\"")))
+    }
+
+    /// Convert this condition to a SQL WHERE fragment quoted for `connection`.
+    pub fn to_sql_for_connection(&self, connection: &dyn Connection) -> Option<String> {
+        self.to_sql_quoted(&|column| connection.quote_identifier(column))
+    }
+
+    fn to_sql_quoted(&self, quote: &dyn Fn(&str) -> String) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -272,8 +302,9 @@ impl FilterCondition {
         }
 
         // Operators that don't require a value
+        let column = quote(column);
         if !self.operator.requires_value() {
-            return Some(self.operator.to_sql_fragment(column, "", None));
+            return Some(self.operator.to_sql_fragment(&column, "", None));
         }
 
         // Need a value for value-based operators
@@ -283,7 +314,7 @@ impl FilterCondition {
 
         Some(
             self.operator
-                .to_sql_fragment(column, &self.value, self.value2.as_deref()),
+                .to_sql_fragment(&column, &self.value, self.value2.as_deref()),
         )
     }
 
@@ -548,29 +579,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn filters_join_by_their_own_logical_operator() {
+        let filter = |id, column: &str, value: &str, logical_operator| FilterCondition {
+            column: Some(column.to_string()),
+            value: value.to_string(),
+            logical_operator,
+            ..FilterCondition::new(id)
+        };
+        let filters = [
+            filter(1, "a", "1", LogicalOperator::Or),
+            filter(2, "b", "2", LogicalOperator::And),
+            FilterCondition::new(3),
+            filter(4, "c", "3", LogicalOperator::And),
+        ];
+
+        assert_eq!(
+            combine_filter_sql(&filters, |filter| filter
+                .to_sql_quoted(&|column| format!("`{column}`"))),
+            Some("(`a` = 1) OR (`b` = 2) AND (`c` = 3)".to_string())
+        );
+        assert_eq!(combine_filter_sql(&[], FilterCondition::to_sql), None);
+    }
+
+    #[test]
     fn test_filter_operator_to_sql() {
         assert_eq!(
-            FilterOperator::Equal.to_sql_fragment("name", "John", None),
+            FilterOperator::Equal.to_sql_fragment("\"name\"", "John", None),
             "\"name\" = 'John'"
         );
         assert_eq!(
-            FilterOperator::Equal.to_sql_fragment("age", "25", None),
+            FilterOperator::Equal.to_sql_fragment("\"age\"", "25", None),
             "\"age\" = 25"
         );
         assert_eq!(
-            FilterOperator::Contains.to_sql_fragment("name", "test", None),
+            FilterOperator::Contains.to_sql_fragment("\"name\"", "test", None),
             "\"name\" LIKE '%test%'"
         );
         assert_eq!(
-            FilterOperator::IsNull.to_sql_fragment("name", "", None),
+            FilterOperator::IsNull.to_sql_fragment("\"name\"", "", None),
             "\"name\" IS NULL"
         );
         assert_eq!(
-            FilterOperator::IsBetween.to_sql_fragment("age", "18", Some("65")),
+            FilterOperator::IsBetween.to_sql_fragment("\"age\"", "18", Some("65")),
             "\"age\" BETWEEN 18 AND 65"
         );
         assert_eq!(
-            FilterOperator::IsInList.to_sql_fragment("status", "active, pending, done", None),
+            FilterOperator::IsInList.to_sql_fragment("\"status\"", "active, pending, done", None),
             "\"status\" IN ('active', 'pending', 'done')"
         );
     }

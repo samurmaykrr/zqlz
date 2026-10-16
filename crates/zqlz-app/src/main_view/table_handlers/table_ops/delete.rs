@@ -1,8 +1,7 @@
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::ConnectionScope;
+use zqlz_core::TableRef;
 use zqlz_services::DeleteTablesRequest;
-use zqlz_table_workflows::DeleteTablesDecision;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
@@ -13,52 +12,14 @@ use crate::main_view::table_handlers::table_ops::notify_table_operation_error;
 use crate::workspace_state::RefreshScope;
 
 impl MainView {
-    #[allow(dead_code)]
-    pub(in crate::main_view) fn delete_table(
-        &mut self,
-        connection_id: Uuid,
-        table_name: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!(
-            "Delete table: {} on connection {}",
-            table_name,
-            connection_id
-        );
-
-        let Some(decision) =
-            self.decide_delete_tables_workflow(connection_id, vec![table_name], window, cx)
-        else {
-            return;
-        };
-
-        let single_decision = match decision {
-            DeleteTablesDecision::Single(single_decision) => single_decision,
-            DeleteTablesDecision::Batch(_) => {
-                tracing::warn!(
-                    connection_id = %connection_id,
-                    "Single-table delete request produced a batch decision"
-                );
-                return;
-            }
-        };
-
-        self.open_delete_table_dialog(
-            single_decision.connection_id,
-            single_decision.table_name,
-            window,
-            cx,
-        );
-    }
-
     fn open_delete_table_dialog(
         &mut self,
         connection_id: Uuid,
-        table_name: String,
+        table: TableRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let table_name = table.name.clone();
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
             return;
@@ -69,11 +30,6 @@ impl MainView {
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let table_name_for_dialog = table_name.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection_service = connection_service.clone();
@@ -81,7 +37,7 @@ impl MainView {
             let window_handle = window_handle;
             let main_view = main_view.clone();
             let table_name = table_name_for_dialog.clone();
-            let target_database = target_database.clone();
+            let table = table.clone();
 
             dialog
                 .title("Delete Table")
@@ -113,14 +69,11 @@ impl MainView {
                     let table_service = table_service.clone();
                     let main_view = main_view.clone();
                     let table_name = table_name.clone();
-                    let target_database = target_database.clone();
+                    let table = table.clone();
 
                     cx.spawn(async move |cx| {
-                        let scope = target_database
-                            .map(ConnectionScope::Database)
-                            .unwrap_or(ConnectionScope::Default);
                         let resolved_connection = match connection_service
-                            .resolve_connection(connection_id, scope)
+                            .resolve_connection(connection_id, table.scope())
                             .await
                         {
                             Ok(resolved_connection) => resolved_connection,
@@ -139,9 +92,8 @@ impl MainView {
                             .delete_tables(
                                 resolved_connection.connection,
                                 DeleteTablesRequest {
-                                    table_names: vec![table_name.clone()],
+                                    tables: vec![table],
                                     continue_on_error: false,
-                                    namespace: resolved_connection.effective_namespace,
                                 },
                             )
                             .await;
@@ -204,7 +156,7 @@ impl MainView {
     pub(in crate::main_view) fn delete_tables(
         &mut self,
         connection_id: Uuid,
-        table_names: Vec<String>,
+        tables: Vec<TableRef>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -212,27 +164,15 @@ impl MainView {
         use std::rc::Rc;
         use zqlz_ui::widgets::checkbox::Checkbox;
 
-        let Some(decision) =
-            self.decide_delete_tables_workflow(connection_id, table_names, window, cx)
-        else {
+        if let [table] = tables.as_slice() {
+            self.open_delete_table_dialog(connection_id, table.clone(), window, cx);
+            return;
+        }
+        // ponytail: one connection per batch; the objects panel lists one database at a time.
+        let Some(scope) = tables.first().map(TableRef::scope) else {
             return;
         };
-
-        let batch_decision = match decision {
-            DeleteTablesDecision::Single(single_decision) => {
-                self.open_delete_table_dialog(
-                    single_decision.connection_id,
-                    single_decision.table_name,
-                    window,
-                    cx,
-                );
-                return;
-            }
-            DeleteTablesDecision::Batch(batch_decision) => batch_decision,
-        };
-
-        let connection_id = batch_decision.connection_id;
-        let table_names = batch_decision.table_names;
+        let table_names: Vec<String> = tables.iter().map(|table| table.name.clone()).collect();
         let count = table_names.len();
 
         tracing::info!(
@@ -252,13 +192,8 @@ impl MainView {
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
 
-        let continue_on_error = Rc::new(RefCell::new(batch_decision.continue_on_error_default));
+        let continue_on_error = Rc::new(RefCell::new(false));
 
         let title = if count == 1 {
             "Delete Table".to_string()
@@ -274,7 +209,8 @@ impl MainView {
             let table_service = table_service.clone();
             let schema_service = schema_service.clone();
             let table_names = table_names.clone();
-            let target_database = target_database.clone();
+            let tables = tables.clone();
+            let scope = scope.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
 
@@ -301,7 +237,7 @@ impl MainView {
                             let continue_on_error = continue_on_error.clone();
                             Checkbox::new("continue-on-error")
                                 .label("Continue on error")
-                                .checked(batch_decision.continue_on_error_default)
+                                .checked(false)
                                 .on_click(move |checked, _window, _cx| {
                                     *continue_on_error.borrow_mut() = *checked;
                                 })
@@ -320,13 +256,11 @@ impl MainView {
                     let table_service = table_service.clone();
                     let schema_service = schema_service.clone();
                     let table_names = table_names.clone();
-                    let target_database = target_database.clone();
+                    let tables = tables.clone();
+                    let scope = scope.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
                     cx.spawn(async move |cx| {
-                        let scope = target_database
-                            .map(ConnectionScope::Database)
-                            .unwrap_or(ConnectionScope::Default);
                         let resolved_connection = match connection_service
                             .resolve_connection(connection_id, scope)
                             .await
@@ -347,9 +281,8 @@ impl MainView {
                             .delete_tables(
                                 resolved_connection.connection,
                                 DeleteTablesRequest {
-                                    table_names: table_names.clone(),
+                                    tables,
                                     continue_on_error,
-                                    namespace: resolved_connection.effective_namespace,
                                 },
                             )
                             .await;

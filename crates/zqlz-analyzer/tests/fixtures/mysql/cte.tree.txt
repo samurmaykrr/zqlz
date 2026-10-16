@@ -1,0 +1,6 @@
+-> Table scan on c  (cost=32742..32744 rows=5)
+    -> Materialize CTE c  (cost=32742..32742 rows=5)
+        -> Filter: (count(0) > 1)  (cost=32741 rows=5)
+            -> Group aggregate: count(0)  (cost=32741 rows=5)
+                -> Covering index scan on orders_orders using fk_order_status  (cost=17522 rows=152189)
+

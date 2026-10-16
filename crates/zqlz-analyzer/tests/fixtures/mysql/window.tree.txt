@@ -1,0 +1,5 @@
+-> Limit: 5 row(s)  (cost=0 rows=5)
+    -> Window aggregate: row_number() OVER (PARTITION BY orders_orders.tenant_id ORDER BY orders_orders.order_timestamp )   (cost=0 rows=152189)
+        -> Sort: orders_orders.tenant_id, orders_orders.order_timestamp  (cost=17522 rows=152189)
+            -> Covering index scan on orders_orders using idx_orders_tenant_time  (cost=17522 rows=152189)
+

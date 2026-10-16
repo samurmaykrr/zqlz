@@ -2,40 +2,21 @@
 
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::TableRef;
 
 use crate::main_view::MainView;
 
 impl MainView {
-    /// Opens multiple tables in the table viewer
+    /// Opens each table in its own viewer tab.
     pub(in crate::main_view) fn open_tables(
         &mut self,
         connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
-        is_view: bool,
+        tables: Vec<TableRef>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(decision) = self.decide_open_tables_workflow(
-            connection_id,
-            table_names,
-            database_name,
-            is_view,
-            window,
-            cx,
-        ) else {
-            return;
-        };
-
-        for request in decision.requests {
-            self.open_table_viewer(
-                request.connection_id,
-                request.table_name,
-                request.database_name,
-                request.is_view,
-                window,
-                cx,
-            );
+        for table in tables {
+            self.open_table_viewer(connection_id, table, window, cx);
         }
     }
 }

@@ -1,6 +1,7 @@
 use zqlz_core::{
     format_qualified_object_name, parse_redis_database_index, ObjectFormAction, ObjectFormMode,
     ObjectType, ObjectsPanelAction as ManifestAction, ObjectsPanelManifest, ObjectsPanelObjectRef,
+    TableRef,
 };
 use zqlz_versioning::DatabaseObjectType;
 
@@ -40,6 +41,18 @@ pub fn schema_qualified_action_name(object_ref: &ObjectsPanelObjectRef) -> Strin
             }
         })
         .unwrap_or_else(|| object_ref.name.clone())
+}
+
+/// The table an objects-panel row names.
+fn table_ref(object_ref: &ObjectsPanelObjectRef, database_name: Option<&String>) -> TableRef {
+    TableRef::from_listing(
+        object_ref
+            .database
+            .clone()
+            .or_else(|| database_name.cloned()),
+        object_ref.schema.clone(),
+        &object_ref.name,
+    )
 }
 
 pub fn object_type_for_kind_id(kind_id: &str) -> Option<ObjectType> {
@@ -655,19 +668,14 @@ impl SelectionActionBinding {
             .iter()
             .map(|object_ref| object_ref.name.clone())
             .collect();
-        let qualified_names: Vec<String> = object_refs
+        let tables: Vec<TableRef> = object_refs
             .iter()
-            .map(schema_qualified_action_name)
+            .map(|object_ref| table_ref(object_ref, database_name.as_ref()))
             .collect();
-
         match self {
-            Self::OpenTable => ResolvedObjectsPanelAction::OpenTables {
-                object_names: qualified_names,
-                database_name,
-            },
-            Self::OpenView => ResolvedObjectsPanelAction::OpenViews {
-                object_names: qualified_names,
-                database_name,
+            Self::OpenTable => ResolvedObjectsPanelAction::OpenTables { tables },
+            Self::OpenView => ResolvedObjectsPanelAction::OpenTables {
+                tables: tables.into_iter().map(TableRef::view).collect(),
             },
             Self::OpenRoutine => routine_plan(
                 object_refs,
@@ -708,9 +716,7 @@ impl SelectionActionBinding {
                     })
                 })
                 .unwrap_or(ResolvedObjectsPanelAction::Noop),
-            Self::DesignTable => ResolvedObjectsPanelAction::DesignTables {
-                object_names: names,
-            },
+            Self::DesignTable => ResolvedObjectsPanelAction::DesignTables { tables },
             Self::DesignView => ResolvedObjectsPanelAction::DesignViews {
                 object_names: names,
             },
@@ -742,15 +748,14 @@ impl SelectionActionBinding {
             Self::OpenTriggerDdl => selected_ref_plan(object_refs, |trigger_ref| {
                 ResolvedObjectsPanelAction::OpenTriggerDdl { trigger_ref }
             }),
-            Self::RenameTable => single_name_plan(object_refs, |table_name| {
-                ResolvedObjectsPanelAction::RenameTable { table_name }
-            }),
+            Self::RenameTable => match <[TableRef; 1]>::try_from(tables) {
+                Ok([table]) => ResolvedObjectsPanelAction::RenameTable { table },
+                Err(_) => ResolvedObjectsPanelAction::Noop,
+            },
             Self::RenameView => single_name_plan(object_refs, |view_name| {
                 ResolvedObjectsPanelAction::RenameView { view_name }
             }),
-            Self::DeleteTable => ResolvedObjectsPanelAction::DeleteTables {
-                object_names: names,
-            },
+            Self::DeleteTable => ResolvedObjectsPanelAction::DeleteTables { tables },
             Self::DeleteView => ResolvedObjectsPanelAction::DeleteViews {
                 object_names: names,
             },
@@ -761,21 +766,11 @@ impl SelectionActionBinding {
             Self::DeleteTrigger => selected_ref_plan(object_refs, |trigger_ref| {
                 ResolvedObjectsPanelAction::DeleteTrigger { trigger_ref }
             }),
-            Self::DuplicateTable => ResolvedObjectsPanelAction::DuplicateTables {
-                object_names: names,
-            },
+            Self::DuplicateTable => ResolvedObjectsPanelAction::DuplicateTables { tables },
             Self::DuplicateView => ResolvedObjectsPanelAction::DuplicateViews {
                 object_names: names,
             },
-            Self::EmptyTable => {
-                if names.len() == 1 {
-                    ResolvedObjectsPanelAction::EmptyTable {
-                        table_name: names[0].clone(),
-                    }
-                } else {
-                    ResolvedObjectsPanelAction::EmptyTables { table_names: names }
-                }
-            }
+            Self::EmptyTable => ResolvedObjectsPanelAction::EmptyTables { tables },
             Self::ImportTable => object_refs
                 .first()
                 .map(|object_ref| ResolvedObjectsPanelAction::ImportTable {
@@ -898,12 +893,7 @@ pub enum ResolvedObjectsPanelAction {
         collection_name: String,
     },
     OpenTables {
-        object_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    OpenViews {
-        object_names: Vec<String>,
-        database_name: Option<String>,
+        tables: Vec<TableRef>,
     },
     OpenFunction {
         function_ref: SelectedObjectRef,
@@ -918,7 +908,7 @@ pub enum ResolvedObjectsPanelAction {
         sequence_ref: SelectedObjectRef,
     },
     DesignTables {
-        object_names: Vec<String>,
+        tables: Vec<TableRef>,
     },
     DesignViews {
         object_names: Vec<String>,
@@ -946,10 +936,10 @@ pub enum ResolvedObjectsPanelAction {
         view_name: String,
     },
     RenameTable {
-        table_name: String,
+        table: TableRef,
     },
     DeleteTables {
-        object_names: Vec<String>,
+        tables: Vec<TableRef>,
     },
     DeleteViews {
         object_names: Vec<String>,
@@ -964,16 +954,13 @@ pub enum ResolvedObjectsPanelAction {
         trigger_ref: SelectedObjectRef,
     },
     DuplicateTables {
-        object_names: Vec<String>,
+        tables: Vec<TableRef>,
     },
     DuplicateViews {
         object_names: Vec<String>,
     },
-    EmptyTable {
-        table_name: String,
-    },
     EmptyTables {
-        table_names: Vec<String>,
+        tables: Vec<TableRef>,
     },
     ImportTable {
         table_name: String,
@@ -1351,8 +1338,11 @@ mod tests {
                 Some("main".to_string()),
             ),
             ResolvedObjectsPanelAction::OpenTables {
-                object_names: vec!["public.users".to_string()],
-                database_name: Some("main".to_string()),
+                tables: vec![TableRef::new(
+                    Some("main".to_string()),
+                    Some("public".to_string()),
+                    "users"
+                )],
             }
         );
     }

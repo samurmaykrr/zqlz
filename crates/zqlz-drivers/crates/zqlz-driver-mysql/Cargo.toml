@@ -17,7 +17,7 @@ zqlz-analyzer.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time"] }
 mysql_async.workspace = true
 chrono.workspace = true
 uuid.workspace = true

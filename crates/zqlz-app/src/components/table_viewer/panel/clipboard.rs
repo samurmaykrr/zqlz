@@ -175,13 +175,13 @@ impl TableViewerPanel {
             return;
         };
 
-        let Some(connection_id) = self.connection_id else {
+        if self.connection_id.is_none() {
             return;
-        };
+        }
 
-        let Some(table_name) = &self.table_name else {
+        if self.table_name.is_none() {
             return;
-        };
+        }
 
         let Some(clipboard_item) = cx.read_from_clipboard() else {
             tracing::warn!("No clipboard data available");
@@ -282,8 +282,6 @@ impl TableViewerPanel {
                         .unwrap_or(CellValue::Null);
 
                     cx.emit(TableViewerEvent::SaveCell {
-                        table_name: table_name.clone(),
-                        connection_id,
                         row: target_row,
                         col: col_idx,
                         column_name,

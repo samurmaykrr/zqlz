@@ -20,6 +20,9 @@ use zqlz_ui::widgets::{
 use crate::events::TriggerDesignerEvent;
 use crate::models::{DatabaseDialect, TriggerDesign, TriggerEvent, TriggerTiming};
 
+#[cfg(test)]
+mod render_tests;
+
 /// Active tab in the trigger designer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DesignerTab {
@@ -463,15 +466,25 @@ impl TriggerDesignerPanel {
                 };
                 cx.notify();
             }))
-            .child(Tab::new().label("General"))
             .child(
-                Tab::new().label(if self.design.dialect.uses_trigger_function() {
-                    "Function Body"
-                } else {
-                    "Body"
-                }),
+                Tab::new()
+                    .label("General")
+                    .debug_selector(|| "tab:general".to_string()),
             )
-            .child(Tab::new().label("SQL Preview"))
+            .child(
+                Tab::new()
+                    .label(if self.design.dialect.uses_trigger_function() {
+                        "Function Body"
+                    } else {
+                        "Body"
+                    })
+                    .debug_selector(|| "tab:body".to_string()),
+            )
+            .child(
+                Tab::new()
+                    .label("SQL Preview")
+                    .debug_selector(|| "tab:sql-preview".to_string()),
+            )
     }
 
     fn render_general_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -492,6 +505,7 @@ impl TriggerDesignerPanel {
 
         v_flex()
             .id("general-tab-content")
+            .debug_selector(|| "panel:general-tab".to_string())
             .size_full()
             .p_4()
             .gap_4()
@@ -637,23 +651,26 @@ impl TriggerDesignerPanel {
         h_flex()
             .gap_2()
             .items_center()
-            .child(Checkbox::new(id).checked(checked).on_click(cx.listener(
-                move |this, _, _window, cx| {
-                    if multi {
-                        match event {
-                            TriggerEvent::Insert => this.insert_checked = !this.insert_checked,
-                            TriggerEvent::Update => this.update_checked = !this.update_checked,
-                            TriggerEvent::Delete => this.delete_checked = !this.delete_checked,
-                            TriggerEvent::Truncate => {
-                                this.truncate_checked = !this.truncate_checked
+            .child(
+                Checkbox::new(id)
+                    .checked(checked)
+                    .debug_selector(move || format!("checkbox:{id}"))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if multi {
+                            match event {
+                                TriggerEvent::Insert => this.insert_checked = !this.insert_checked,
+                                TriggerEvent::Update => this.update_checked = !this.update_checked,
+                                TriggerEvent::Delete => this.delete_checked = !this.delete_checked,
+                                TriggerEvent::Truncate => {
+                                    this.truncate_checked = !this.truncate_checked
+                                }
                             }
+                            this.mark_dirty(cx);
+                        } else {
+                            this.set_single_event(event, cx);
                         }
-                        this.mark_dirty(cx);
-                    } else {
-                        this.set_single_event(event, cx);
-                    }
-                },
-            )))
+                    })),
+            )
             .child(div().text_sm().child(label))
     }
 
@@ -839,6 +856,8 @@ impl TriggerDesignerPanel {
         };
 
         v_flex()
+            .id("body-tab-content")
+            .debug_selector(|| "panel:body-tab".to_string())
             .size_full()
             .p_4()
             .gap_2()
@@ -893,6 +912,7 @@ impl TriggerDesignerPanel {
             .child(
                 div()
                     .id("sql-preview")
+                    .debug_selector(|| "panel:sql-preview-tab".to_string())
                     .flex_1()
                     .w_full()
                     .overflow_scroll()
@@ -961,6 +981,7 @@ impl TriggerDesignerPanel {
                             .label("Cancel")
                             .small()
                             .ghost()
+                            .debug_selector(|| "button:cancel".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.handle_cancel(cx);
                             })),
@@ -975,6 +996,7 @@ impl TriggerDesignerPanel {
                             .small()
                             .primary()
                             .disabled(!is_valid || !self.is_dirty)
+                            .debug_selector(|| "button:save".to_string())
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.handle_save(cx);
                             })),

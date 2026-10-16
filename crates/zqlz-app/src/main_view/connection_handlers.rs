@@ -486,12 +486,7 @@ async fn run_connection_sidebar_bootstrap(
                     .unwrap_or(0);
                 cx.spawn(async move |cx| {
                     match connection_service
-                        .load_objects_panel_kind_data(
-                            connection_id,
-                            target_database,
-                            "table",
-                            None,
-                        )
+                        .load_objects_panel_kind_data(connection_id, target_database, "table", None)
                         .await
                     {
                         Ok(data) => {
@@ -581,6 +576,7 @@ fn apply_relational_sidebar_bootstrap_payload(
     let table_names = bootstrap.table_names.clone();
 
     if let Err(error) = sidebar.update_in(cx, |sidebar, _window, cx| {
+        sidebar.set_object_capabilities(connection_id, bootstrap.object_capabilities, cx);
         sidebar.set_tables_only(
             connection_id,
             table_names.clone(),
@@ -893,7 +889,7 @@ impl MainView {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to connect: {}", e);
+                    tracing::debug!(connection_id = %id, error = %e, "connect failed; reported to the user");
 
                     // Clear connecting state in both workspace and sidebar.
                     if let Err(error) = this.update(cx, |main_view, cx| {

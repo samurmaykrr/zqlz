@@ -2,6 +2,9 @@
 //!
 //! A panel for viewing and editing application settings.
 
+#[cfg(test)]
+mod render_tests;
+
 use crate::{
     AiProvider, CursorBlink, CursorShape, InlineSuggestionProvider, ScrollBeyondLastLine,
     ScrollbarVisibility, SearchWrap, ThemeModePreference, ZqlzSettings,
@@ -940,12 +943,16 @@ impl SettingsPanel {
 
     fn render_group(
         &self,
-        _title: &str,
+        title: &str,
         _description: Option<&str>,
         content: impl IntoElement,
         _cx: &Context<Self>,
     ) -> impl IntoElement {
-        v_flex().w_full().gap_4().child(content)
+        v_flex()
+            .w_full()
+            .gap_4()
+            .debug_selector(|| format!("settings-section:{title}"))
+            .child(content)
     }
 
     fn render_subsection_header(&self, title: &str, cx: &Context<Self>) -> impl IntoElement {
@@ -973,6 +980,7 @@ impl SettingsPanel {
             .gap_4()
             .items_start()
             .justify_between()
+            .debug_selector(|| format!("setting-row:{label}"))
             .child(
                 v_flex()
                     .flex_1()
@@ -1018,6 +1026,7 @@ impl SettingsPanel {
             .gap_4()
             .items_start()
             .justify_between()
+            .debug_selector(|| format!("toggle-row:{label}"))
             // Make the entire row clickable so there are no dead zones between
             // the label text and the switch control.
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
@@ -1781,6 +1790,17 @@ impl SettingsPanel {
                     cx,
                 ))
                 .child(self.render_toggle_row(
+                    "continue-on-error",
+                    "Continue on Error",
+                    Some("Keep running the remaining statements after one fails"),
+                    settings.connections.continue_on_error,
+                    |checked, _, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.connections.continue_on_error = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
                     "fetch-schema-on-connect",
                     "Fetch Schema on Connect",
                     Some("Automatically load database schema when connecting"),
@@ -1850,6 +1870,7 @@ impl SettingsPanel {
 
         h_flex()
             .id(format!("settings-sidebar-item-{}", page.title()))
+            .debug_selector(|| format!("settings-page:{}", page.title()))
             .w_full()
             .h_8()
             .px_2()

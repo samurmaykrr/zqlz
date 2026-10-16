@@ -43,6 +43,11 @@ line_comment = "--"
 block_comment_start = "/*"
 block_comment_end = "*/"
 
+[auto_increment]
+keyword = "AUTOINCREMENT"
+style = "suffix"
+description = "Only valid for INTEGER PRIMARY KEY. Ensures unique rowid even after deletion."
+
 [syntax_quality]
 text = """
 CREATE TABLE "categories" (

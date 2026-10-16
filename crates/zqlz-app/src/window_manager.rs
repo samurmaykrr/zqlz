@@ -1,7 +1,7 @@
 //! Main-window helpers and actions.
 
 use gpui::{
-    AnyWindowHandle, App, Entity, Global, Window, WindowBounds, WindowId, WindowKind,
+    AnyWindowHandle, App, Entity, Global, TaskExt as _, Window, WindowBounds, WindowId, WindowKind,
     WindowOptions, px, size,
 };
 use std::collections::HashMap;

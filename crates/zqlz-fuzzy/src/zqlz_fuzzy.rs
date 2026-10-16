@@ -247,14 +247,23 @@ impl FuzzyMatcher {
                 // Can we match pattern[i-1] to candidate[j-1]?
                 if pattern[i - 1] == candidate[j - 1] {
                     // Score if previous pattern char was also matched at j-2 (consecutive).
-                    let from_consecutive = if i >= 2 && j >= 2 {
+                    // Guarding on `> NEG_INF` stops an impossible predecessor state from
+                    // leaking through as a slightly-less-negative "valid" score — without
+                    // it, repeated saturating_add calls drift an unreachable NEG_INF state
+                    // upward until it clears the `final_score <= NEG_INF` rejection below.
+                    let from_consecutive = if i >= 2 && j >= 2 && matched[i - 1][j - 1] > NEG_INF
+                    {
                         matched[i - 1][j - 1].saturating_add(match_score + consecutive_bonus)
                     } else {
                         NEG_INF
                     };
 
                     // Score if previous match was not consecutive (came from a skip).
-                    let from_skipped = skipped[i - 1][j - 1].saturating_add(match_score);
+                    let from_skipped = if skipped[i - 1][j - 1] > NEG_INF {
+                        skipped[i - 1][j - 1].saturating_add(match_score)
+                    } else {
+                        NEG_INF
+                    };
 
                     // Also from matched but at an earlier position (non-consecutive).
                     let from_matched_non_consec = if i >= 2 {
@@ -397,6 +406,27 @@ mod tests {
         let matcher = FuzzyMatcher::new(false);
         let result = matcher.fuzzy_match("xyz", "SELECT").unwrap();
 
+        assert_eq!(result.quality, MatchQuality::None);
+        assert!(!result.is_match());
+    }
+
+    /// Regression test for a DP scoring bug: `match_fuzzy`'s recurrence added
+    /// bonuses on top of an already-`NEG_INF` (impossible) predecessor state
+    /// via `saturating_add` without checking it was still `NEG_INF` first.
+    /// Repeated additions drifted the sentinel up (e.g. `NEG_INF + 8`) until
+    /// it cleared the `final_score <= NEG_INF` rejection, so a pattern with
+    /// no valid subsequence in the candidate could still come back as a
+    /// `Fuzzy` match. "alph" has no valid subsequence in "Beta Three" (its
+    /// only 'l' would have to appear after an 'a', but "Beta Three" has none).
+    #[test]
+    fn test_fuzzy_match_rejects_pattern_with_no_valid_subsequence() {
+        let matcher = FuzzyMatcher::new(false);
+        let result = matcher.fuzzy_match("alph", "Beta Three").unwrap();
+
+        assert_eq!(result.quality, MatchQuality::None);
+        assert!(!result.is_match());
+
+        let result = matcher.fuzzy_match("alpha", "Beta Three").unwrap();
         assert_eq!(result.quality, MatchQuality::None);
         assert!(!result.is_match());
     }

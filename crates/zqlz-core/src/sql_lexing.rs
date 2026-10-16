@@ -13,6 +13,31 @@ pub struct SqlProtectedRange {
     pub kind: SqlProtectedRangeKind,
 }
 
+/// How a script is tokenized. MySQL differs from the standard rules in ways that change where
+/// statements end: `#` comments, backslash escapes inside strings, `--` needing trailing
+/// whitespace, no dollar quoting (so `$$` can be a `DELIMITER`), and no `[bracket]` identifiers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SqlLexDialect {
+    #[default]
+    Standard,
+    MySql,
+}
+
+impl SqlLexDialect {
+    /// Maps a dialect id / syntax profile (`"mysql"`, `"mariadb"`, ...) to its lexing rules.
+    pub fn from_profile(profile: &str) -> Self {
+        if profile.eq_ignore_ascii_case("mysql") || profile.eq_ignore_ascii_case("mariadb") {
+            Self::MySql
+        } else {
+            Self::Standard
+        }
+    }
+
+    pub fn from_profile_id(profile: Option<&str>) -> Self {
+        profile.map_or(Self::Standard, Self::from_profile)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SqlStatementSpan {
     pub start: usize,
@@ -79,12 +104,50 @@ pub fn sql_protected_ranges_with_unclosed_dollar_strings(
     sql: &str,
     include_unclosed_dollar_strings: bool,
 ) -> Vec<SqlProtectedRange> {
+    protected_ranges(sql, include_unclosed_dollar_strings, SqlLexDialect::Standard)
+}
+
+pub fn sql_protected_ranges_for_dialect(
+    sql: &str,
+    dialect: SqlLexDialect,
+) -> Vec<SqlProtectedRange> {
+    protected_ranges(sql, false, dialect)
+}
+
+fn protected_ranges(
+    sql: &str,
+    include_unclosed_dollar_strings: bool,
+    dialect: SqlLexDialect,
+) -> Vec<SqlProtectedRange> {
     let bytes = sql.as_bytes();
     let mut ranges = Vec::new();
     let mut index = 0usize;
+    let mysql = dialect == SqlLexDialect::MySql;
 
     while index < bytes.len() {
         match bytes[index] {
+            b'\'' | b'"' if mysql => {
+                let end = skip_mysql_quoted_string(bytes, index + 1, bytes[index]);
+                ranges.push(SqlProtectedRange {
+                    start: index,
+                    end,
+                    kind: if bytes[index] == b'\'' {
+                        SqlProtectedRangeKind::StringLiteral
+                    } else {
+                        SqlProtectedRangeKind::QuotedIdentifier
+                    },
+                });
+                index = end;
+            }
+            b'#' if mysql => {
+                let end = skip_line_comment(bytes, index + 1);
+                ranges.push(SqlProtectedRange {
+                    start: index,
+                    end,
+                    kind: SqlProtectedRangeKind::Comment,
+                });
+                index = end;
+            }
             b'N' | b'n'
                 if bytes.get(index + 1) == Some(&b'\'')
                     && !is_identifier_tail(bytes.get(index.wrapping_sub(1)).copied()) =>
@@ -116,7 +179,7 @@ pub fn sql_protected_ranges_with_unclosed_dollar_strings(
                 });
                 index = end;
             }
-            b'[' => {
+            b'[' if !mysql => {
                 let end = skip_bracket_quoted_identifier(bytes, index + 1);
                 ranges.push(SqlProtectedRange {
                     start: index,
@@ -125,7 +188,11 @@ pub fn sql_protected_ranges_with_unclosed_dollar_strings(
                 });
                 index = end;
             }
-            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+            // MySQL only starts a `--` comment before whitespace or a control character, so
+            // `SELECT 1--1` is `1 - -1`.
+            b'-' if bytes.get(index + 1) == Some(&b'-')
+                && (!mysql || bytes.get(index + 2).is_none_or(|byte| *byte <= b' ')) =>
+            {
                 let end = skip_line_comment(bytes, index + 2);
                 ranges.push(SqlProtectedRange {
                     start: index,
@@ -143,7 +210,7 @@ pub fn sql_protected_ranges_with_unclosed_dollar_strings(
                 });
                 index = end;
             }
-            b'$' => {
+            b'$' if !mysql => {
                 let Some(delimiter_end) = dollar_quote_delimiter_end(bytes, index) else {
                     index += 1;
                     continue;
@@ -208,7 +275,11 @@ pub fn sql_protected_range_at<'a>(
 }
 
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
-    split_sql_statement_spans(sql)
+    split_sql_statements_for_dialect(sql, SqlLexDialect::Standard)
+}
+
+pub fn split_sql_statements_for_dialect(sql: &str, dialect: SqlLexDialect) -> Vec<String> {
+    split_sql_statement_spans_for_dialect(sql, dialect)
         .into_iter()
         .map(|span| sql[span.start..span.end].to_string())
         .collect()
@@ -821,6 +892,16 @@ fn routine_body_end(
             continue;
         }
 
+        // `@end`, `@@begin` and `t.end` name a variable or column, not a block keyword.
+        if bytes[index] == b'@' || bytes[index] == b'.' {
+            index += 1;
+            while is_identifier_tail(bytes.get(index).copied()) || bytes.get(index) == Some(&b'@')
+            {
+                index += 1;
+            }
+            continue;
+        }
+
         if is_identifier_start(bytes.get(index).copied()) {
             let word_start = index;
             index += 1;
@@ -856,6 +937,15 @@ fn routine_body_end(
 
                 depth = depth.saturating_sub(1);
                 if saw_block && depth == 0 {
+                    // `lbl: BEGIN ... END lbl;` — the closing label belongs to the body.
+                    if let Some((_, label_end)) = next_word(sql, index, protected_ranges)
+                        && matches!(
+                            next_non_space(sql, label_end, protected_ranges),
+                            None | Some(b';')
+                        )
+                    {
+                        index = label_end;
+                    }
                     return Some(index);
                 }
             }
@@ -870,6 +960,28 @@ fn routine_body_end(
     }
 
     saw_block.then_some(sql.len())
+}
+
+/// The next byte at or after `from` that is neither whitespace nor part of a protected range.
+fn next_non_space(sql: &str, from: usize, protected_ranges: &[SqlProtectedRange]) -> Option<u8> {
+    let bytes = sql.as_bytes();
+    let mut index = from;
+    let mut protected_range_index = 0usize;
+    while index < bytes.len() {
+        if let Some(range) = sql_protected_range_at(index, protected_ranges, &mut protected_range_index)
+        {
+            if range.kind == SqlProtectedRangeKind::Comment {
+                index = range.end;
+                continue;
+            }
+            return Some(bytes[index]);
+        }
+        if !bytes[index].is_ascii_whitespace() {
+            return Some(bytes[index]);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// The next identifier-like word at or after `from`, with the offset just past it, skipping
@@ -912,11 +1024,28 @@ fn next_word<'a>(
 }
 
 pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
+    split_sql_statement_spans_for_dialect(sql, SqlLexDialect::Standard)
+}
+
+/// Splits a script into statement spans (byte offsets into `sql`).
+///
+/// Honours the client-side `DELIMITER <token>` directive (mysql CLI / Workbench / DataGrip):
+/// a line starting with it, before any statement text, changes the terminator until the next
+/// directive. Directive lines are not part of any span, and spans never include the
+/// terminator, so offsets always index the original script. Comment-only fragments are not
+/// statements.
+pub fn split_sql_statement_spans_for_dialect(
+    sql: &str,
+    dialect: SqlLexDialect,
+) -> Vec<SqlStatementSpan> {
     let mut statements = Vec::new();
-    let protected_ranges = sql_protected_ranges(sql);
+    let protected_ranges = protected_ranges(sql, false, dialect);
     let mut protected_range_index = 0usize;
     let mut statement_start = None::<(usize, usize, usize)>;
     let mut statement_end = None::<(usize, usize, usize)>;
+    // Whether the pending statement has anything but comments in it.
+    let mut has_code = false;
+    let mut delimiter = ";";
     let mut index = 0usize;
     let mut line = 0usize;
     let mut column = 0usize;
@@ -933,7 +1062,21 @@ pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
             if !protected_text.trim().is_empty() {
                 statement_end = Some((protected_range.end, line, column));
             }
+            // `/*! ... */` is executed by MySQL; any other comment is not code.
+            has_code |= protected_range.kind != SqlProtectedRangeKind::Comment
+                || protected_text.starts_with("/*!");
             index = protected_range.end;
+            continue;
+        }
+
+        if !has_code
+            && let Some((token, directive_end)) = delimiter_directive(sql, index)
+        {
+            delimiter = token;
+            statement_start = None;
+            statement_end = None;
+            advance_text_position(&sql[index..directive_end], &mut line, &mut column);
+            index = directive_end;
             continue;
         }
 
@@ -941,10 +1084,11 @@ pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
             break;
         };
 
-        if character == ';' {
+        if sql[index..].starts_with(delimiter) {
             if let (Some((start, start_line, start_column)), Some((end, end_line, end_column))) =
                 (statement_start.take(), statement_end.take())
                 && start < end
+                && has_code
             {
                 statements.push(SqlStatementSpan {
                     start,
@@ -955,31 +1099,37 @@ pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
                     end_column,
                 });
             }
-            index += character.len_utf8();
-            advance_position(character, &mut line, &mut column);
+            has_code = false;
+            advance_text_position(&sql[index..index + delimiter.len()], &mut line, &mut column);
+            index += delimiter.len();
             continue;
         }
 
-        if statement_start.is_none() && !character.is_whitespace() {
+        if !has_code && !character.is_whitespace() {
             // A routine keeps its body intact rather than breaking at the first `;` inside it.
-            if is_compound_routine_header(&sql[index..])
+            // Under a custom delimiter the script already marks where the body ends.
+            if delimiter == ";"
+                && is_compound_routine_header(&sql[index..])
                 && let Some(routine_end) = routine_body_end(sql, index, &protected_ranges)
             {
-                let (start_line, start_column) = (line, column);
+                let (start, start_line, start_column) =
+                    statement_start.take().unwrap_or((index, line, column));
                 advance_text_position(&sql[index..routine_end], &mut line, &mut column);
                 statements.push(SqlStatementSpan {
-                    start: index,
+                    start,
                     end: routine_end,
                     line: start_line,
                     column: start_column,
                     end_line: line,
                     end_column: column,
                 });
+                statement_end = None;
                 index = routine_end;
                 continue;
             }
 
-            statement_start = Some((index, line, column));
+            has_code = true;
+            statement_start.get_or_insert((index, line, column));
         }
         index += character.len_utf8();
         advance_position(character, &mut line, &mut column);
@@ -991,6 +1141,7 @@ pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
     if let (Some((start, start_line, start_column)), Some((end, end_line, end_column))) =
         (statement_start, statement_end)
         && start < end
+        && has_code
     {
         statements.push(SqlStatementSpan {
             start,
@@ -1005,8 +1156,47 @@ pub fn split_sql_statement_spans(sql: &str) -> Vec<SqlStatementSpan> {
     statements
 }
 
+/// A `DELIMITER <token>` line at `index`, returning the token and the offset of the line's end.
+///
+/// Only recognized as the first thing on its line; the caller guarantees no statement text is
+/// pending, so `COPY ... \nDELIMITER ','` in a Postgres statement is left alone.
+fn delimiter_directive(sql: &str, index: usize) -> Option<(&str, usize)> {
+    const KEYWORD: &str = "DELIMITER";
+    let bytes = sql.as_bytes();
+    if !sql
+        .get(index..index + KEYWORD.len())
+        .is_some_and(|word| word.eq_ignore_ascii_case(KEYWORD))
+        || !matches!(bytes.get(index + KEYWORD.len()), Some(b' ' | b'\t'))
+    {
+        return None;
+    }
+    let before_line = &bytes[..index];
+    let indent = before_line
+        .iter()
+        .rev()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    if index > indent && bytes[index - indent - 1] != b'\n' {
+        return None;
+    }
+
+    let line_end = sql[index..].find('\n').map_or(sql.len(), |offset| index + offset);
+    let token = sql[index + KEYWORD.len()..line_end]
+        .split_whitespace()
+        .next()?;
+    Some((token, line_end))
+}
+
 pub fn sql_statement_span_at(sql: &str, cursor_offset: usize) -> Option<SqlStatementSpan> {
-    let spans = split_sql_statement_spans(sql);
+    sql_statement_span_at_for_dialect(sql, cursor_offset, SqlLexDialect::Standard)
+}
+
+pub fn sql_statement_span_at_for_dialect(
+    sql: &str,
+    cursor_offset: usize,
+    dialect: SqlLexDialect,
+) -> Option<SqlStatementSpan> {
+    let spans = split_sql_statement_spans_for_dialect(sql, dialect);
     if spans.len() <= 1 {
         return None;
     }
@@ -1082,6 +1272,25 @@ fn is_identifier_start(byte: Option<u8>) -> bool {
 
 fn is_identifier_tail(byte: Option<u8>) -> bool {
     byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// MySQL strings end at an unescaped quote: `\\` escapes the next byte and a doubled quote is
+/// a literal quote.
+fn skip_mysql_quoted_string(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => {
+                if bytes.get(index + 1) == Some(&quote) {
+                    index += 2;
+                } else {
+                    return index + 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    bytes.len()
 }
 
 fn skip_quoted_identifier(bytes: &[u8], mut index: usize, quote: u8) -> usize {
@@ -1653,5 +1862,148 @@ SELECT 99;"#;
         let after_last = sql.len();
         let after_span = sql_statement_span_at(sql, after_last).expect("after span");
         assert_eq!(&sql[after_span.start..after_span.end], "select 2");
+    }
+
+    fn mysql_split(sql: &str) -> Vec<String> {
+        split_sql_statements_for_dialect(sql, SqlLexDialect::MySql)
+    }
+
+    #[test]
+    fn delimiter_directive_changes_terminator_and_is_not_sent() {
+        let sql = "DELIMITER //\nDROP PROCEDURE IF EXISTS p5//\nCREATE PROCEDURE p5() BEGIN SELECT 55 AS z; END//\nDELIMITER ;\nCALL p5()";
+        assert_eq!(
+            mysql_split(sql),
+            [
+                "DROP PROCEDURE IF EXISTS p5",
+                "CREATE PROCEDURE p5() BEGIN SELECT 55 AS z; END",
+                "CALL p5()",
+            ]
+        );
+    }
+
+    #[test]
+    fn delimiter_directive_supports_multi_char_case_insensitive_and_dollar_tokens() {
+        let sql = "delimiter $$\nCREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET NEW.a = 1; SET NEW.b = 2; END$$\n  Delimiter ;;\nSELECT 1;; SELECT 2;;\nDELIMITER ;\nSELECT 3;";
+        assert_eq!(
+            mysql_split(sql),
+            [
+                "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET NEW.a = 1; SET NEW.b = 2; END",
+                "SELECT 1",
+                "SELECT 2",
+                "SELECT 3",
+            ]
+        );
+    }
+
+    #[test]
+    fn delimiter_spans_index_the_original_script_with_correct_positions() {
+        let sql = "-- setup\nDELIMITER //\nSELECT 1; SELECT 2//\nDELIMITER ;\nSELECT 3;";
+        let spans = split_sql_statement_spans_for_dialect(sql, SqlLexDialect::MySql);
+        let texts: Vec<_> = spans.iter().map(|span| &sql[span.start..span.end]).collect();
+        assert_eq!(texts, ["SELECT 1; SELECT 2", "SELECT 3"]);
+        assert_eq!((spans[0].line, spans[0].column), (2, 0));
+        assert_eq!((spans[0].end_line, spans[0].end_column), (2, 18));
+        assert_eq!((spans[1].line, spans[1].column), (4, 0));
+
+        let cursor = sql.find("SELECT 2").expect("select 2");
+        let at = sql_statement_span_at_for_dialect(sql, cursor, SqlLexDialect::MySql).expect("span");
+        assert_eq!(&sql[at.start..at.end], "SELECT 1; SELECT 2");
+    }
+
+    #[test]
+    fn delimiter_is_ignored_inside_statements_strings_and_comments() {
+        // Postgres `COPY ... DELIMITER` continues a statement that is already underway.
+        let copy = "COPY t FROM STDIN\nDELIMITER ','\nCSV;\nSELECT 1";
+        assert_eq!(
+            split_sql_statements(copy),
+            ["COPY t FROM STDIN\nDELIMITER ','\nCSV", "SELECT 1"]
+        );
+        assert_eq!(mysql_split("SELECT 'a\nDELIMITER //\nb'; SELECT 2"), ["SELECT 'a\nDELIMITER //\nb'", "SELECT 2"]);
+        assert_eq!(mysql_split("/*\nDELIMITER //\n*/ SELECT 1; SELECT 2"), ["/*\nDELIMITER //\n*/ SELECT 1", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT 1; DELIMITER // SELECT 2"), ["SELECT 1", "DELIMITER // SELECT 2"]);
+        // The directive also works without dialect info.
+        assert_eq!(split_sql_statements("DELIMITER //\nSELECT 1; SELECT 2//"), ["SELECT 1; SELECT 2"]);
+    }
+
+    #[test]
+    fn mysql_compound_statements_keep_their_bodies_without_delimiter() {
+        let bodies = [
+            "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END",
+            "CREATE PROCEDURE p(x INT) BEGIN IF x > 1 THEN SELECT 1; ELSEIF x = 1 THEN SELECT 2; ELSE SELECT 3; END IF; END",
+            "CREATE PROCEDURE p(x INT) BEGIN CASE x WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE; END",
+            "CREATE PROCEDURE p(x INT) BEGIN SELECT CASE WHEN x = 1 THEN 'END;' ELSE 'b' END AS c; SELECT 2; END",
+            "CREATE PROCEDURE p() BEGIN DECLARE i INT DEFAULT 0; lp: LOOP SET i = i + 1; IF i > 3 THEN LEAVE lp; END IF; END LOOP lp; END",
+            "CREATE PROCEDURE p() BEGIN DECLARE i INT DEFAULT 0; WHILE i < 3 DO SET i = i + 1; END WHILE; END",
+            "CREATE PROCEDURE p() BEGIN DECLARE i INT DEFAULT 0; REPEAT SET i = i + 1; UNTIL i >= 3 END REPEAT; END",
+            "CREATE PROCEDURE p() BEGIN BEGIN SELECT 1; END; BEGIN SELECT 2; END; END",
+            "CREATE PROCEDURE p() lbl: BEGIN SELECT 1; LEAVE lbl; END lbl",
+            "CREATE PROCEDURE p() BEGIN DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END; START TRANSACTION; COMMIT; END",
+            "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN DELETE FROM t; INSERT INTO log VALUES (1); END",
+            "CREATE DEFINER=`root`@`localhost` FUNCTION f(x INT) RETURNS INT DETERMINISTIC BEGIN DECLARE y INT; SET y = x + 1; RETURN y; END",
+            "CREATE PROCEDURE p() BEGIN SET @end = 1; SET @begin = @end; SELECT t.end FROM t; END",
+            "CREATE PROCEDURE p() BEGIN SELECT 'it\\'s; END' AS a, \"x;END\" AS b, `end;` FROM t; # END;\n -- END;\n /* END; */ SELECT 2; END",
+        ];
+        for body in bodies {
+            let script = format!("{body};\nSELECT 99;");
+            assert_eq!(mysql_split(&script), [body, "SELECT 99"], "{body}");
+            let script = format!("-- header comment\n# another\n{body};SELECT 99");
+            let parts = mysql_split(&script);
+            assert_eq!(parts.len(), 2, "{body}");
+            assert!(parts[0].ends_with(body), "{body}");
+            assert_eq!(parts[1], "SELECT 99");
+        }
+    }
+
+    #[test]
+    fn mysql_transaction_statements_do_not_open_blocks() {
+        assert_eq!(
+            mysql_split("BEGIN; INSERT INTO t VALUES (1); COMMIT; BEGIN WORK; SELECT CASE WHEN 1 THEN 2 END; START TRANSACTION; ROLLBACK"),
+            [
+                "BEGIN",
+                "INSERT INTO t VALUES (1)",
+                "COMMIT",
+                "BEGIN WORK",
+                "SELECT CASE WHEN 1 THEN 2 END",
+                "START TRANSACTION",
+                "ROLLBACK",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_strings_and_comments_hide_semicolons() {
+        assert_eq!(mysql_split("SELECT 'it\\'s; ok'; SELECT 2"), ["SELECT 'it\\'s; ok'", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT 'a\\\\'; SELECT 2"), ["SELECT 'a\\\\'", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT 'it''s; ok'; SELECT 2"), ["SELECT 'it''s; ok'", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT \"a\\\"; b\"; SELECT 2"), ["SELECT \"a\\\"; b\"", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT `a;b`; SELECT 2"), ["SELECT `a;b`", "SELECT 2"]);
+        assert_eq!(mysql_split("# hi; there\nSELECT 1; SELECT 2"), ["# hi; there\nSELECT 1", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT 1 -- x; y\n; SELECT 2"), ["SELECT 1 -- x; y", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT 1 /*! , 2; */; SELECT 3"), ["SELECT 1 /*! , 2; */", "SELECT 3"]);
+        assert_eq!(mysql_split("SELECT /*+ MAX_EXECUTION_TIME(1); */ 1; SELECT 2"), ["SELECT /*+ MAX_EXECUTION_TIME(1); */ 1", "SELECT 2"]);
+        // `$$` is not a quote in MySQL.
+        assert_eq!(mysql_split("SELECT '$$'; SELECT 1 AS a$$b; SELECT 3"), ["SELECT '$$'", "SELECT 1 AS a$$b", "SELECT 3"]);
+    }
+
+    #[test]
+    fn mysql_double_dash_needs_trailing_whitespace_to_be_a_comment() {
+        // `1--1` is `1 - -1`, so the `;` after it still terminates.
+        assert_eq!(mysql_split("SELECT 1--1; SELECT 2"), ["SELECT 1--1", "SELECT 2"]);
+        assert_eq!(mysql_split("SELECT 1-- x;\n; SELECT 2"), ["SELECT 1-- x;", "SELECT 2"]);
+        // Standard SQL treats it as a comment either way.
+        assert_eq!(split_sql_statements("SELECT 1--1; SELECT 2"), ["SELECT 1--1; SELECT 2"]);
+    }
+
+    #[test]
+    fn comment_only_fragments_are_not_statements_but_executable_comments_are() {
+        assert_eq!(mysql_split("SELECT 1; -- done\n# bye"), ["SELECT 1"]);
+        assert_eq!(mysql_split("/*!40101 SET NAMES utf8 */; SELECT 1"), ["/*!40101 SET NAMES utf8 */", "SELECT 1"]);
+        assert!(mysql_split("-- only\n/* a */").is_empty());
+    }
+
+    #[test]
+    fn standard_dialect_keeps_hash_and_backslash_as_ordinary_text() {
+        assert_eq!(split_sql_statements("SELECT 1 # x; SELECT 2"), ["SELECT 1 # x", "SELECT 2"]);
+        assert_eq!(split_sql_statements("SELECT $$a;b$$; SELECT 2"), ["SELECT $$a;b$$", "SELECT 2"]);
     }
 }

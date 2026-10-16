@@ -13,13 +13,23 @@ use zqlz_core::{
     ConnectionField, ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo,
     DatabaseDriver, DialectBundle, DialectInfo, DriverCapabilities, DropTableOptions,
     DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory,
-    KeywordCategory, KeywordInfo, QueryResult, ResolvedConnectionScope, Result, Row,
-    SingleRowDmlScope, SqlFunctionInfo, SqlObjectName, StatementResult, Transaction, Value,
+    KeywordCategory, KeywordInfo, ObjectKindSupport, QueryResult, ResolvedConnectionScope, Result,
+    Row, SingleRowDmlScope, SqlFunctionInfo, SqlObjectName, StatementResult, Transaction, Value,
     ZqlzError,
     dialect_bundle_from_legacy_info,
 };
 
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+/// Object kinds DuckDB can actually list: tables, views, sequences, and types.
+/// Triggers, functions, and procedures have no real listing path.
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    sequences: true,
+    types: true,
+    ..ObjectKindSupport::NONE
+};
 
 fn get_dialect_bundle() -> &'static DialectBundle {
     static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
@@ -108,6 +118,14 @@ impl DatabaseDriver for DuckDbDriver {
         }
     }
 
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        Some("main")
+    }
+
     #[tracing::instrument(skip(self, config), fields(database = config.get_string("database").as_deref()))]
     async fn connect(&self, config: &ConnectionConfig) -> Result<Arc<dyn Connection>> {
         tracing::debug!("connecting to DuckDB");
@@ -165,6 +183,23 @@ pub struct DuckDbConnection {
 }
 
 impl DuckDbConnection {
+    /// User schemas of the open database, `main` first. DuckDB flags `main`
+    /// itself as internal, so it is kept by name.
+    pub(crate) fn user_schema_names(&self) -> Result<Vec<String>> {
+        let result = run_duckdb_query(
+            &self.connection,
+            "SELECT schema_name FROM duckdb_schemas()
+             WHERE database_name = current_database() AND (NOT internal OR schema_name = 'main')
+             ORDER BY schema_name <> 'main', schema_name",
+            &[],
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| row.get(0).and_then(|v| v.as_str()).map(ToString::to_string))
+            .collect())
+    }
+
     /// Create a new DuckDB connection wrapper
     pub fn new(connection: duckdb::Connection, path: String) -> Self {
         let connection = Arc::new(Mutex::new(connection));
@@ -565,6 +600,12 @@ pub(crate) fn run_duckdb_query(
         })
         .unwrap_or_default();
 
+    // TIMESTAMPTZ arrives as an Arrow timestamp carrying a zone.
+    let utc_columns: Vec<bool> = column_types
+        .iter()
+        .map(|ty| ty.starts_with("Timestamp(") && ty.contains("Some("))
+        .collect();
+
     let columns: Vec<ColumnMeta> = column_names
         .iter()
         .enumerate()
@@ -594,7 +635,11 @@ pub(crate) fn run_duckdb_query(
     {
         let mut values = Vec::with_capacity(column_count);
         for i in 0..column_count {
-            values.push(row_to_value(row, i));
+            values.push(row_to_value(
+                row,
+                i,
+                utc_columns.get(i).copied().unwrap_or(false),
+            ));
         }
         raw_rows.push(values);
     }
@@ -677,44 +722,113 @@ fn values_to_duckdb_params(values: &[Value]) -> Result<Vec<DuckDbParam>> {
         .collect()
 }
 
-fn row_to_value(row: &duckdb::Row, idx: usize) -> Value {
-    // Try i64 first (most common integer type)
-    if let Ok(v) = row.get::<_, Option<i64>>(idx) {
-        return match v {
-            Some(n) => Value::Int64(n),
-            None => Value::Null,
-        };
+/// Reads a cell by DuckDB's own type rather than guessing: guessing `i64`
+/// first turned TIMESTAMP into raw microseconds, and nested types (STRUCT,
+/// LIST, MAP) matched nothing and came back as NULL.
+fn row_to_value(row: &duckdb::Row, idx: usize, utc: bool) -> Value {
+    match row.get::<_, duckdb::types::Value>(idx) {
+        Ok(value) => duckdb_value(value, utc),
+        Err(_) => Value::Null,
     }
-    // Try f64
-    if let Ok(v) = row.get::<_, Option<f64>>(idx) {
-        return match v {
-            Some(n) => Value::Float64(n),
-            None => Value::Null,
-        };
+}
+
+fn duckdb_value(value: duckdb::types::Value, utc: bool) -> Value {
+    use duckdb::types::Value as D;
+    match value {
+        D::Null => Value::Null,
+        D::Boolean(b) => Value::Bool(b),
+        D::TinyInt(n) => Value::Int8(n),
+        D::SmallInt(n) => Value::Int16(n),
+        D::Int(n) => Value::Int32(n),
+        D::BigInt(n) => Value::Int64(n),
+        D::UTinyInt(n) => Value::Int16(n.into()),
+        D::USmallInt(n) => Value::Int32(n.into()),
+        D::UInt(n) => Value::Int64(n.into()),
+        D::UBigInt(n) => {
+            i64::try_from(n).map_or_else(|_| Value::Decimal(n.to_string()), Value::Int64)
+        }
+        D::HugeInt(n) => {
+            i64::try_from(n).map_or_else(|_| Value::Decimal(n.to_string()), Value::Int64)
+        }
+        D::Float(n) => Value::Float32(n),
+        D::Double(n) => Value::Float64(n),
+        D::Decimal(d) => Value::Decimal(d.to_string()),
+        D::Timestamp(unit, t) => match chrono::DateTime::from_timestamp_micros(unit.to_micros(t)) {
+            Some(at) if utc => Value::DateTimeUtc(at),
+            Some(at) => Value::DateTime(at.naive_utc()),
+            None => Value::Int64(t),
+        },
+        D::Date32(days) => chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(days.into())))
+            .map_or(Value::Int32(days), Value::Date),
+        D::Time64(unit, t) => {
+            let micros = unit.to_micros(t);
+            chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+                (micros / 1_000_000) as u32,
+                ((micros % 1_000_000) * 1000) as u32,
+            )
+            .map_or(Value::Int64(t), Value::Time)
+        }
+        D::Interval {
+            months,
+            days,
+            nanos,
+        } => Value::String(format_interval(months, days, nanos)),
+        D::Text(s) | D::Enum(s) => Value::String(s),
+        D::Blob(b) => Value::Bytes(b),
+        D::List(items) | D::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| duckdb_value(item, utc))
+                .collect(),
+        ),
+        D::Struct(fields) => Value::Json(serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(key, field)| {
+                    (
+                        key.clone(),
+                        duckdb_value(field.clone(), utc).to_json_value(),
+                    )
+                })
+                .collect(),
+        )),
+        D::Map(entries) => Value::Json(serde_json::Value::Object(
+            entries
+                .iter()
+                .map(|(key, entry)| {
+                    let key = match duckdb_value(key.clone(), utc) {
+                        Value::String(s) => s,
+                        other => other.to_json_value().to_string(),
+                    };
+                    (key, duckdb_value(entry.clone(), utc).to_json_value())
+                })
+                .collect(),
+        )),
+        D::Union(inner) => duckdb_value(*inner, utc),
     }
-    // Try string
-    if let Ok(v) = row.get::<_, Option<String>>(idx) {
-        return match v {
-            Some(s) => Value::String(s),
-            None => Value::Null,
-        };
+}
+
+/// `1 year 2 mons 3 days 04:05:06`, the way DuckDB prints intervals.
+fn format_interval(months: i32, days: i32, nanos: i64) -> String {
+    let mut parts = Vec::new();
+    let (years, months) = (months / 12, months % 12);
+    for (n, unit) in [(years, "year"), (months, "mon"), (days, "day")] {
+        if n != 0 {
+            parts.push(format!("{n} {unit}{}", if n.abs() == 1 { "" } else { "s" }));
+        }
     }
-    // Try bool
-    if let Ok(v) = row.get::<_, Option<bool>>(idx) {
-        return match v {
-            Some(b) => Value::Bool(b),
-            None => Value::Null,
-        };
+    if nanos != 0 || parts.is_empty() {
+        let secs = nanos / 1_000_000_000;
+        let (sign, secs) = if secs < 0 { ("-", -secs) } else { ("", secs) };
+        parts.push(format!(
+            "{sign}{:02}:{:02}:{:02}",
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        ));
     }
-    // Try bytes
-    if let Ok(v) = row.get::<_, Option<Vec<u8>>>(idx) {
-        return match v {
-            Some(b) => Value::Bytes(b),
-            None => Value::Null,
-        };
-    }
-    // Default to null
-    Value::Null
+    parts.join(" ")
 }
 
 impl std::fmt::Debug for DuckDbConnection {

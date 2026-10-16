@@ -42,10 +42,10 @@ use zqlz_ui::widgets::{
 #[path = "ui/mod.rs"]
 mod ui;
 
-use crate::events::TableDesignerEvent;
+use crate::events::{TableDesignerActivity, TableDesignerEvent};
 use crate::models::{
     ColumnDesign, DataTypeInfo, DatabaseDialect, ForeignKeyDesign, IndexDesign, TableDesign,
-    get_data_types,
+    get_data_types, type_select_options,
 };
 use crate::service::{DdlGenerator, FK_ACTION_LABELS, fk_action_from_sql, fk_action_to_sql};
 
@@ -480,11 +480,10 @@ impl TableDesignerPanel {
             });
             column_generated_inputs.push(gen_input);
 
-            let data_types_clone = data_types.clone();
-            let selected_index = data_types_clone
-                .iter()
-                .position(|dt| dt.name.eq_ignore_ascii_case(&col.data_type))
-                .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+            let (data_types_clone, selected_index) =
+                type_select_options(&data_types, &col.data_type);
+            let selected_index =
+                selected_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
             let type_select = cx.new(|cx| {
                 SelectState::new(data_types_clone, selected_index, window, cx).searchable(true)
             });
@@ -1068,11 +1067,10 @@ impl TableDesignerPanel {
             ));
             self.column_generated_inputs.push(gen_input);
 
-            let data_types_clone = self.data_types.clone();
-            let selected_index = data_types_clone
-                .iter()
-                .position(|dt| dt.name.eq_ignore_ascii_case(&col.data_type))
-                .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+            let (data_types_clone, selected_index) =
+                type_select_options(&self.data_types, &col.data_type);
+            let selected_index =
+                selected_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
             let type_select = cx.new(|cx| {
                 SelectState::new(data_types_clone, selected_index, window, cx).searchable(true)
             });
@@ -1455,9 +1453,19 @@ impl TableDesignerPanel {
         );
         self.column_scale_inputs.push(scale_input);
 
-        let data_types_clone = self.data_types.clone();
-        let type_select =
-            cx.new(|cx| SelectState::new(data_types_clone, None, window, cx).searchable(true));
+        let new_column_type = self
+            .design
+            .columns
+            .last()
+            .map(|column| column.data_type.clone())
+            .unwrap_or_default();
+        let (data_types_clone, selected_index) =
+            type_select_options(&self.data_types, &new_column_type);
+        let selected_index =
+            selected_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+        let type_select = cx.new(|cx| {
+            SelectState::new(data_types_clone, selected_index, window, cx).searchable(true)
+        });
         let col_idx = ordinal;
         self._subscriptions.push(cx.subscribe(
             &type_select,
@@ -2021,11 +2029,10 @@ impl TableDesignerPanel {
             ));
             self.column_generated_inputs.insert(idx + 1, gen_input);
 
-            let data_types_clone = self.data_types.clone();
-            let selected_index = data_types_clone
-                .iter()
-                .position(|dt| dt.name.eq_ignore_ascii_case(&new_col.data_type))
-                .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+            let (data_types_clone, selected_index) =
+                type_select_options(&self.data_types, &new_col.data_type);
+            let selected_index =
+                selected_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
             let type_select = cx.new(|cx| {
                 SelectState::new(data_types_clone, selected_index, window, cx).searchable(true)
             });
@@ -3622,6 +3629,7 @@ impl Focusable for TableDesignerPanel {
 
 impl EventEmitter<PanelEvent> for TableDesignerPanel {}
 impl EventEmitter<TableDesignerEvent> for TableDesignerPanel {}
+impl EventEmitter<TableDesignerActivity> for TableDesignerPanel {}
 
 impl Panel for TableDesignerPanel {
     fn panel_name(&self) -> &'static str {
@@ -3651,5 +3659,17 @@ impl Panel for TableDesignerPanel {
 
     fn has_unsaved_changes(&self, _cx: &App) -> bool {
         self.is_dirty
+    }
+
+    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if active && !self.design.is_new {
+            cx.emit(TableDesignerActivity::BecameActive);
+        }
+    }
+
+    fn on_removed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.design.is_new {
+            cx.emit(TableDesignerActivity::BecameInactive);
+        }
     }
 }

@@ -84,7 +84,7 @@ mod tests {
     }
 }
 
-pub(in crate::main_view) fn resolve_search_columns(
+pub(crate) fn resolve_search_columns(
     column_meta: &[ColumnMeta],
     preferred_search_columns: Option<Vec<String>>,
 ) -> Vec<String> {
@@ -93,7 +93,7 @@ pub(in crate::main_view) fn resolve_search_columns(
         .unwrap_or_else(|| build_default_searchable_columns(column_meta))
 }
 
-pub(in crate::main_view) fn build_search_clause_for_columns(
+pub(crate) fn build_search_clause_for_columns(
     connection: &Arc<dyn zqlz_core::Connection>,
     columns: &[String],
     search_text: &str,

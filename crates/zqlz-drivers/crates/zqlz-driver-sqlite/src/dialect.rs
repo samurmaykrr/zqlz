@@ -280,13 +280,36 @@ fn sqlite_functions() -> Vec<SqlFunctionInfo> {
 }
 
 fn sqlite_data_types() -> Vec<DataTypeInfo> {
+    // SQLite stores values in five storage classes, but keeps the declared type
+    // name verbatim and derives a column affinity from it. Offering the names
+    // people actually declare lets the table designer show (and round-trip)
+    // existing schemas instead of collapsing them to a storage class.
+    // https://www.sqlite.org/datatype3.html#affinity_name_examples
     vec![
-        // SQLite has only 5 storage classes - these are the real types
+        // INTEGER affinity
         DataTypeInfo::new("INTEGER", DataTypeCategory::Integer),
-        DataTypeInfo::new("REAL", DataTypeCategory::Float),
+        DataTypeInfo::new("INT", DataTypeCategory::Integer),
+        DataTypeInfo::new("BIGINT", DataTypeCategory::Integer),
+        DataTypeInfo::new("SMALLINT", DataTypeCategory::Integer),
+        // TEXT affinity
         DataTypeInfo::new("TEXT", DataTypeCategory::String),
-        DataTypeInfo::new("BLOB", DataTypeCategory::Binary),
+        DataTypeInfo::new("VARCHAR", DataTypeCategory::String).with_length(Some(255), None),
+        DataTypeInfo::new("CHAR", DataTypeCategory::String).with_length(Some(1), None),
+        // REAL affinity
+        DataTypeInfo::new("REAL", DataTypeCategory::Float),
+        DataTypeInfo::new("DOUBLE", DataTypeCategory::Float),
+        DataTypeInfo::new("FLOAT", DataTypeCategory::Float),
+        // NUMERIC affinity
         DataTypeInfo::new("NUMERIC", DataTypeCategory::Decimal),
+        DataTypeInfo::new("DECIMAL", DataTypeCategory::Decimal).with_length(None, None),
+        DataTypeInfo::new("BOOLEAN", DataTypeCategory::Boolean),
+        DataTypeInfo::new("DATE", DataTypeCategory::Date),
+        DataTypeInfo::new("DATETIME", DataTypeCategory::DateTime),
+        DataTypeInfo::new("TIMESTAMP", DataTypeCategory::DateTime),
+        // BLOB affinity
+        DataTypeInfo::new("BLOB", DataTypeCategory::Binary),
+        // TEXT affinity; the JSON1 functions operate on it
+        DataTypeInfo::new("JSON", DataTypeCategory::Json),
     ]
 }
 
@@ -311,4 +334,25 @@ fn sqlite_table_options() -> Vec<TableOptionDef> {
             choices: Vec::new(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_types_cover_commonly_declared_names() {
+        let names: Vec<String> = sqlite_data_types()
+            .iter()
+            .map(|data_type| data_type.name.to_string())
+            .collect();
+        let expected = "INTEGER INT BIGINT SMALLINT TEXT VARCHAR CHAR REAL DOUBLE FLOAT NUMERIC \
+                        DECIMAL BOOLEAN DATE DATETIME TIMESTAMP BLOB JSON";
+        for expected in expected.split_whitespace() {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing {expected}"
+            );
+        }
+    }
 }

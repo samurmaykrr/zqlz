@@ -56,11 +56,7 @@ fn test_definition_for_qualified_column_targets_its_table() {
     let lsp = create_test_lsp();
 
     assert_eq!(
-        definition_uri(
-            &lsp,
-            "SELECT u.username FROM users u",
-            "username"
-        ),
+        definition_uri(&lsp, "SELECT u.username FROM users u", "username"),
         "sql://internal/table/users"
     );
 }
@@ -70,7 +66,11 @@ fn test_definition_through_alias_targets_the_real_table() {
     let lsp = create_test_lsp();
 
     assert_eq!(
-        definition_uri(&lsp, "SELECT * FROM audit_log AS al WHERE al.log_id = 1", "al."),
+        definition_uri(
+            &lsp,
+            "SELECT * FROM audit_log AS al WHERE al.log_id = 1",
+            "al."
+        ),
         "sql://internal/table/audit_log"
     );
 }

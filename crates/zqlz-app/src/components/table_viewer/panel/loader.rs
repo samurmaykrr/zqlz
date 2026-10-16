@@ -1,5 +1,6 @@
 use super::*;
 use crate::main_view::table_handlers_utils::sql::is_default_searchable_type;
+use zqlz_services::FetchMode;
 
 impl TableViewerPanel {
     fn metadata_for_existing_column(&self, column_name: &str) -> Option<&ColumnMeta> {
@@ -48,18 +49,12 @@ impl TableViewerPanel {
     }
 
     fn build_table_performance_profile(columns: &[ColumnMeta]) -> TablePerformanceProfile {
-        let mut heavy_count = 0usize;
         let mut non_heavy_searchable_columns = Vec::new();
         let mut heavy_searchable_columns = Vec::new();
 
         for column in columns {
-            let is_heavy = Self::is_heavy_column_type(&column.data_type);
-            if is_heavy {
-                heavy_count = heavy_count.saturating_add(1);
-            }
-
             if is_default_searchable_type(&column.data_type) {
-                if is_heavy {
+                if Self::is_heavy_column_type(&column.data_type) {
                     heavy_searchable_columns.push(column.name.clone());
                 } else {
                     non_heavy_searchable_columns.push(column.name.clone());
@@ -67,31 +62,11 @@ impl TableViewerPanel {
             }
         }
 
-        let heavy_ratio = if columns.is_empty() {
-            0.0
-        } else {
-            heavy_count as f32 / columns.len() as f32
-        };
-        let is_heavy_table = heavy_count >= 4 || heavy_ratio >= 0.3;
-        let recommended_page_size = if is_heavy_table {
-            if heavy_count >= 8 || heavy_ratio >= 0.6 {
-                100
-            } else {
-                250
-            }
-        } else {
-            1000
-        };
-
         let mut searchable_columns = non_heavy_searchable_columns;
         searchable_columns.extend(heavy_searchable_columns);
         searchable_columns.truncate(8);
 
-        TablePerformanceProfile {
-            is_heavy_table,
-            recommended_page_size,
-            searchable_columns,
-        }
+        TablePerformanceProfile { searchable_columns }
     }
 
     fn capture_current_column_widths(&self, cx: &App) -> std::collections::HashMap<String, Pixels> {
@@ -254,8 +229,6 @@ impl TableViewerPanel {
         if let Some(profile) = &self.performance_profile {
             tracing::debug!(
                 table = %table_name,
-                is_heavy_table = profile.is_heavy_table,
-                recommended_page_size = profile.recommended_page_size,
                 searchable_columns = profile.searchable_columns.len(),
                 "Computed table performance profile"
             );
@@ -296,6 +269,8 @@ impl TableViewerPanel {
                 col_names
             );
         }
+
+        let initializing = !is_same_table || self.original_column_meta.is_empty();
 
         if is_same_table && self.column_visibility_state.is_some() {
             self.apply_column_visibility_to_result(&mut result, cx);
@@ -393,8 +368,6 @@ impl TableViewerPanel {
                                 let actual_row = delegate.get_actual_row_index(row);
                                 delegate.rows.get(actual_row).map(|row_values| {
                                     TableViewerEvent::RowSelected {
-                                        connection_id: delegate.connection_id,
-                                        table_name: delegate.table_name.clone(),
                                         row_index: actual_row,
                                         row_values: row_values.clone(),
                                         column_meta: delegate.column_meta.clone(),
@@ -614,7 +587,7 @@ impl TableViewerPanel {
         let total_records = result.total_rows;
         let is_estimated = result.is_estimated_total;
 
-        if !is_same_table || self.original_column_meta.is_empty() {
+        if initializing {
             tracing::info!(
                 "load_table: INITIALIZING state (is_same_table={}, original_empty={})",
                 is_same_table,
@@ -638,16 +611,10 @@ impl TableViewerPanel {
                 state.set_columns(column_items, window, cx);
             });
 
-            let connection_id_for_filter = connection_id;
-            let table_name_for_filter = table_name.clone();
             cx.subscribe_in(&filter_panel_state, window, {
-                move |this, _filter_state, event: &FilterPanelEvent, _window, cx| match event {
+                move |this, _filter_state, event: &FilterPanelEvent, window, cx| match event {
                     FilterPanelEvent::Apply => {
-                        this.apply_filters(
-                            connection_id_for_filter,
-                            table_name_for_filter.clone(),
-                            cx,
-                        );
+                        this.apply_filters(window, cx);
                     }
                     FilterPanelEvent::Changed => {}
                 }
@@ -666,12 +633,8 @@ impl TableViewerPanel {
                 );
             });
 
-            let connection_id_for_col_vis = connection_id;
-            let table_name_for_col_vis = table_name.clone();
             cx.subscribe_in(&column_visibility_state, window, {
-                move |this, _visibility_state, event: &ColumnVisibilityEvent, _window, cx| {
-                    let conn_id = connection_id_for_col_vis;
-                    let tbl_name = table_name_for_col_vis.clone();
+                move |this, _visibility_state, event: &ColumnVisibilityEvent, window, cx| {
                     match event {
                         ColumnVisibilityEvent::ColumnToggled { .. }
                         | ColumnVisibilityEvent::AllColumnsChanged => {
@@ -681,7 +644,7 @@ impl TableViewerPanel {
                                     cx.notify();
                                 });
                             }
-                            this.apply_filters(conn_id, tbl_name, cx);
+                            this.apply_filters(window, cx);
                         }
                     }
                 }
@@ -693,61 +656,35 @@ impl TableViewerPanel {
 
             let pagination_state = cx.new(|cx| PaginationState::new(window, cx));
 
-            let connection_id_for_pag = connection_id;
-            let table_name_for_pag = table_name.clone();
             cx.subscribe_in(&pagination_state, window, {
-                move |this, _pagination_state, event: &PaginationEvent, _window, cx| {
-                    let conn_id = connection_id_for_pag;
-                    let tbl_name = table_name_for_pag.clone();
-                    match event {
-                        PaginationEvent::PageChanged(page) => {
-                            if let Some(pag_state) = &this.pagination_state {
-                                let limit = pag_state.read(cx).records_per_page;
-                                cx.emit(TableViewerEvent::PageChanged {
-                                    connection_id: conn_id,
-                                    table_name: tbl_name,
-                                    page: *page,
-                                    limit,
-                                });
-                            }
-                        }
-                        PaginationEvent::LimitChanged(limit) => {
-                            cx.emit(TableViewerEvent::LimitChanged {
-                                connection_id: conn_id,
-                                table_name: tbl_name,
-                                limit: *limit,
+                move |this, _pagination_state, event: &PaginationEvent, window, cx| match event {
+                    PaginationEvent::PageChanged(page) => {
+                        this.reload(FetchMode::Page(*page), window, cx);
+                    }
+                    PaginationEvent::LimitChanged(_)
+                    | PaginationEvent::LimitEnabledChanged(true) => {
+                        this.reload(FetchMode::Page(1), window, cx);
+                    }
+                    PaginationEvent::LimitEnabledChanged(false) => {
+                        this.limit_turned_off(window, cx);
+                    }
+                    PaginationEvent::LastPageRequested => {
+                        this.reload(FetchMode::Last, window, cx);
+                    }
+                    PaginationEvent::RefreshRequested => this.refresh(cx),
+                    PaginationEvent::ModeChanged(mode) => {
+                        if let Some(table_state) = &this.table_state {
+                            table_state.update(cx, |table, _cx| {
+                                let delegate = table.delegate_mut();
+                                delegate.replace_rows(Vec::new(), true);
+                                let is_infinite = matches!(
+                                    mode,
+                                    zqlz_ui::widgets::table::PaginationMode::InfiniteScroll
+                                );
+                                delegate.set_infinite_scroll_enabled(is_infinite);
                             });
                         }
-                        PaginationEvent::LimitEnabledChanged(enabled) => {
-                            cx.emit(TableViewerEvent::LimitEnabledChanged {
-                                connection_id: conn_id,
-                                table_name: tbl_name,
-                                enabled: *enabled,
-                            });
-                        }
-                        PaginationEvent::RefreshRequested => {
-                            this.refresh(cx);
-                        }
-                        PaginationEvent::ModeChanged(mode) => {
-                            if let Some(table_state) = &this.table_state {
-                                table_state.update(cx, |table, _cx| {
-                                    let delegate = table.delegate_mut();
-                                    delegate.replace_rows(Vec::new(), true);
-                                    let is_infinite = matches!(
-                                        mode,
-                                        zqlz_ui::widgets::table::PaginationMode::InfiniteScroll
-                                    );
-                                    delegate.set_infinite_scroll_enabled(is_infinite);
-                                });
-                            }
-                            this.refresh(cx);
-                        }
-                        PaginationEvent::LastPageRequested => {
-                            cx.emit(TableViewerEvent::LastPageRequested {
-                                connection_id: conn_id,
-                                table_name: tbl_name,
-                            });
-                        }
+                        this.refresh(cx);
                     }
                 }
             })
@@ -755,24 +692,12 @@ impl TableViewerPanel {
 
             self.pagination_state = Some(pagination_state);
 
-            cx.emit(TableViewerEvent::BecameActive {
-                connection_id,
-                table_name,
-                database_name: self.database_name.clone(),
-            });
+            cx.emit(TableViewerEvent::BecameActive);
         } else {
             tracing::info!("load_table: SKIPPING reinitialization - preserving existing state");
         }
 
         if let Some(ref pagination_state) = self.pagination_state {
-            if !is_same_table && let Some(profile) = &self.performance_profile {
-                pagination_state.update(cx, |state, _cx| {
-                    if state.records_per_page == 1000 {
-                        state.records_per_page = profile.recommended_page_size;
-                    }
-                });
-            }
-
             pagination_state.update(cx, |state, cx| {
                 state.update_after_load(records_loaded, total_records, is_estimated, cx);
             });
@@ -832,6 +757,10 @@ impl TableViewerPanel {
                 total,
                 visible_count
             );
+        }
+
+        if std::mem::take(&mut self.reload_after_session_restore) {
+            self.reload(FetchMode::Page(1), window, cx);
         }
 
         cx.notify();

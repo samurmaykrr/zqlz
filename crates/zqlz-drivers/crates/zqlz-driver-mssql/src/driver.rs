@@ -8,11 +8,41 @@ use zqlz_core::{
     AutoIncrementInfo, AutoIncrementStyle, CommentStyles, Connection, ConnectionConfig,
     ConnectionField, ConnectionFieldSchema, DataTypeCategory, DataTypeInfo, DatabaseDriver,
     DialectBundle, DialectInfo, DriverCapabilities, ExplainConfig, FunctionCategory,
-    KeywordCategory, KeywordInfo, Result, SqlFunctionInfo, ZqlzError,
+    KeywordCategory, KeywordInfo, ObjectKindSupport, Result, SqlFunctionInfo, ZqlzError,
     dialect_bundle_from_legacy_info,
 };
 
+fn mssql_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("zqlz-mssql-runtime")
+            .build()
+            .expect("Failed to create Tokio runtime for MS SQL Server driver")
+    })
+}
+
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+/// Object kinds MS SQL Server actually lists: tables, views, functions,
+/// procedures, triggers, sequences, and types/alias types via `sys.*`
+/// catalog views. Materialized views (indexed views), scheduled events,
+/// and extensions have no listing path.
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    materialized_views: false,
+    functions: true,
+    procedures: true,
+    triggers: true,
+    sequences: true,
+    types: true,
+    events: false,
+    domains: true,
+    extensions: false,
+};
 
 fn get_dialect_bundle() -> &'static DialectBundle {
     static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
@@ -58,6 +88,14 @@ impl DatabaseDriver for MssqlDriver {
         Some(1433)
     }
 
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        Some("dbo")
+    }
+
     fn icon_name(&self) -> &'static str {
         "mssql"
     }
@@ -100,8 +138,13 @@ impl DatabaseDriver for MssqlDriver {
     #[tracing::instrument(skip(self, config), fields(host = config.get_string("host").as_deref(), database = config.get_string("database").as_deref()))]
     async fn connect(&self, config: &ConnectionConfig) -> Result<Arc<dyn Connection>> {
         tracing::debug!("connecting to MS SQL Server");
-        let connection = MssqlConnection::from_config(config)
+        // tiberius opens a Tokio TCP stream, which needs a running reactor; the
+        // app polls drivers on its own executor, so the handshake runs here.
+        let config = config.clone();
+        let connection = mssql_runtime()
+            .spawn(async move { MssqlConnection::from_config(&config).await })
             .await
+            .map_err(|e| ZqlzError::Driver(format!("MS SQL Server runtime task failed: {e}")))?
             .map_err(|e| ZqlzError::Driver(e.to_string()))?;
         Ok(Arc::new(connection))
     }

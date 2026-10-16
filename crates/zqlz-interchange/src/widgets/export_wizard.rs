@@ -2168,7 +2168,7 @@ impl ExportWizard {
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .pr(px(EXPORT_LIST_SCROLLBAR_WIDTH))
                             .track_scroll(&self.table_scroll_handle)
@@ -2399,7 +2399,7 @@ impl ExportWizard {
                                 .collect::<Vec<_>>()
                         }),
                     )
-                    .flex_grow()
+                    .flex_grow_1()
                     .size_full()
                     .pr(px(EXPORT_LIST_SCROLLBAR_WIDTH))
                     .track_scroll(&self.column_scroll_handle)
@@ -2827,7 +2827,7 @@ impl ExportWizard {
                                             },
                                         ),
                                     )
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .size_full()
                                     .pr(px(EXPORT_LIST_SCROLLBAR_WIDTH))
                                     .track_scroll(&self.log_scroll_handle)

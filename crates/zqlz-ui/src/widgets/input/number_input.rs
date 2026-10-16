@@ -1,7 +1,8 @@
 use gpui::{
     AnyElement, App, Context, Corners, Edges, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, RenderOnce, SharedString,
-    StyleRefinement, Styled, Window, actions, prelude::FluentBuilder as _,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, RenderOnce, Role, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, actions,
+    prelude::FluentBuilder as _,
 };
 
 use crate::widgets::{
@@ -145,8 +146,12 @@ impl Styled for NumberInput {
 
 impl RenderOnce for NumberInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let numeric_value = self.state.read(cx).value().parse::<f64>().ok();
+
         h_flex()
             .id(("number-input", self.state.entity_id()))
+            .role(Role::SpinButton)
+            .when_some(numeric_value, |this, v| this.aria_numeric_value(v))
             .key_context(CONTEXT)
             .on_action(window.listener_for(&self.state, InputState::on_action_increment))
             .on_action(window.listener_for(&self.state, InputState::on_action_decrement))

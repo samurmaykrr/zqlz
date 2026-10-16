@@ -1,15 +1,15 @@
 //! Integration tests for TableService
 //!
-//! Tests the async table operations (browse_table, browse_table_with_filters,
-//! update_cell, insert_row, delete_rows) using the MockConnection.
+//! Tests the async table operations (fetch_rows, update_cell,
+//! insert_row, delete_rows) using the MockConnection.
 
 mod common;
 
 use std::sync::Arc;
-use zqlz_core::{AffectedRowCountFidelity, Connection, RowIdentifier, Value};
+use zqlz_core::{AffectedRowCountFidelity, Connection, RowIdentifier, TableRef, Value};
 use zqlz_services::{
-    BrowseLastPageRequest, BrowseNearEndPageRequest, BrowseTableWithFiltersRequest, CellUpdateData,
-    RowDeleteData, RowInsertData, TableService,
+    plan_fetch, CellUpdateData, FetchMode, KnownTotal, QuerySnapshot, RowDeleteData, RowInsertData,
+    RowWindow, TableService,
 };
 
 use common::{mock_query_result, MockConnection};
@@ -40,10 +40,32 @@ fn empty_count_result() -> zqlz_core::QueryResult {
     mock_query_result(vec!["count"], Vec::new())
 }
 
-// ============ browse_table Tests ============
+// ============ First-page browse Tests ============
+
+/// The first page an open fetches: no filters, no key, 100 rows.
+async fn browse_first_page(
+    conn: &Arc<MockConnection>,
+    table: TableRef,
+) -> zqlz_services::ServiceResult<zqlz_core::QueryResult> {
+    let query = QuerySnapshot {
+        page_size: Some(100),
+        current_page: 1,
+        fast_exact_count: conn.supports_fast_exact_count(),
+        ..QuerySnapshot::default()
+    };
+    let plan = plan_fetch(FetchMode::Page(1), &query).expect("a first-page plan");
+    TableService::new(100)
+        .fetch_rows(conn.clone() as Arc<dyn Connection>, &table, &query, plan)
+        .await
+        .map(|outcome| outcome.result)
+}
+
+fn users() -> TableRef {
+    TableRef::new(None, None, "users")
+}
 
 #[tokio::test]
-async fn browse_table_builds_correct_sql() {
+async fn first_page_builds_correct_sql() {
     let conn = Arc::new(
         MockConnection::new("test_db")
             .with_driver("sqlite")
@@ -51,16 +73,8 @@ async fn browse_table_builds_correct_sql() {
             .with_query_response("COUNT(*)", count_result(42))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
 
-    let result = service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            None,
-            None,
-        )
+    let result = browse_first_page(&conn, users())
         .await
         .expect("should browse table");
 
@@ -94,96 +108,22 @@ async fn browse_table_builds_correct_sql() {
 }
 
 #[tokio::test]
-async fn browse_table_rejects_key_value_and_document_connections() {
-    let service = TableService::new(100);
-
-    for driver in ["redis", "mongodb"] {
-        let conn = Arc::new(MockConnection::new("test_db").with_driver(driver));
-        let error = service
-            .browse_table(
-                conn.clone() as Arc<dyn Connection>,
-                "anything",
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect_err("non-relational drivers should not use TableService");
-
-        assert!(
-            error
-                .to_string()
-                .contains("TableService only supports relational connections"),
-            "unexpected error for {driver}: {error}"
-        );
-        assert!(
-            conn.query_log().is_empty(),
-            "should reject {driver} before querying"
-        );
-    }
-}
-
-#[tokio::test]
-async fn browse_table_respects_custom_limit_and_offset() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("sqlite")
-            .with_query_response("COUNT(*)", count_result(100))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(50);
-
-    service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "orders",
-            None,
-            Some(25),
-            Some(50),
-        )
-        .await
-        .expect("should browse with custom pagination");
-
-    let log = conn.query_log();
-    let select_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a SELECT query");
-    assert!(
-        select_query.contains("LIMIT 25"),
-        "should use custom limit: {}",
-        select_query
-    );
-    assert!(
-        select_query.contains("OFFSET 50"),
-        "should use custom offset: {}",
-        select_query
-    );
-}
-
-#[tokio::test]
-async fn browse_table_with_schema_qualifier() {
+async fn first_page_qualifies_the_table_with_its_schema() {
     let conn = Arc::new(
         MockConnection::new("test_db")
             .with_driver("sqlite")
             .with_query_response("COUNT(*)", count_result(10))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
 
-    service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            Some("my_database"),
-            None,
-            None,
-        )
-        .await
-        .expect("should browse with schema qualifier");
+    browse_first_page(
+        &conn,
+        TableRef::new(None, Some("my_database".into()), "users"),
+    )
+    .await
+    .expect("should browse with schema qualifier");
 
     let log = conn.query_log();
-    // SQLite uses double-quote identifier escaping — all queries should use the qualified table name
     assert!(
         log.iter().all(|q| q.contains("\"my_database\".\"users\"")),
         "all queries should have qualified table name: {:?}",
@@ -191,133 +131,200 @@ async fn browse_table_with_schema_qualifier() {
     );
 }
 
-// ============ browse_table_with_filters Tests ============
+// ============ fetch_rows Tests ============
 
-#[tokio::test]
-async fn browse_with_filters_adds_where_clause() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("sqlite")
-            .with_query_response("COUNT(*)", count_result(5))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
+fn users_query() -> QuerySnapshot {
+    QuerySnapshot {
+        pk_columns: vec!["\"id\"".to_string()],
+        page_size: Some(100),
+        current_page: 1,
+        ..QuerySnapshot::default()
+    }
+}
 
-    service
-        .browse_table_with_filters(
+async fn fetch(
+    conn: &Arc<MockConnection>,
+    mode: FetchMode,
+    query: &QuerySnapshot,
+) -> zqlz_services::FetchOutcome {
+    let plan = plan_fetch(mode, query).expect("a fetch plan");
+    TableService::new(100)
+        .fetch_rows(
             conn.clone() as Arc<dyn Connection>,
-            BrowseTableWithFiltersRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec!["status = 'active'".to_string(), "age > 18".to_string()],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: None,
-                offset: None,
-                cached_total: None,
-            },
+            &TableRef::new(None, None, "users"),
+            query,
+            plan,
         )
         .await
-        .expect("should browse with filters");
-
-    let log = conn.query_log();
-    let count_query = log
-        .iter()
-        .find(|q| q.contains("COUNT(*)"))
-        .expect("should have a COUNT query");
-    assert!(
-        count_query.contains("WHERE status = 'active' AND age > 18"),
-        "count query should have WHERE clause: {}",
-        count_query
-    );
-    let select_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a SELECT query");
-    assert!(
-        select_query.contains("WHERE status = 'active' AND age > 18"),
-        "select query should have WHERE clause: {}",
-        select_query
-    );
+        .expect("fetch rows")
 }
 
 #[tokio::test]
-async fn browse_with_filters_adds_order_by() {
+async fn fetch_rows_selects_filters_and_orders_with_a_pk_tiebreaker() {
     let conn = Arc::new(
         MockConnection::new("test_db")
             .with_driver("sqlite")
             .with_query_response("COUNT(*)", count_result(10))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
+    let query = QuerySnapshot {
+        where_clauses: vec!["status = 'active'".to_string()],
+        order_by_clauses: vec!["\"name\" DESC".to_string()],
+        visible_columns: vec!["id".to_string(), "name".to_string()],
+        ..users_query()
+    };
 
-    service
-        .browse_table_with_filters(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseTableWithFiltersRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec!["name ASC".to_string(), "created_at DESC".to_string()],
-                visible_columns: vec![],
-                limit: None,
-                offset: None,
-                cached_total: None,
-            },
-        )
-        .await
-        .expect("should browse with sorting");
+    fetch(&conn, FetchMode::Page(3), &query).await;
 
     let log = conn.query_log();
-    let select_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a SELECT query");
     assert!(
-        select_query.contains("ORDER BY name ASC, created_at DESC"),
-        "should have ORDER BY clause: {}",
-        select_query
+        log.iter().any(|sql| sql
+            == "SELECT \"id\", \"name\" FROM \"users\" WHERE status = 'active' ORDER BY \"name\" DESC, \"id\" ASC LIMIT 100 OFFSET 200"),
+        "data query should carry columns, filters, sorts and the page window: {log:?}"
     );
 }
 
 #[tokio::test]
-async fn browse_with_visible_columns() {
+async fn fetch_rows_skips_the_estimate_under_filters() {
     let conn = Arc::new(
         MockConnection::new("test_db")
-            .with_driver("sqlite")
-            .with_query_response("COUNT(*)", count_result(10))
+            .with_driver("mysql")
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
+    let query = QuerySnapshot {
+        where_clauses: vec!["status = 'active'".to_string()],
+        ..users_query()
+    };
 
-    service
-        .browse_table_with_filters(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseTableWithFiltersRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec!["id".to_string(), "name".to_string()],
-                limit: None,
-                offset: None,
-                cached_total: None,
-            },
-        )
-        .await
-        .expect("should browse with column selection");
+    let outcome = fetch(&conn, FetchMode::Page(1), &query).await;
 
-    let log = conn.query_log();
-    let select_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a SELECT query");
-    // PostgreSQL uses double-quote identifier escaping
-    assert!(
-        select_query.contains("\"id\", \"name\""),
-        "should select specific columns: {}",
-        select_query
+    assert_eq!(outcome.total, None);
+    assert_eq!(conn.query_log().len(), 1, "{:?}", conn.query_log());
+}
+
+#[tokio::test]
+async fn fetch_rows_estimates_an_unfiltered_slow_count() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("mysql")
+            .with_query_response("information_schema.TABLES", count_result(10_000))
+            .with_result(rows_result()),
     );
+
+    let outcome = fetch(&conn, FetchMode::Page(1), &users_query()).await;
+
+    assert_eq!(outcome.result.total_rows, Some(10_000));
+    assert!(outcome.result.is_estimated_total);
+}
+
+#[tokio::test]
+async fn fetch_rows_drops_an_estimate_below_the_rows_already_read() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("mysql")
+            .with_query_response("information_schema.TABLES", count_result(0))
+            .with_result(rows_result()),
+    );
+
+    let outcome = fetch(&conn, FetchMode::Page(1), &users_query()).await;
+
+    assert_eq!(outcome.result.rows.len(), 2);
+    assert_eq!(outcome.result.total_rows, None);
+    assert!(outcome.total.is_none());
+}
+
+#[tokio::test]
+async fn fetch_rows_reuses_a_total_counted_under_the_same_filters() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("mysql")
+            .with_result(rows_result()),
+    );
+    let query = QuerySnapshot {
+        known_total: Some(KnownTotal {
+            rows: 5000,
+            is_estimated: false,
+            where_clauses: Vec::new(),
+        }),
+        ..users_query()
+    };
+
+    let outcome = fetch(&conn, FetchMode::Page(2), &query).await;
+
+    assert_eq!(outcome.result.total_rows, Some(5000));
+    assert_eq!(conn.query_log().len(), 1, "{:?}", conn.query_log());
+}
+
+#[tokio::test]
+async fn fetch_rows_last_page_counts_then_reads_only_the_remainder() {
+    let tail = mock_query_result(
+        vec!["id"],
+        vec![vec![Value::Int64(1050)], vec![Value::Int64(1049)]],
+    );
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("mysql")
+            .with_query_response("COUNT(*)", count_result(1050))
+            .with_result(tail),
+    );
+    let query = QuerySnapshot {
+        pk_columns: vec!["`id`".to_string()],
+        where_clauses: vec!["status = 'active'".to_string()],
+        ..users_query()
+    };
+
+    let outcome = fetch(&conn, FetchMode::Last, &query).await;
+
+    assert_eq!(outcome.plan.page, 11);
+    assert_eq!(
+        outcome.plan.window,
+        RowWindow::FromEnd { limit: 50, skip: 0 }
+    );
+    assert_eq!(outcome.result.total_rows, Some(1050));
+    assert_eq!(
+        outcome.result.rows[0].values[0],
+        Value::Int64(1049),
+        "reversed rows are flipped back into display order"
+    );
+    let log = conn.query_log();
+    assert!(
+        log[0].contains("COUNT(*)") && log[0].contains("WHERE status = 'active'"),
+        "the count carries the filter: {log:?}"
+    );
+    assert!(
+        log[1].contains("ORDER BY `id` DESC LIMIT 50"),
+        "the data query reads the remainder from the end: {log:?}"
+    );
+}
+
+#[tokio::test]
+async fn fetch_rows_rejects_key_value_connections() {
+    let conn = Arc::new(MockConnection::new("cache").with_driver("redis"));
+    let result = TableService::new(100)
+        .fetch_rows(
+            conn as Arc<dyn Connection>,
+            &TableRef::new(None, None, "users"),
+            &users_query(),
+            plan_fetch(FetchMode::Page(1), &users_query()).expect("plan"),
+        )
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn fetch_rows_on_failing_connection_returns_error() {
+    let conn = Arc::new(MockConnection::new("test_db").with_failure());
+    let result = TableService::new(100)
+        .fetch_rows(
+            conn as Arc<dyn Connection>,
+            &TableRef::new(None, None, "users"),
+            &users_query(),
+            plan_fetch(FetchMode::Page(1), &users_query()).expect("plan"),
+        )
+        .await;
+
+    assert!(result.is_err());
 }
 
 // ============ update_cell Tests ============
@@ -342,8 +349,7 @@ async fn update_cell_succeeds() {
     service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             cell_data,
         )
         .await
@@ -358,8 +364,7 @@ async fn update_cell_uses_complete_primary_key() {
     service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             CellUpdateData {
                 column_name: "email".to_string(),
                 new_value: Some(Value::String("new@example.com".to_string())),
@@ -393,8 +398,7 @@ async fn update_cell_does_not_use_partial_or_null_primary_key() {
     service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "composite_nullable",
-            None,
+            &TableRef::new(None, None, "composite_nullable"),
             CellUpdateData {
                 column_name: "builder_document_json".to_string(),
                 new_value: Some(Value::String("{\"new\":true}".to_string())),
@@ -444,8 +448,7 @@ async fn update_cell_falls_back_to_a_unique_key_without_a_primary_key() {
     service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "sessions",
-            None,
+            &TableRef::new(None, None, "sessions"),
             CellUpdateData {
                 column_name: "token".to_string(),
                 new_value: Some(Value::String("new-token".to_string())),
@@ -483,8 +486,7 @@ async fn update_cell_skips_a_null_unique_key() {
     service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "sessions",
-            None,
+            &TableRef::new(None, None, "sessions"),
             CellUpdateData {
                 column_name: "token".to_string(),
                 new_value: Some(Value::String("new-token".to_string())),
@@ -520,8 +522,7 @@ async fn update_cell_zero_affected_rows_errors_on_exact_drivers() {
     let result = service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             sample_cell_update(),
         )
         .await;
@@ -547,8 +548,7 @@ async fn update_cell_zero_affected_rows_is_not_an_error_when_counts_unavailable(
     let outcome = service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             sample_cell_update(),
         )
         .await
@@ -575,8 +575,7 @@ async fn update_cell_zero_affected_rows_warns_on_best_effort() {
     let outcome = service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             sample_cell_update(),
         )
         .await
@@ -593,8 +592,7 @@ async fn update_cell_reports_affected_rows_on_success() {
     let outcome = service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             sample_cell_update(),
         )
         .await
@@ -625,8 +623,7 @@ async fn update_cell_reads_back_the_stored_value() {
     let outcome = service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             sample_cell_update(),
         )
         .await
@@ -649,8 +646,7 @@ async fn update_cell_skips_read_back_without_a_primary_key() {
     let outcome = service
         .update_cell(
             conn.clone() as Arc<dyn Connection>,
-            "composite_nullable",
-            None,
+            &TableRef::new(None, None, "composite_nullable"),
             CellUpdateData {
                 column_name: "builder_document_json".to_string(),
                 new_value: Some(Value::String("{\"new\":true}".to_string())),
@@ -709,8 +705,7 @@ async fn insert_row_builds_correct_sql() {
     service
         .insert_row(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             insert_data,
         )
         .await
@@ -734,8 +729,7 @@ async fn insert_row_uses_postgres_placeholders() {
     service
         .insert_row(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             insert_data,
         )
         .await
@@ -768,8 +762,7 @@ async fn insert_row_with_null_values() {
     service
         .insert_row(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             insert_data,
         )
         .await
@@ -790,8 +783,7 @@ async fn insert_row_with_empty_columns_fails() {
     let result = service
         .insert_row(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             insert_data,
         )
         .await;
@@ -818,8 +810,7 @@ async fn delete_rows_with_primary_key() {
     let deleted = service
         .delete_rows(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             delete_data,
         )
         .await
@@ -838,17 +829,13 @@ async fn delete_row_without_a_key_is_scoped_to_a_single_row() {
 
     let delete_data = RowDeleteData {
         all_column_names: vec!["workflow_id".to_string(), "workflow_jinja".to_string()],
-        rows: vec![vec![
-            Value::String("search_web".to_string()),
-            Value::Null,
-        ]],
+        rows: vec![vec![Value::String("search_web".to_string()), Value::Null]],
     };
 
     let deleted = service
         .delete_rows(
             conn.clone() as Arc<dyn Connection>,
-            "workflows",
-            None,
+            &TableRef::new(None, None, "workflows"),
             delete_data,
         )
         .await
@@ -880,8 +867,7 @@ async fn delete_zero_rows_returns_zero() {
     let deleted = service
         .delete_rows(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
+            &TableRef::new(None, None, "users"),
             delete_data,
         )
         .await
@@ -893,7 +879,7 @@ async fn delete_zero_rows_returns_zero() {
 // ============ Error Handling Tests ============
 
 #[tokio::test]
-async fn browse_table_uses_estimated_count_for_slow_drivers() {
+async fn first_page_uses_estimated_count_for_slow_drivers() {
     // MySQL, PostgreSQL, MSSQL, ClickHouse should use metadata-based
     // estimated counts instead of expensive COUNT(*) full table scans.
     let conn = Arc::new(
@@ -902,16 +888,8 @@ async fn browse_table_uses_estimated_count_for_slow_drivers() {
             .with_query_response("information_schema.TABLES", count_result(54_305_000))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
 
-    let result = service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            None,
-            None,
-        )
+    let result = browse_first_page(&conn, users())
         .await
         .expect("should browse with estimated count");
 
@@ -945,7 +923,7 @@ async fn browse_table_uses_estimated_count_for_slow_drivers() {
 }
 
 #[tokio::test]
-async fn browse_table_runs_count_for_fast_drivers() {
+async fn first_page_runs_count_for_fast_drivers() {
     // SQLite and DuckDB should run COUNT(*) since it's essentially free.
     let conn = Arc::new(
         MockConnection::new("test_db")
@@ -953,16 +931,8 @@ async fn browse_table_runs_count_for_fast_drivers() {
             .with_query_response("COUNT(*)", count_result(42))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
 
-    let result = service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            None,
-            None,
-        )
+    let result = browse_first_page(&conn, users())
         .await
         .expect("should browse with count");
 
@@ -982,17 +952,13 @@ async fn browse_table_runs_count_for_fast_drivers() {
 }
 
 #[tokio::test]
-async fn browse_table_on_failing_connection_returns_error() {
+async fn first_page_on_failing_connection_returns_error() {
     let conn = Arc::new(
         MockConnection::new("test_db")
             .with_driver("postgresql")
             .with_failure(),
     );
-    let service = TableService::new(100);
-
-    let result = service
-        .browse_table(conn as Arc<dyn Connection>, "users", None, None, None)
-        .await;
+    let result = browse_first_page(&conn, users()).await;
 
     assert!(result.is_err());
 }
@@ -1000,7 +966,7 @@ async fn browse_table_on_failing_connection_returns_error() {
 // ============ Estimated Count Tests ============
 
 #[tokio::test]
-async fn browse_table_exact_count_not_estimated_for_fast_drivers() {
+async fn first_page_exact_count_not_estimated_for_fast_drivers() {
     // SQLite/DuckDB use exact COUNT(*), so is_estimated_total should be false.
     let conn = Arc::new(
         MockConnection::new("test_db")
@@ -1008,16 +974,8 @@ async fn browse_table_exact_count_not_estimated_for_fast_drivers() {
             .with_query_response("COUNT(*)", count_result(42))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
 
-    let result = service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            None,
-            None,
-        )
+    let result = browse_first_page(&conn, users())
         .await
         .expect("should browse with exact count");
 
@@ -1029,23 +987,15 @@ async fn browse_table_exact_count_not_estimated_for_fast_drivers() {
 }
 
 #[tokio::test]
-async fn browse_table_estimated_count_for_postgres() {
+async fn first_page_estimated_count_for_postgres() {
     let conn = Arc::new(
         MockConnection::new("test_db")
             .with_driver("postgresql")
             .with_query_response("pg_class", count_result(1_000_000))
             .with_result(rows_result()),
     );
-    let service = TableService::new(100);
 
-    let result = service
-        .browse_table(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            None,
-            None,
-        )
+    let result = browse_first_page(&conn, users())
         .await
         .expect("should browse with estimated count");
 
@@ -1084,8 +1034,7 @@ async fn estimate_row_count_uses_embedded_schema_for_postgres() {
     let (total, is_estimated) = service
         .estimate_row_count(
             conn.clone() as Arc<dyn Connection>,
-            "orders.cart_items",
-            None,
+            &TableRef::new(None, Some("orders".into()), "cart_items"),
         )
         .await
         .expect("should estimate count for qualified table")
@@ -1104,155 +1053,6 @@ async fn estimate_row_count_uses_embedded_schema_for_postgres() {
 }
 
 #[tokio::test]
-async fn browse_with_filters_skips_estimate_for_slow_drivers() {
-    // When filters are active on a slow-count driver, metadata estimates
-    // don't apply (they reflect the whole table, not the filtered subset).
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    let result = service
-        .browse_table_with_filters(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseTableWithFiltersRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec!["status = 'active'".to_string()],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: None,
-                offset: None,
-                cached_total: None,
-            },
-        )
-        .await
-        .expect("should browse with filters");
-
-    assert_eq!(
-        result.total_rows, None,
-        "filtered queries on slow drivers should not have total_rows"
-    );
-    assert!(
-        !result.is_estimated_total,
-        "no estimate should be flagged when skipping count"
-    );
-
-    let log = conn.query_log();
-    assert_eq!(
-        log.len(),
-        1,
-        "should only issue 1 query (data only): {:?}",
-        log
-    );
-    assert!(
-        !log.iter().any(|q| q.contains("COUNT(*)")),
-        "should NOT run COUNT(*): {:?}",
-        log
-    );
-    assert!(
-        !log.iter().any(|q| q.contains("information_schema")),
-        "should NOT run metadata estimate with active filters: {:?}",
-        log
-    );
-}
-
-#[tokio::test]
-async fn browse_with_filters_no_filters_uses_estimate_for_slow_drivers() {
-    // When no filters are active on a slow-count driver, the estimated
-    // count from metadata should be used.
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_query_response("information_schema.TABLES", count_result(10_000))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    let result = service
-        .browse_table_with_filters(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseTableWithFiltersRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: None,
-                offset: None,
-                cached_total: None,
-            },
-        )
-        .await
-        .expect("should browse without filters");
-
-    assert_eq!(
-        result.total_rows,
-        Some(10_000),
-        "unfiltered queries on slow drivers should have estimated total"
-    );
-    assert!(result.is_estimated_total, "should be flagged as estimated");
-
-    let log = conn.query_log();
-    assert_eq!(
-        log.len(),
-        2,
-        "should issue 2 queries (data + estimate): {:?}",
-        log
-    );
-    assert!(
-        log.iter().any(|q| q.contains("information_schema.TABLES")),
-        "should use information_schema for estimate: {:?}",
-        log
-    );
-}
-
-#[tokio::test]
-async fn browse_with_filters_uses_cached_total_when_provided() {
-    // When a cached total is provided, no count query should be issued
-    // regardless of driver type.
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    let result = service
-        .browse_table_with_filters(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseTableWithFiltersRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: None,
-                offset: None,
-                cached_total: Some(5000),
-            },
-        )
-        .await
-        .expect("should browse with cached total");
-
-    assert_eq!(result.total_rows, Some(5000), "should reuse cached total");
-    assert!(
-        !result.is_estimated_total,
-        "cached totals are not marked as estimated"
-    );
-
-    let log = conn.query_log();
-    assert_eq!(
-        log.len(),
-        1,
-        "should only issue data query when cached total provided: {:?}",
-        log
-    );
-}
-
-#[tokio::test]
 async fn estimate_row_count_mysql_returns_estimated() {
     let conn = Arc::new(
         MockConnection::new("test_db")
@@ -1262,7 +1062,10 @@ async fn estimate_row_count_mysql_returns_estimated() {
     let service = TableService::new(100);
 
     let (count, is_estimated) = service
-        .estimate_row_count(conn as Arc<dyn Connection>, "booking", Some("hotel_db"))
+        .estimate_row_count(
+            conn as Arc<dyn Connection>,
+            &TableRef::new(None, Some("hotel_db".into()), "booking"),
+        )
         .await
         .expect("should estimate row count")
         .expect("metadata estimate should be available");
@@ -1286,8 +1089,7 @@ async fn estimate_row_count_postgres_returns_estimated() {
     let (count, is_estimated) = service
         .estimate_row_count(
             conn.clone() as Arc<dyn Connection>,
-            "events",
-            Some("public"),
+            &TableRef::new(None, Some("public".into()), "events"),
         )
         .await
         .expect("should estimate row count")
@@ -1318,7 +1120,10 @@ async fn estimate_row_count_postgres_returns_none_when_metadata_missing() {
     let service = TableService::new(100);
 
     let count = service
-        .estimate_row_count(conn as Arc<dyn Connection>, "orders", Some("zqlz_lab"))
+        .estimate_row_count(
+            conn as Arc<dyn Connection>,
+            &TableRef::new(None, Some("zqlz_lab".into()), "orders"),
+        )
         .await
         .expect("metadata miss should not fail table load");
 
@@ -1335,7 +1140,10 @@ async fn estimate_row_count_sqlite_falls_back_to_exact_count() {
     let service = TableService::new(100);
 
     let (count, is_estimated) = service
-        .estimate_row_count(conn.clone() as Arc<dyn Connection>, "users", None)
+        .estimate_row_count(
+            conn.clone() as Arc<dyn Connection>,
+            &TableRef::new(None, None, "users"),
+        )
         .await
         .expect("should count rows exactly")
         .expect("exact count should be available");
@@ -1364,7 +1172,10 @@ async fn estimate_row_count_duckdb_falls_back_to_exact_count() {
     let service = TableService::new(100);
 
     let (count, is_estimated) = service
-        .estimate_row_count(conn as Arc<dyn Connection>, "measurements", None)
+        .estimate_row_count(
+            conn as Arc<dyn Connection>,
+            &TableRef::new(None, None, "measurements"),
+        )
         .await
         .expect("should count rows exactly")
         .expect("exact count should be available");
@@ -1376,740 +1187,237 @@ async fn estimate_row_count_duckdb_falls_back_to_exact_count() {
     );
 }
 
-#[tokio::test]
-async fn count_rows_with_filters() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_query_response("COUNT(*)", count_result(1234)),
-    );
-    let service = TableService::new(100);
-
-    let total = service
-        .count_rows(
-            conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec!["status = 'active'".to_string(), "age > 18".to_string()],
-        )
-        .await
-        .expect("should count with filters");
-
-    assert_eq!(total, 1234);
-
-    let log = conn.query_log();
-    assert_eq!(log.len(), 1);
-    assert!(log[0].contains("WHERE status = 'active' AND age > 18"));
-}
+// ============ Relation resolution round-trip tests ============
 
 #[tokio::test]
-async fn count_rows_on_failing_connection_returns_error() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_failure(),
+async fn resolving_a_table_with_a_known_schema_skips_the_catalog() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("mysql"));
+    let table = TableRef::new(
+        Some("seekunique-dev".into()),
+        Some("seekunique-dev".into()),
+        "accounting_payments",
     );
-    let service = TableService::new(100);
 
-    let result = service
-        .count_rows(conn as Arc<dyn Connection>, "users", None, vec![])
+    let resolved = TableService::new(100)
+        .resolve_table(conn.clone() as Arc<dyn Connection>, table.clone())
         .await;
 
-    assert!(result.is_err());
+    assert_eq!(resolved, table);
+    assert!(
+        conn.list_tables_schemas().is_empty(),
+        "a known schema needs no catalog listing: {:?}",
+        conn.list_tables_schemas()
+    );
 }
 
-// ============ browse_last_page Tests ============
-
 #[tokio::test]
-async fn browse_last_page_reverses_rows_and_returns_total() {
-    let data_result = mock_query_result(
-        vec!["id", "name"],
-        vec![
-            vec![Value::Int64(100), Value::String("Zara".into())],
-            vec![Value::Int64(99), Value::String("Yuri".into())],
-            vec![Value::Int64(98), Value::String("Xena".into())],
-        ],
-    );
+async fn resolving_finds_views_and_marks_them() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("mysql"));
 
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_query_response("COUNT(*)", count_result(100))
-            .with_result(data_result),
-    );
-    let service = TableService::new(1000);
-
-    let result = service
-        .browse_last_page(
+    let resolved = TableService::new(100)
+        .resolve_table(
             conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 3,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should browse last page");
-
-    // Rows should be reversed client-side to restore display order
-    assert_eq!(result.rows.len(), 3);
-    assert_eq!(result.rows[0].values[0], Value::Int64(98));
-    assert_eq!(result.rows[1].values[0], Value::Int64(99));
-    assert_eq!(result.rows[2].values[0], Value::Int64(100));
-
-    assert_eq!(result.total_rows, Some(100));
-}
-
-#[tokio::test]
-async fn browse_last_page_uses_pk_desc_without_user_sorts() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_query_response("COUNT(*)", count_result(50))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 10,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let data_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a data query");
-    assert!(
-        data_query.contains("ORDER BY `id` DESC"),
-        "should use PK DESC when no user sorts: {}",
-        data_query
-    );
-    assert!(
-        data_query.contains("LIMIT 10"),
-        "should use the requested limit: {}",
-        data_query
-    );
-    assert!(
-        !data_query.contains("OFFSET"),
-        "should NOT have OFFSET (that's the whole point): {}",
-        data_query
-    );
-}
-
-#[tokio::test]
-async fn browse_last_page_flips_user_sorts() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_query_response("COUNT(*)", count_result(200))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "events",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec!["\"created_at\" ASC".to_string(), "\"id\" DESC".to_string()],
-                visible_columns: vec![],
-                limit: 25,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let data_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a data query");
-    assert!(
-        data_query.contains("ORDER BY \"created_at\" DESC, \"id\" ASC"),
-        "should flip user sort directions: {}",
-        data_query
-    );
-}
-
-#[tokio::test]
-async fn browse_last_page_with_schema_qualifier() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_query_response("COUNT(*)", count_result(54_000_000))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(1000);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "booking",
-                schema: Some("hotel_db"),
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 1000,
-                pk_columns: vec!["booking_id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    assert!(
-        log.iter().all(|q| q.contains("`hotel_db`.`booking`")),
-        "all queries should use qualified table name: {:?}",
-        log
-    );
-}
-
-#[tokio::test]
-async fn browse_last_page_with_where_clauses() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_query_response("COUNT(*)", count_result(500))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec!["status = 'active'".to_string()],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 50,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    // Both data and count queries should have the WHERE clause
-    assert!(
-        log.iter().all(|q| q.contains("WHERE status = 'active'")),
-        "all queries should include WHERE clause: {:?}",
-        log
-    );
-}
-
-#[tokio::test]
-async fn browse_last_page_with_visible_columns() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_query_response("COUNT(*)", count_result(100))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec!["id".to_string(), "name".to_string()],
-                limit: 20,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let data_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a data query");
-    assert!(
-        data_query.contains("\"id\", \"name\""),
-        "should select specific columns: {}",
-        data_query
-    );
-}
-
-#[tokio::test]
-async fn browse_last_page_with_composite_pk() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_query_response("COUNT(*)", count_result(1000))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "order_items",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 50,
-                pk_columns: vec!["order_id".to_string(), "item_id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let data_query = log
-        .iter()
-        .find(|q| q.contains("SELECT") && !q.contains("COUNT(*)"))
-        .expect("should have a data query");
-    assert!(
-        data_query.contains("ORDER BY \"order_id\" DESC, \"item_id\" DESC"),
-        "should reverse all PK columns: {}",
-        data_query
-    );
-}
-
-#[tokio::test]
-async fn browse_last_page_on_failing_connection_returns_error() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_failure(),
-    );
-    let service = TableService::new(100);
-
-    let result = service
-        .browse_last_page(
-            conn as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 50,
-                pk_columns: vec!["id".to_string()],
-            },
+            TableRef::new(Some("app".into()), None, "active_users"),
         )
         .await;
 
-    assert!(result.is_err());
+    assert!(resolved.is_view);
 }
 
 #[tokio::test]
-async fn browse_last_page_runs_count_and_data_concurrently() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_query_response("COUNT(*)", count_result(42))
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(100);
-
-    service
-        .browse_last_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseLastPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 10,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    assert_eq!(log.len(), 2, "should issue exactly 2 queries: {:?}", log);
-    assert!(
-        log.iter().any(|q| q.contains("COUNT(*)")),
-        "should have a COUNT query: {:?}",
-        log
-    );
-    assert!(
-        log.iter()
-            .any(|q| q.contains("SELECT") && !q.contains("COUNT(*)")),
-        "should have a data query: {:?}",
-        log
-    );
-}
-
-// ============ browse_near_end_page Tests ============
-
-#[tokio::test]
-async fn browse_near_end_page_reverses_rows_and_preserves_total() {
-    let data_result = mock_query_result(
-        vec!["id", "name"],
-        vec![
-            vec![Value::Int64(99), Value::String("Yuri".into())],
-            vec![Value::Int64(98), Value::String("Xena".into())],
-        ],
-    );
-
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_result(data_result),
-    );
-    let service = TableService::new(1000);
-
-    // Simulate navigating to the second-to-last page of a 100-row table
-    // with limit=2: offset=96, so rows 96-97 (0-indexed).
-    let result = service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 2,
-                offset: 96,
-                total_rows: 100,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should browse near-end page");
-
-    // Rows should be reversed client-side to restore display order
-    assert_eq!(result.rows.len(), 2);
-    assert_eq!(result.rows[0].values[0], Value::Int64(98));
-    assert_eq!(result.rows[1].values[0], Value::Int64(99));
-
-    // Total should be preserved
-    assert_eq!(result.total_rows, Some(100));
-}
-
-#[tokio::test]
-async fn browse_near_end_page_computes_correct_reverse_offset() {
+async fn fetching_a_resolved_table_never_touches_the_catalog() {
     let conn = Arc::new(
         MockConnection::new("test_db")
             .with_driver("mysql")
             .with_result(rows_result()),
     );
-    let service = TableService::new(1000);
 
-    // Total=54_305_000, limit=1000, offset=54_302_000 (page 54303)
-    // reverse_offset = 54_305_000 - 54_302_000 - 1000 = 2000
-    service
-        .browse_near_end_page(
+    browse_first_page(
+        &conn,
+        TableRef::new(None, Some("seekunique-dev".into()), "accounting_payments"),
+    )
+    .await
+    .expect("should browse a resolved table");
+
+    assert!(
+        conn.list_tables_schemas().is_empty(),
+        "paging must not re-resolve the table: {:?}",
+        conn.list_tables_schemas()
+    );
+    assert!(
+        conn.query_log()
+            .iter()
+            .any(|query| query.contains("`seekunique-dev`.`accounting_payments`")),
+        "should render the schema and name as two identifiers: {:?}",
+        conn.query_log()
+    );
+}
+
+#[tokio::test]
+async fn resolving_a_bare_name_lists_tables_once() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("mysql"));
+
+    TableService::new(100)
+        .resolve_table(
             conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "booking",
-                schema: Some("hotel_db"),
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 1000,
-                offset: 54_302_000,
-                total_rows: 54_305_000,
-                pk_columns: vec!["booking_id".to_string()],
-            },
+            TableRef::new(None, None, "users"),
         )
-        .await
-        .expect("should succeed");
+        .await;
 
-    let log = conn.query_log();
     assert_eq!(
-        log.len(),
+        conn.list_tables_schemas().len(),
         1,
-        "should issue exactly 1 query (no COUNT): {:?}",
-        log
-    );
-    let query = &log[0];
-    assert!(
-        query.contains("ORDER BY `booking_id` DESC"),
-        "should use reversed PK order: {}",
-        query
-    );
-    assert!(
-        query.contains("LIMIT 1000 OFFSET 2000"),
-        "should use reverse_offset=2000: {}",
-        query
-    );
-    assert!(
-        query.contains("`hotel_db`.`booking`"),
-        "should use qualified table name: {}",
-        query
+        "resolution should list tables once: {:?}",
+        conn.list_tables_schemas()
     );
 }
 
 #[tokio::test]
-async fn browse_near_end_page_last_page_has_zero_reverse_offset() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_result(rows_result()),
+async fn sqlite_resolution_keeps_dotted_names_and_splits_only_confirmed_legacy_names() {
+    let connection: Arc<dyn Connection> = Arc::new(
+        zqlz_drivers::sqlite::SqliteConnection::open(":memory:").expect("open sqlite memory db"),
     );
-    let service = TableService::new(1000);
-
-    // Total=100, limit=10, offset=90 (last page) → reverse_offset=0
-    service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 10,
-                offset: 90,
-                total_rows: 100,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let query = &log[0];
-    assert!(
-        query.contains("LIMIT 10 OFFSET 0"),
-        "last page should have reverse_offset=0: {}",
-        query
-    );
-}
-
-#[tokio::test]
-async fn browse_near_end_page_partial_last_page_adjusts_limit() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(1000);
-
-    // Total=95, limit=10, offset=90 → only 5 rows remain
-    // reverse_offset = 95 - 90 - 10 = -5 → saturates to 0
-    // reverse_limit = min(10, 95 - 90) = 5
-    service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 10,
-                offset: 90,
-                total_rows: 95,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let query = &log[0];
-    assert!(
-        query.contains("LIMIT 5 OFFSET 0"),
-        "partial last page should adjust limit to remaining rows: {}",
-        query
-    );
-}
-
-#[tokio::test]
-async fn browse_near_end_page_flips_user_sorts() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(1000);
-
-    service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "events",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec!["\"created_at\" ASC".to_string(), "\"id\" DESC".to_string()],
-                visible_columns: vec![],
-                limit: 100,
-                offset: 900,
-                total_rows: 1000,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let query = &log[0];
-    assert!(
-        query.contains("ORDER BY \"created_at\" DESC, \"id\" ASC"),
-        "should flip user sort directions: {}",
-        query
-    );
-}
-
-#[tokio::test]
-async fn browse_near_end_page_with_where_clauses() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(1000);
-
-    service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec!["status = 'active'".to_string()],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 10,
-                offset: 90,
-                total_rows: 100,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let query = &log[0];
-    assert!(
-        query.contains("WHERE status = 'active'"),
-        "should include WHERE clause: {}",
-        query
-    );
-}
-
-#[tokio::test]
-async fn browse_near_end_page_with_visible_columns() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(1000);
-
-    service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec!["id".to_string(), "name".to_string()],
-                limit: 10,
-                offset: 90,
-                total_rows: 100,
-                pk_columns: vec!["id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let query = &log[0];
-    assert!(
-        query.contains("\"id\", \"name\""),
-        "should select specific columns: {}",
-        query
-    );
-}
-
-#[tokio::test]
-async fn browse_near_end_page_with_composite_pk() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("postgresql")
-            .with_result(rows_result()),
-    );
-    let service = TableService::new(1000);
-
-    service
-        .browse_near_end_page(
-            conn.clone() as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "order_items",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 50,
-                offset: 950,
-                total_rows: 1000,
-                pk_columns: vec!["order_id".to_string(), "item_id".to_string()],
-            },
-        )
-        .await
-        .expect("should succeed");
-
-    let log = conn.query_log();
-    let query = &log[0];
-    assert!(
-        query.contains("ORDER BY \"order_id\" DESC, \"item_id\" DESC"),
-        "should reverse all PK columns: {}",
-        query
-    );
-}
-
-#[tokio::test]
-async fn browse_near_end_page_on_failing_connection_returns_error() {
-    let conn = Arc::new(
-        MockConnection::new("test_db")
-            .with_driver("mysql")
-            .with_failure(),
-    );
+    for sql in [
+        "CREATE TABLE \"odd.name\" (id INTEGER PRIMARY KEY)",
+        "CREATE TABLE users (id INTEGER PRIMARY KEY)",
+    ] {
+        connection.execute(sql, &[]).await.expect(sql);
+    }
     let service = TableService::new(100);
+    let resolve =
+        |name: &str| service.resolve_table(connection.clone(), TableRef::new(None, None, name));
 
-    let result = service
-        .browse_near_end_page(
-            conn as Arc<dyn Connection>,
-            BrowseNearEndPageRequest {
-                table_name: "users",
-                schema: None,
-                where_clauses: vec![],
-                order_by_clauses: vec![],
-                visible_columns: vec![],
-                limit: 10,
-                offset: 90,
-                total_rows: 100,
-                pk_columns: vec!["id".to_string()],
-            },
+    assert_eq!(resolve("odd.name").await.name, "odd.name");
+    let legacy = resolve("main.users").await;
+    assert_eq!(
+        (legacy.schema.as_deref(), legacy.name.as_str()),
+        (Some("main"), "users")
+    );
+    let unknown = resolve("nowhere.users").await;
+    assert_eq!(
+        (unknown.schema, unknown.name.as_str()),
+        (None, "nowhere.users")
+    );
+}
+
+// ============ fetch_rows against SQLite ============
+
+async fn seeded_sqlite() -> Arc<dyn Connection> {
+    let connection: Arc<dyn Connection> = Arc::new(
+        zqlz_drivers::sqlite::SqliteConnection::open(":memory:").expect("open sqlite memory db"),
+    );
+    connection
+        .execute(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, bucket INTEGER NOT NULL)",
+            &[],
         )
-        .await;
+        .await
+        .expect("create items");
+    connection
+        .execute(
+            "WITH RECURSIVE n(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM n WHERE id < 2500) \
+             INSERT INTO items (id, bucket) SELECT id, id % 7 FROM n",
+            &[],
+        )
+        .await
+        .expect("seed items");
+    connection
+}
 
-    assert!(result.is_err());
+fn items_query(connection: &dyn Connection) -> QuerySnapshot {
+    QuerySnapshot {
+        pk_columns: vec![connection.quote_identifier("id")],
+        page_size: Some(300),
+        current_page: 1,
+        fast_exact_count: connection.supports_fast_exact_count(),
+        ..QuerySnapshot::default()
+    }
+}
+
+async fn fetch_items(
+    connection: &Arc<dyn Connection>,
+    mode: FetchMode,
+    query: &QuerySnapshot,
+) -> zqlz_services::FetchOutcome {
+    TableService::new(100)
+        .fetch_rows(
+            connection.clone(),
+            &TableRef::new(None, None, "items"),
+            query,
+            plan_fetch(mode, query).expect("a fetch plan"),
+        )
+        .await
+        .expect("fetch items")
+}
+
+fn ids(outcome: &zqlz_services::FetchOutcome) -> Vec<i64> {
+    outcome
+        .result
+        .rows
+        .iter()
+        .filter_map(|row| row.values.first().and_then(Value::as_i64))
+        .collect()
+}
+
+#[tokio::test]
+async fn sqlite_reversed_page_matches_the_forward_page() {
+    let connection = seeded_sqlite().await;
+    let query = QuerySnapshot {
+        order_by_clauses: vec![format!("{} DESC", connection.quote_identifier("bucket"))],
+        ..items_query(connection.as_ref())
+    };
+    let forward = fetch_items(&connection, FetchMode::Page(7), &query).await;
+    assert!(matches!(forward.plan.window, RowWindow::Forward { .. }));
+
+    let with_total = QuerySnapshot {
+        known_total: forward.total.clone(),
+        ..query
+    };
+    let reversed = fetch_items(&connection, FetchMode::Page(7), &with_total).await;
+    assert!(matches!(reversed.plan.window, RowWindow::FromEnd { .. }));
+
+    assert_eq!(ids(&forward), ids(&reversed));
+}
+
+#[tokio::test]
+async fn sqlite_last_page_returns_the_remainder() {
+    let connection = seeded_sqlite().await;
+    let outcome = fetch_items(
+        &connection,
+        FetchMode::Last,
+        &items_query(connection.as_ref()),
+    )
+    .await;
+
+    assert_eq!(outcome.plan.page, 9);
+    assert_eq!(ids(&outcome), (2401..=2500).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn sqlite_count_carries_the_where_clause() {
+    let connection = seeded_sqlite().await;
+    let query = QuerySnapshot {
+        where_clauses: vec!["bucket = 0".to_string()],
+        ..items_query(connection.as_ref())
+    };
+    let outcome = fetch_items(&connection, FetchMode::Page(1), &query).await;
+
+    assert_eq!(outcome.result.total_rows, Some(357));
+    assert_eq!(
+        outcome.total.map(|total| total.where_clauses),
+        Some(vec!["bucket = 0".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn sqlite_limit_off_returns_every_row() {
+    let connection = seeded_sqlite().await;
+    let query = QuerySnapshot {
+        page_size: None,
+        ..items_query(connection.as_ref())
+    };
+    let outcome = fetch_items(&connection, FetchMode::Page(1), &query).await;
+
+    assert_eq!(outcome.result.rows.len(), 2500);
+    assert_eq!(outcome.result.total_rows, Some(2500));
 }

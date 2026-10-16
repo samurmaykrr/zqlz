@@ -1,0 +1,2 @@
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	orders_orders	NULL	index	NULL	idx_orders_tenant_time	149	NULL	152189	100.00	Using index; Using filesort

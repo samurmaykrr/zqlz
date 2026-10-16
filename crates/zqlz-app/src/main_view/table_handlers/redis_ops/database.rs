@@ -98,111 +98,114 @@ impl MainView {
         let db_name_for_events = db_name.clone();
 
         cx.subscribe_in(&viewer_entity, window, {
-            move |_this, _viewer, event: &TableViewerEvent, window, cx| match event {
-                TableViewerEvent::RefreshTable {
-                    connection_id,
-                    table_name,
-                    driver_category,
-                    database_name: _,
-                } => {
-                    handle_refresh_table_event(
-                        *connection_id,
-                        table_name,
-                        *driver_category,
-                        viewer_entity_for_refresh.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::BecameActive {
-                    connection_id,
-                    table_name,
-                    database_name,
-                } => {
-                    handle_became_active_event(
-                        BecameActiveRequest {
-                            connection_id: *connection_id,
-                            table_name: table_name.clone(),
-                            database_name: database_name.clone(),
-                        },
-                        schema_details_panel.clone(),
-                        results_panel.clone(),
-                        &workspace_controller,
-                        &inspector_panel,
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::BecameInactive {
-                    connection_id,
-                    table_name,
-                } => {
-                    handle_became_inactive_event(
-                        *connection_id,
-                        table_name,
-                        &schema_details_panel,
-                        cx,
-                    );
-                }
-                TableViewerEvent::HideColumn { column_name } => {
-                    _viewer.update(cx, |panel, cx| {
-                        panel.hide_column(column_name, cx);
+            move |_this, viewer, event: &TableViewerEvent, window, cx| {
+                let (connection_id, table_name, database_name, driver_category) =
+                    viewer.read_with(cx, |viewer, _cx| {
+                        (
+                            viewer.connection_id().unwrap_or_default(),
+                            viewer.table_name().unwrap_or_default(),
+                            viewer.database_name(),
+                            viewer.driver_category,
+                        )
                     });
-                }
-                TableViewerEvent::FreezeColumn { col_ix } => {
-                    _viewer.update(cx, |panel, cx| {
-                        panel.freeze_column(*col_ix, cx);
-                    });
-                }
-                TableViewerEvent::UnfreezeColumn { col_ix } => {
-                    _viewer.update(cx, |panel, cx| {
-                        panel.unfreeze_column(*col_ix, cx);
-                    });
-                }
-                TableViewerEvent::SizeColumnToFit { col_ix } => {
-                    _viewer.update(cx, |panel, cx| {
-                        panel.size_column_to_fit(*col_ix, cx);
-                    });
-                }
-                TableViewerEvent::SizeAllColumnsToFit => {
-                    _viewer.update(cx, |panel, cx| {
-                        panel.size_all_columns_to_fit(cx);
-                    });
-                }
-                TableViewerEvent::EditCell { .. }
-                | TableViewerEvent::SaveCell { .. }
-                | TableViewerEvent::InlineEditStarted
-                | TableViewerEvent::ValidationFailed { .. }
-                | TableViewerEvent::DiscardChanges
-                | TableViewerEvent::ApplyFilters { .. }
-                | TableViewerEvent::SortColumn { .. }
-                | TableViewerEvent::ColumnVisibilityChanged { .. }
-                | TableViewerEvent::MultiLineContentFlattened
-                | TableViewerEvent::CellSelected { .. }
-                | TableViewerEvent::RowSelected { .. }
-                | TableViewerEvent::EditRow { .. }
-                | TableViewerEvent::DeleteRows { .. }
-                | TableViewerEvent::MarkRowsForDeletion { .. }
-                | TableViewerEvent::AddRedisKey { .. }
-                | TableViewerEvent::AddRowForm { .. }
-                | TableViewerEvent::AddRow { .. }
-                | TableViewerEvent::SaveNewRow { .. }
-                | TableViewerEvent::CommitChanges { .. }
-                | TableViewerEvent::GenerateChangesSql { .. }
-                | TableViewerEvent::PageChanged { .. }
-                | TableViewerEvent::LimitChanged { .. }
-                | TableViewerEvent::LimitEnabledChanged { .. }
-                | TableViewerEvent::LoadMore { .. }
-                | TableViewerEvent::LoadFkValues { .. }
-                | TableViewerEvent::NavigateToFkTable { .. }
-                | TableViewerEvent::AddQuickFilter { .. }
-                | TableViewerEvent::LastPageRequested { .. }
-                | TableViewerEvent::LoadDistinctValues { .. }
-                | TableViewerEvent::CountCompleted { .. } => {
-                    tracing::debug!(
-                        database_name = %db_name_for_events,
-                        "Ignoring table event for key-value key viewer"
-                    );
+                let (connection_id, table_name, database_name, driver_category) = (
+                    &connection_id,
+                    &table_name,
+                    &database_name,
+                    &driver_category,
+                );
+                // Relational viewers know their resolved table; key-value and
+                // document viewers are named by key or collection.
+                let viewer_table_ref = viewer.read(cx).table().unwrap_or_else(|| {
+                    zqlz_core::TableRef::new(database_name.clone(), None, table_name.clone())
+                });
+                match event {
+                    TableViewerEvent::RefreshTable => {
+                        handle_refresh_table_event(
+                            *connection_id,
+                            table_name,
+                            *driver_category,
+                            viewer_entity_for_refresh.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::BecameActive => {
+                        handle_became_active_event(
+                            BecameActiveRequest {
+                                connection_id: *connection_id,
+                                table: viewer_table_ref.clone(),
+                            },
+                            schema_details_panel.clone(),
+                            results_panel.clone(),
+                            &workspace_controller,
+                            &inspector_panel,
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::BecameInactive => {
+                        handle_became_inactive_event(
+                            *connection_id,
+                            &viewer_table_ref,
+                            &schema_details_panel,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::HideColumn { column_name } => {
+                        viewer.update(cx, |panel, cx| {
+                            panel.hide_column(column_name, cx);
+                        });
+                    }
+                    TableViewerEvent::FreezeColumn { col_ix } => {
+                        viewer.update(cx, |panel, cx| {
+                            panel.freeze_column(*col_ix, cx);
+                        });
+                    }
+                    TableViewerEvent::UnfreezeColumn { col_ix } => {
+                        viewer.update(cx, |panel, cx| {
+                            panel.unfreeze_column(*col_ix, cx);
+                        });
+                    }
+                    TableViewerEvent::SizeColumnToFit { col_ix } => {
+                        viewer.update(cx, |panel, cx| {
+                            panel.size_column_to_fit(*col_ix, cx);
+                        });
+                    }
+                    TableViewerEvent::SizeAllColumnsToFit => {
+                        viewer.update(cx, |panel, cx| {
+                            panel.size_all_columns_to_fit(cx);
+                        });
+                    }
+                    TableViewerEvent::EditCell { .. }
+                    | TableViewerEvent::SaveCell { .. }
+                    | TableViewerEvent::InlineEditStarted
+                    | TableViewerEvent::ValidationFailed { .. }
+                    | TableViewerEvent::DiscardChanges
+                    | TableViewerEvent::FiltersApplied
+                    | TableViewerEvent::SortColumn { .. }
+                    | TableViewerEvent::ColumnVisibilityChanged { .. }
+                    | TableViewerEvent::MultiLineContentFlattened
+                    | TableViewerEvent::CellSelected { .. }
+                    | TableViewerEvent::RowSelected { .. }
+                    | TableViewerEvent::EditRow { .. }
+                    | TableViewerEvent::DeleteRows { .. }
+                    | TableViewerEvent::MarkRowsForDeletion { .. }
+                    | TableViewerEvent::AddRedisKey
+                    | TableViewerEvent::AddRowForm { .. }
+                    | TableViewerEvent::AddRow { .. }
+                    | TableViewerEvent::SaveNewRow { .. }
+                    | TableViewerEvent::CommitChanges { .. }
+                    | TableViewerEvent::GenerateChangesSql { .. }
+                    | TableViewerEvent::LoadFkValues { .. }
+                    | TableViewerEvent::NavigateToFkTable { .. }
+                    | TableViewerEvent::AddQuickFilter { .. }
+                    | TableViewerEvent::LoadDistinctValues { .. } => {
+                        tracing::debug!(
+                            database_name = %db_name_for_events,
+                            "Ignoring table event for key-value key viewer"
+                        );
+                    }
                 }
             }
         })
@@ -352,161 +355,161 @@ impl MainView {
 
         cx.subscribe_in(&viewer_entity, window, {
             let db_name = event_db_name.clone();
-            move |_this, _viewer, event: &TableViewerEvent, window, cx| match event {
-                TableViewerEvent::EditCell {
-                    connection_id,
-                    all_row_values,
-                    all_column_names,
-                    ..
-                } => {
-                    handle_redis_key_edit_event(
-                        RedisKeyEditRequest {
-                            connection_id: *connection_id,
-                            database_name: db_name.clone(),
-                            all_row_values: all_row_values.clone(),
-                            all_column_names: all_column_names.clone(),
-                        },
-                        &key_value_editor_panel,
-                        &cell_editor_panel,
-                        &workspace_controller,
-                        &inspector_panel,
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::RefreshTable {
-                    connection_id,
-                    table_name,
-                    driver_category,
-                    database_name: _,
-                } => {
-                    handle_refresh_table_event(
-                        *connection_id,
-                        table_name,
-                        *driver_category,
-                        viewer_entity_for_refresh.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::AddRedisKey { connection_id } => {
-                    tracing::info!("AddRedisKey event: opening KeyValueEditor for new key");
-                    key_value_editor_panel.update(cx, |editor, cx| {
-                        editor.new_key(*connection_id, Some(db_name.clone()), window, cx);
+            move |_this, viewer, event: &TableViewerEvent, window, cx| {
+                let (connection_id, table_name, database_name, driver_category) =
+                    viewer.read_with(cx, |viewer, _cx| {
+                        (
+                            viewer.connection_id().unwrap_or_default(),
+                            viewer.table_name().unwrap_or_default(),
+                            viewer.database_name(),
+                            viewer.driver_category,
+                        )
                     });
-
-                    inspector_panel.update(cx, |panel, cx| {
-                        panel.set_active_view(InspectorView::KeyEditor, cx);
-                    });
-
-                    workspace_controller.update(cx, |workspace, cx| {
-                        workspace.reveal_panel(
-                            "InspectorPanel",
-                            zqlz_ui::widgets::dock::DockPlacement::Right,
+                let (connection_id, table_name, database_name, driver_category) = (
+                    &connection_id,
+                    &table_name,
+                    &database_name,
+                    &driver_category,
+                );
+                // Relational viewers know their resolved table; key-value and
+                // document viewers are named by key or collection.
+                let viewer_table_ref = viewer.read(cx).table().unwrap_or_else(|| {
+                    zqlz_core::TableRef::new(database_name.clone(), None, table_name.clone())
+                });
+                match event {
+                    TableViewerEvent::EditCell {
+                        all_row_values,
+                        all_column_names,
+                        ..
+                    } => {
+                        handle_redis_key_edit_event(
+                            RedisKeyEditRequest {
+                                connection_id: *connection_id,
+                                database_name: db_name.clone(),
+                                all_row_values: all_row_values.clone(),
+                                all_column_names: all_column_names.clone(),
+                            },
+                            &key_value_editor_panel,
+                            &cell_editor_panel,
+                            &workspace_controller,
+                            &inspector_panel,
                             window,
                             cx,
                         );
-                    });
-                }
-                TableViewerEvent::DeleteRows {
-                    connection_id,
-                    table_name: _,
-                    all_column_names,
-                    rows_to_delete,
-                } => {
-                    handle_delete_redis_keys_event(
-                        *connection_id,
-                        Some(db_name.clone()),
+                    }
+                    TableViewerEvent::RefreshTable => {
+                        handle_refresh_table_event(
+                            *connection_id,
+                            table_name,
+                            *driver_category,
+                            viewer_entity_for_refresh.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::AddRedisKey => {
+                        tracing::info!("AddRedisKey event: opening KeyValueEditor for new key");
+                        key_value_editor_panel.update(cx, |editor, cx| {
+                            editor.new_key(*connection_id, Some(db_name.clone()), window, cx);
+                        });
+
+                        inspector_panel.update(cx, |panel, cx| {
+                            panel.set_active_view(InspectorView::KeyEditor, cx);
+                        });
+
+                        workspace_controller.update(cx, |workspace, cx| {
+                            workspace.reveal_panel(
+                                "InspectorPanel",
+                                zqlz_ui::widgets::dock::DockPlacement::Right,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                    TableViewerEvent::DeleteRows {
                         all_column_names,
                         rows_to_delete,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::BecameActive {
-                    connection_id,
-                    table_name,
-                    database_name,
-                } => {
-                    handle_became_active_event(
-                        BecameActiveRequest {
-                            connection_id: *connection_id,
-                            table_name: table_name.clone(),
-                            database_name: database_name.clone(),
-                        },
-                        schema_details_panel.clone(),
-                        results_panel.clone(),
-                        &workspace_controller,
-                        &inspector_panel,
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::BecameInactive {
-                    connection_id,
-                    table_name,
-                } => {
-                    handle_became_inactive_event(
-                        *connection_id,
-                        table_name,
-                        &schema_details_panel,
-                        cx,
-                    );
-                }
-                TableViewerEvent::HideColumn { column_name } => {
-                    viewer_entity_for_events.update(cx, |panel, cx| {
-                        panel.hide_column(column_name, cx);
-                    });
-                }
-                TableViewerEvent::FreezeColumn { col_ix } => {
-                    viewer_entity_for_events.update(cx, |panel, cx| {
-                        panel.freeze_column(*col_ix, cx);
-                    });
-                }
-                TableViewerEvent::UnfreezeColumn { col_ix } => {
-                    viewer_entity_for_events.update(cx, |panel, cx| {
-                        panel.unfreeze_column(*col_ix, cx);
-                    });
-                }
-                TableViewerEvent::SizeColumnToFit { col_ix } => {
-                    viewer_entity_for_events.update(cx, |panel, cx| {
-                        panel.size_column_to_fit(*col_ix, cx);
-                    });
-                }
-                TableViewerEvent::SizeAllColumnsToFit => {
-                    viewer_entity_for_events.update(cx, |panel, cx| {
-                        panel.size_all_columns_to_fit(cx);
-                    });
-                }
-                TableViewerEvent::ApplyFilters { .. }
-                | TableViewerEvent::SortColumn { .. }
-                | TableViewerEvent::InlineEditStarted
-                | TableViewerEvent::MultiLineContentFlattened
-                | TableViewerEvent::ValidationFailed { .. }
-                | TableViewerEvent::ColumnVisibilityChanged { .. }
-                | TableViewerEvent::DiscardChanges
-                | TableViewerEvent::MarkRowsForDeletion { .. } => {}
-                TableViewerEvent::EditRow { .. }
-                | TableViewerEvent::AddRowForm { .. }
-                | TableViewerEvent::RowSelected { .. }
-                | TableViewerEvent::CellSelected { .. }
-                | TableViewerEvent::SaveCell { .. }
-                | TableViewerEvent::AddRow { .. }
-                | TableViewerEvent::SaveNewRow { .. }
-                | TableViewerEvent::CommitChanges { .. }
-                | TableViewerEvent::GenerateChangesSql { .. }
-                | TableViewerEvent::PageChanged { .. }
-                | TableViewerEvent::LimitChanged { .. }
-                | TableViewerEvent::LimitEnabledChanged { .. }
-                | TableViewerEvent::LoadMore { .. }
-                | TableViewerEvent::LoadFkValues { .. }
-                | TableViewerEvent::NavigateToFkTable { .. }
-                | TableViewerEvent::AddQuickFilter { .. }
-                | TableViewerEvent::LastPageRequested { .. }
-                | TableViewerEvent::LoadDistinctValues { .. }
-                | TableViewerEvent::CountCompleted { .. } => {
-                    tracing::debug!("Ignoring SQL-specific event for KeyValue viewer");
+                    } => {
+                        handle_delete_redis_keys_event(
+                            *connection_id,
+                            Some(db_name.clone()),
+                            all_column_names,
+                            rows_to_delete,
+                            viewer_entity_for_events.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::BecameActive => {
+                        handle_became_active_event(
+                            BecameActiveRequest {
+                                connection_id: *connection_id,
+                                table: viewer_table_ref.clone(),
+                            },
+                            schema_details_panel.clone(),
+                            results_panel.clone(),
+                            &workspace_controller,
+                            &inspector_panel,
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::BecameInactive => {
+                        handle_became_inactive_event(
+                            *connection_id,
+                            &viewer_table_ref,
+                            &schema_details_panel,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::HideColumn { column_name } => {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
+                            panel.hide_column(column_name, cx);
+                        });
+                    }
+                    TableViewerEvent::FreezeColumn { col_ix } => {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
+                            panel.freeze_column(*col_ix, cx);
+                        });
+                    }
+                    TableViewerEvent::UnfreezeColumn { col_ix } => {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
+                            panel.unfreeze_column(*col_ix, cx);
+                        });
+                    }
+                    TableViewerEvent::SizeColumnToFit { col_ix } => {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
+                            panel.size_column_to_fit(*col_ix, cx);
+                        });
+                    }
+                    TableViewerEvent::SizeAllColumnsToFit => {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
+                            panel.size_all_columns_to_fit(cx);
+                        });
+                    }
+                    TableViewerEvent::FiltersApplied
+                    | TableViewerEvent::SortColumn { .. }
+                    | TableViewerEvent::InlineEditStarted
+                    | TableViewerEvent::MultiLineContentFlattened
+                    | TableViewerEvent::ValidationFailed { .. }
+                    | TableViewerEvent::ColumnVisibilityChanged { .. }
+                    | TableViewerEvent::DiscardChanges
+                    | TableViewerEvent::MarkRowsForDeletion { .. } => {}
+                    TableViewerEvent::EditRow { .. }
+                    | TableViewerEvent::AddRowForm { .. }
+                    | TableViewerEvent::RowSelected { .. }
+                    | TableViewerEvent::CellSelected { .. }
+                    | TableViewerEvent::SaveCell { .. }
+                    | TableViewerEvent::AddRow { .. }
+                    | TableViewerEvent::SaveNewRow { .. }
+                    | TableViewerEvent::CommitChanges { .. }
+                    | TableViewerEvent::GenerateChangesSql { .. }
+                    | TableViewerEvent::LoadFkValues { .. }
+                    | TableViewerEvent::NavigateToFkTable { .. }
+                    | TableViewerEvent::AddQuickFilter { .. }
+                    | TableViewerEvent::LoadDistinctValues { .. } => {
+                        tracing::debug!("Ignoring SQL-specific event for KeyValue viewer");
+                    }
                 }
             }
         })

@@ -6,8 +6,8 @@ use crate::widgets::{
 };
 use gpui::{
     AnyElement, App, Axis, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder, px, relative, rems,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    div, prelude::FluentBuilder, px, relative, rems,
 };
 
 type RadioClickHandler = Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
@@ -29,6 +29,10 @@ pub struct Radio {
     tab_index: isize,
     size: Size,
     on_click: Option<RadioClickHandler>,
+    /// 1-based position within a RadioGroup, reported to assistive technology.
+    position_in_set: Option<usize>,
+    /// Total RadioGroup size, reported to assistive technology.
+    size_of_set: Option<usize>,
 }
 
 impl Radio {
@@ -46,6 +50,8 @@ impl Radio {
             tab_stop: true,
             size: Size::default(),
             on_click: None,
+            position_in_set: None,
+            size_of_set: None,
         }
     }
 
@@ -152,6 +158,15 @@ impl RenderOnce for Radio {
         div().child(
             self.base
                 .id(self.id.clone())
+                .role(Role::RadioButton)
+                .aria_selected(self.checked)
+                .when_some(self.label.as_ref().map(|l| l.get_text(cx)), |this, label| {
+                    this.aria_label(label)
+                })
+                .when_some(self.position_in_set, |this, pos| {
+                    this.aria_position_in_set(pos)
+                })
+                .when_some(self.size_of_set, |this, size| this.aria_size_of_set(size))
                 .when(!self.disabled, |this| {
                     this.track_focus(
                         &focus_handle
@@ -345,8 +360,10 @@ impl RenderOnce for RadioGroup {
             h_flex().w_full().flex_wrap()
         };
 
-        let mut container = div().id(self.id);
+        let mut container = div().id(self.id).role(Role::RadioGroup);
         *container.style() = self.style;
+
+        let total_radios = self.radios.len();
 
         container.child(
             base.gap_3()
@@ -354,6 +371,8 @@ impl RenderOnce for RadioGroup {
                     let checked = selected_ix == Some(ix);
 
                     radio.id = ix.into();
+                    radio.position_in_set = Some(ix + 1);
+                    radio.size_of_set = Some(total_radios);
                     radio.disabled(disabled).checked(checked).when_some(
                         on_click.clone(),
                         |this, on_click| {

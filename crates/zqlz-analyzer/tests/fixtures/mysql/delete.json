@@ -1,0 +1,13 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "delete": true,
+      "table_name": "orders_order_items",
+      "access_type": "ALL",
+      "rows_examined_per_scan": 488256,
+      "filtered": "100.00",
+      "attached_condition": "(`erp_lab`.`orders_order_items`.`quantity` < 0.0000)"
+    }
+  }
+}

@@ -1,30 +1,41 @@
 //! Type definitions for sidebar data structures
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use uuid::Uuid;
 use zqlz_core::{
     DocumentAdminObjectInfo, DocumentCollectionInfo, DocumentFunctionInfo,
-    DocumentGridFsBucketInfo, DocumentIndexInfo, ObjectFeatureSet, ObjectsPanelManifest,
+    DocumentGridFsBucketInfo, DocumentIndexInfo, DriverCategory, ObjectFeatureSet,
+    ObjectKindSupport, ObjectsPanelManifest, driver_category_from_driver_name,
 };
 use zqlz_drivers::DriverRegistry;
 
+/// Sidebar-facing projection of what a driver can browse, derived from the
+/// driver registry (and refined per connection at runtime) instead of
+/// driver-name allowlists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SidebarObjectCapabilities {
-    pub supports_views: bool,
-    pub supports_materialized_views: bool,
-    pub supports_triggers: bool,
-    pub supports_functions: bool,
-    pub supports_procedures: bool,
-    pub supports_events: bool,
-    pub supports_sequences: bool,
-    pub supports_domains: bool,
-    pub supports_types: bool,
-    pub supports_extensions: bool,
+    /// Whether a database on this driver contains a separate schema level.
+    ///
+    /// False for drivers where the database *is* the namespace (MySQL/MariaDB,
+    /// ClickHouse) or where there is only one (SQLite, Turso); rendering a
+    /// schema folder for those repeats the database node.
+    pub supports_schemas: bool,
+    /// Schema label assumed for objects with no schema qualifier.
+    pub default_schema: Option<&'static str>,
+    /// Object kinds the driver can actually enumerate.
+    pub kinds: ObjectKindSupport,
+    /// Whether triggers render as a top-level section. PostgreSQL renders
+    /// triggers under each table instead.
+    pub triggers_top_level: bool,
+    /// Whether the numbered-databases tree applies (key-value drivers).
+    pub supports_redis_databases: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Declaration order is render order — `Ord` and [`SidebarSection::OBJECT_SECTIONS`]
+/// rely on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SidebarSection {
     Tables,
     Views,
@@ -42,6 +53,22 @@ pub enum SidebarSection {
 }
 
 impl SidebarSection {
+    /// The schema-object sections, in render order. Excludes `Queries` and
+    /// `RedisDatabases`, which are not schema objects.
+    pub const OBJECT_SECTIONS: [Self; 11] = [
+        Self::Tables,
+        Self::Views,
+        Self::MaterializedViews,
+        Self::Triggers,
+        Self::Functions,
+        Self::Procedures,
+        Self::Events,
+        Self::Sequences,
+        Self::Domains,
+        Self::Types,
+        Self::Extensions,
+    ];
+
     pub fn from_key(section: &str) -> Option<Self> {
         match section {
             "tables" => Some(Self::Tables),
@@ -58,6 +85,24 @@ impl SidebarSection {
             "queries" => Some(Self::Queries),
             "redis_databases" => Some(Self::RedisDatabases),
             _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tables => "Tables",
+            Self::Views => "Views",
+            Self::MaterializedViews => "Materialized Views",
+            Self::Triggers => "Triggers",
+            Self::Functions => "Functions",
+            Self::Procedures => "Procedures",
+            Self::Events => "Events",
+            Self::Sequences => "Sequences",
+            Self::Domains => "Domains",
+            Self::Types => "Types",
+            Self::Extensions => "Extensions",
+            Self::Queries => "Queries",
+            Self::RedisDatabases => "Databases",
         }
     }
 
@@ -82,85 +127,76 @@ impl SidebarSection {
 
 impl SidebarObjectCapabilities {
     pub fn for_driver(driver_name: &str) -> Self {
-        let normalized_driver = Self::normalized_driver_name(driver_name);
-        let driver_capabilities = sidebar_driver_registry()
-            .get(&normalized_driver)
-            .map(|driver| driver.capabilities());
+        // The registry resolves aliases (postgresql, mariadb, sqlserver,
+        // mongo) itself; no name normalization needed here.
+        let Some(driver) = sidebar_driver_registry().get(driver_name) else {
+            return Self::default();
+        };
 
         Self {
-            supports_views: driver_capabilities
-                .as_ref()
-                .is_none_or(|capabilities| capabilities.supports_views),
-            supports_materialized_views: matches!(
-                normalized_driver.as_str(),
-                "postgres" | "mssql" | "clickhouse"
-            ),
-            supports_triggers: driver_capabilities.as_ref().is_some_and(|capabilities| {
-                capabilities.supports_triggers && normalized_driver != "postgres"
-            }),
-            supports_functions: matches!(
-                normalized_driver.as_str(),
-                "postgres" | "mysql" | "mariadb" | "mssql"
-            ),
-            supports_procedures: driver_capabilities
-                .as_ref()
-                .is_some_and(|capabilities| capabilities.supports_stored_procedures),
-            supports_events: normalized_driver == "mysql",
-            supports_sequences: normalized_driver == "postgres",
-            supports_domains: normalized_driver == "postgres",
-            supports_types: normalized_driver == "postgres",
-            supports_extensions: normalized_driver == "postgres",
+            supports_schemas: driver.capabilities().supports_schemas,
+            default_schema: driver.default_schema_name(),
+            kinds: driver.object_kinds(),
+            triggers_top_level: Self::triggers_render_top_level(driver.id()),
+            supports_redis_databases: driver_category_from_driver_name(driver.id())
+                == DriverCategory::KeyValue,
         }
     }
 
     pub fn for_connection(connection: &dyn zqlz_core::Connection) -> Self {
-        if let Some(dialect_id) = connection.dialect_id() {
-            return Self::for_driver(dialect_id);
-        }
+        let mut capabilities = match connection.dialect_id() {
+            Some(dialect_id) => Self::for_driver(dialect_id),
+            None => Self::for_driver(connection.driver_name()),
+        };
 
-        Self::for_driver(connection.driver_name())
+        if let Some(introspection) = connection.as_schema_introspection()
+            && let Some(kinds) = introspection.object_kind_support()
+        {
+            capabilities.kinds = kinds;
+        }
+        capabilities.triggers_top_level = connection.supports_top_level_triggers();
+
+        capabilities
     }
 
-    fn normalized_driver_name(driver_name: &str) -> String {
-        match driver_name.to_ascii_lowercase().as_str() {
-            "postgresql" => "postgres".to_string(),
-            "mariadb" => "mysql".to_string(),
-            other => other.to_string(),
-        }
+    /// Placement policy, not a capability: PostgreSQL shows triggers under
+    /// each table, everyone else as a top-level section. Runtime connections
+    /// answer this via `Connection::supports_top_level_triggers`.
+    fn triggers_render_top_level(driver_id: &str) -> bool {
+        driver_id != "postgres"
     }
 
     pub fn supports_section(&self, section: SidebarSection) -> bool {
         match section {
-            SidebarSection::Tables | SidebarSection::Queries | SidebarSection::RedisDatabases => {
-                true
-            }
-            SidebarSection::Views => self.supports_views,
-            SidebarSection::MaterializedViews => self.supports_materialized_views,
-            SidebarSection::Triggers => self.supports_triggers,
-            SidebarSection::Functions => self.supports_functions,
-            SidebarSection::Procedures => self.supports_procedures,
-            SidebarSection::Events => self.supports_events,
-            SidebarSection::Sequences => self.supports_sequences,
-            SidebarSection::Domains => self.supports_domains,
-            SidebarSection::Types => self.supports_types,
-            SidebarSection::Extensions => self.supports_extensions,
+            SidebarSection::Tables | SidebarSection::Queries => true,
+            SidebarSection::RedisDatabases => self.supports_redis_databases,
+            SidebarSection::Views => self.kinds.views,
+            SidebarSection::MaterializedViews => self.kinds.materialized_views,
+            SidebarSection::Triggers => self.kinds.triggers && self.triggers_top_level,
+            SidebarSection::Functions => self.kinds.functions,
+            SidebarSection::Procedures => self.kinds.procedures,
+            SidebarSection::Events => self.kinds.events,
+            SidebarSection::Sequences => self.kinds.sequences,
+            SidebarSection::Domains => self.kinds.domains,
+            SidebarSection::Types => self.kinds.types,
+            SidebarSection::Extensions => self.kinds.extensions,
         }
     }
 }
 
 impl Default for SidebarObjectCapabilities {
+    /// Fail-closed baseline for unknown drivers: tables and saved queries
+    /// only, no schema level.
     fn default() -> Self {
         Self {
-            supports_views: true,
-            supports_materialized_views: false,
-            supports_triggers: false,
-            supports_functions: false,
-            supports_procedures: false,
-            supports_events: false,
-            supports_sequences: false,
-            supports_domains: false,
-            supports_types: false,
-            supports_extensions: false,
+            supports_schemas: false,
+            default_schema: None,
+            kinds: ObjectKindSupport {
+                tables: true,
+                ..ObjectKindSupport::NONE
+            },
+            triggers_top_level: true,
+            supports_redis_databases: false,
         }
     }
 }
@@ -281,12 +317,12 @@ pub struct DatabaseSchemaData {
     ///
     /// Legacy field name retained for backward compatibility with persisted
     /// state; semantically this now stores expanded groups.
-    pub collapsed_schema_groups: HashSet<String>,
+    pub expanded_schema_groups: HashSet<String>,
     /// Expanded section keys for grouped schemas.
     ///
     /// Legacy field name retained for backward compatibility.
     /// Keys are encoded as `<schema>::<section>`.
-    pub collapsed_schema_section_keys: HashSet<String>,
+    pub expanded_schema_section_keys: HashSet<String>,
     pub tables: Vec<String>,
     pub views: Vec<String>,
     pub materialized_views: Vec<String>,
@@ -298,28 +334,106 @@ pub struct DatabaseSchemaData {
     pub domains: Vec<String>,
     pub types: Vec<String>,
     pub extensions: Vec<String>,
-    pub table_details: HashMap<SidebarTableKey, SidebarTableDetailsData>,
-    pub expanded_table_keys: HashSet<SidebarTableKey>,
-    pub loading_table_keys: HashSet<SidebarTableKey>,
-    pub tables_expanded: bool,
-    pub views_expanded: bool,
-    pub materialized_views_expanded: bool,
-    pub triggers_expanded: bool,
-    pub functions_expanded: bool,
-    pub procedures_expanded: bool,
-    pub events_expanded: bool,
-    /// Whether tables are currently being fetched from the server
-    pub tables_loading: bool,
-    /// Whether views are currently being fetched from the server
-    pub views_loading: bool,
-    /// Whether materialized views are currently being fetched from the server
-    pub materialized_views_loading: bool,
-    /// Whether triggers are currently being fetched from the server
-    pub triggers_loading: bool,
-    /// Whether functions are currently being fetched from the server
-    pub functions_loading: bool,
-    /// Whether procedures are currently being fetched from the server
-    pub procedures_loading: bool,
+    /// Which sections are expanded in the tree.
+    pub expanded_sections: HashSet<SidebarSection>,
+    /// Which sections are currently being fetched from the server.
+    pub loading_sections: HashSet<SidebarSection>,
+}
+
+impl From<SchemaObjects> for DatabaseSchemaData {
+    fn from(schema: SchemaObjects) -> Self {
+        let SchemaObjects {
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            events,
+            sequences,
+            domains,
+            types,
+            extensions,
+            schema_name,
+            schema_names,
+        } = schema;
+
+        Self {
+            schema_name,
+            schema_names,
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            events,
+            sequences,
+            domains,
+            types,
+            extensions,
+            ..Self::default()
+        }
+    }
+}
+
+impl DatabaseSchemaData {
+    /// Objects and schema names from `self`, tree expansion state from
+    /// `previous`. Loading state always resets — the data just landed.
+    pub fn with_expansion_from(mut self, previous: Option<&DatabaseSchemaData>) -> Self {
+        self.schema_expanded = previous.is_some_and(|previous| previous.schema_expanded);
+        self.expanded_schema_groups = previous
+            .map(|previous| previous.expanded_schema_groups.clone())
+            .unwrap_or_default();
+        self.expanded_schema_section_keys = previous
+            .map(|previous| previous.expanded_schema_section_keys.clone())
+            .unwrap_or_default();
+        self.expanded_sections = previous
+            .map(|previous| previous.expanded_sections.clone())
+            .unwrap_or_default();
+        self.loading_sections.clear();
+        self
+    }
+
+    /// The schema-object lists paired with their sections in render order —
+    /// the input shape for schema grouping.
+    pub fn object_sections(&self) -> [(SidebarSection, &[String]); 11] {
+        SidebarSection::OBJECT_SECTIONS.map(|section| (section, self.objects(section)))
+    }
+
+    pub fn objects(&self, section: SidebarSection) -> &[String] {
+        match section {
+            SidebarSection::Tables => &self.tables,
+            SidebarSection::Views => &self.views,
+            SidebarSection::MaterializedViews => &self.materialized_views,
+            SidebarSection::Triggers => &self.triggers,
+            SidebarSection::Functions => &self.functions,
+            SidebarSection::Procedures => &self.procedures,
+            SidebarSection::Events => &self.events,
+            SidebarSection::Sequences => &self.sequences,
+            SidebarSection::Domains => &self.domains,
+            SidebarSection::Types => &self.types,
+            SidebarSection::Extensions => &self.extensions,
+            SidebarSection::Queries | SidebarSection::RedisDatabases => &[],
+        }
+    }
+
+    pub fn objects_mut(&mut self, section: SidebarSection) -> Option<&mut Vec<String>> {
+        match section {
+            SidebarSection::Tables => Some(&mut self.tables),
+            SidebarSection::Views => Some(&mut self.views),
+            SidebarSection::MaterializedViews => Some(&mut self.materialized_views),
+            SidebarSection::Triggers => Some(&mut self.triggers),
+            SidebarSection::Functions => Some(&mut self.functions),
+            SidebarSection::Procedures => Some(&mut self.procedures),
+            SidebarSection::Events => Some(&mut self.events),
+            SidebarSection::Sequences => Some(&mut self.sequences),
+            SidebarSection::Domains => Some(&mut self.domains),
+            SidebarSection::Types => Some(&mut self.types),
+            SidebarSection::Extensions => Some(&mut self.extensions),
+            SidebarSection::Queries | SidebarSection::RedisDatabases => None,
+        }
+    }
 }
 
 /// A database connection entry
@@ -336,60 +450,21 @@ pub struct ConnectionEntry {
     pub is_connected: bool,
     pub is_connecting: bool,
     pub is_expanded: bool,
-    pub tables: Vec<String>,
-    pub views: Vec<String>,
-    pub materialized_views: Vec<String>,
-    pub triggers: Vec<String>,
-    pub functions: Vec<String>,
-    pub procedures: Vec<String>,
-    pub events: Vec<String>,
-    pub sequences: Vec<String>,
-    pub domains: Vec<String>,
-    pub types: Vec<String>,
-    pub extensions: Vec<String>,
     pub queries: Vec<SavedQueryInfo>,
-    pub tables_expanded: bool,
-    pub views_expanded: bool,
-    pub materialized_views_expanded: bool,
-    pub triggers_expanded: bool,
-    pub functions_expanded: bool,
-    pub procedures_expanded: bool,
-    pub events_expanded: bool,
     pub queries_expanded: bool,
-    /// Whether tables are currently being fetched from the server
-    pub tables_loading: bool,
-    /// Whether views are currently being fetched from the server
-    pub views_loading: bool,
-    /// Whether materialized views are currently being fetched from the server
-    pub materialized_views_loading: bool,
-    /// Whether triggers are currently being fetched from the server
-    pub triggers_loading: bool,
-    /// Whether functions are currently being fetched from the server
-    pub functions_loading: bool,
-    /// Whether procedures are currently being fetched from the server
-    pub procedures_loading: bool,
+    pub redis_databases_expanded: bool,
     /// Redis databases (only used for Redis connections)
     pub redis_databases: Vec<RedisDatabaseInfo>,
-    /// Whether Redis databases section is expanded
-    pub redis_databases_expanded: bool,
     /// All databases on the server (for drivers that support listing them)
     pub databases: Vec<SidebarDatabaseInfo>,
-    /// The schema name for hierarchy display (e.g. "public")
-    pub schema_name: Option<String>,
-    /// Known schema names for the active database.
-    pub schema_names: Vec<String>,
-    /// Whether the schema-level node is expanded
-    pub schema_expanded: bool,
-    /// Expanded schema-group folders for grouped-schema rendering.
+    /// Schema state for the connection scope: what renders while no database
+    /// node owns a copy — single-namespace drivers that never list databases,
+    /// and the window between connecting and database discovery.
     ///
-    /// Legacy field name retained for backward compatibility with persisted
-    /// state; semantically this now stores expanded groups.
-    pub collapsed_schema_groups: HashSet<String>,
-    /// Expanded section keys for grouped schemas.
-    ///
-    /// Legacy field name retained for backward compatibility.
-    /// Keys are encoded as `<schema>::<section>`.
-    pub collapsed_schema_section_keys: HashSet<String>,
+    /// Never read alongside a database's own [`SidebarDatabaseInfo::schema`];
+    /// [`Self::schema`] and [`Self::schema_mut`] pick whichever of the two is
+    /// live so the schema state has exactly one home at any moment.
+    pub schema: DatabaseSchemaData,
 }
 
 impl ConnectionEntry {
@@ -405,55 +480,63 @@ impl ConnectionEntry {
             is_connected: false,
             is_connecting: false,
             is_expanded: false,
-            tables: Vec::new(),
-            views: Vec::new(),
-            materialized_views: Vec::new(),
-            triggers: Vec::new(),
-            functions: Vec::new(),
-            procedures: Vec::new(),
-            events: Vec::new(),
-            sequences: Vec::new(),
-            domains: Vec::new(),
-            types: Vec::new(),
-            extensions: Vec::new(),
             queries: Vec::new(),
-            tables_expanded: false,
-            views_expanded: false,
-            materialized_views_expanded: false,
-            triggers_expanded: false,
-            functions_expanded: false,
-            procedures_expanded: false,
-            events_expanded: false,
             queries_expanded: false,
-            tables_loading: false,
-            views_loading: false,
-            materialized_views_loading: false,
-            triggers_loading: false,
-            functions_loading: false,
-            procedures_loading: false,
-            redis_databases: Vec::new(),
             redis_databases_expanded: false,
+            redis_databases: Vec::new(),
             databases: Vec::new(),
-            schema_name: None,
-            schema_names: Vec::new(),
-            schema_expanded: false,
-            collapsed_schema_groups: HashSet::new(),
-            collapsed_schema_section_keys: HashSet::new(),
+            schema: DatabaseSchemaData::default(),
         }
     }
 
-    /// Check if this is a Redis connection
+    /// Whether this connection renders the key-value (numbered databases) tree.
     pub fn is_redis(&self) -> bool {
-        self.db_type == "redis"
+        driver_category_from_driver_name(&self.db_type) == DriverCategory::KeyValue
     }
 
+    /// Whether this connection renders the document (collections) tree.
     pub fn is_document(&self) -> bool {
-        self.db_type == "mongodb"
+        driver_category_from_driver_name(&self.db_type) == DriverCategory::Document
     }
 
     pub fn set_db_type(&mut self, db_type: String) {
         self.object_capabilities = SidebarObjectCapabilities::for_driver(&db_type);
         self.db_type = db_type;
+    }
+
+    /// The schema state that renders for `database_name`, or for the active
+    /// database when `None`.
+    ///
+    /// Databases without a loaded copy of their own render the connection-level
+    /// state, so reads and writes must resolve the scope the same way.
+    pub fn schema(&self, database_name: Option<&str>) -> &DatabaseSchemaData {
+        self.databases
+            .iter()
+            .find(|database| Self::is_schema_owner(database, database_name))
+            .and_then(|database| database.schema.as_ref())
+            .unwrap_or(&self.schema)
+    }
+
+    pub fn schema_mut(&mut self, database_name: Option<&str>) -> &mut DatabaseSchemaData {
+        let owner = self
+            .databases
+            .iter()
+            .position(|database| Self::is_schema_owner(database, database_name));
+
+        match owner {
+            // `is_schema_owner` already required a loaded schema, so this
+            // resolves the existing copy rather than inserting a default one.
+            Some(owner) => self.databases[owner].schema.get_or_insert_default(),
+            None => &mut self.schema,
+        }
+    }
+
+    fn is_schema_owner(database: &SidebarDatabaseInfo, database_name: Option<&str>) -> bool {
+        database.schema.is_some()
+            && match database_name {
+                Some(database_name) => database.name == database_name,
+                None => database.is_active,
+            }
     }
 }
 
@@ -465,44 +548,72 @@ mod tests {
     fn sqlite_hides_unsupported_sidebar_sections() {
         let capabilities = SidebarObjectCapabilities::for_driver("sqlite");
 
-        assert!(capabilities.supports_views);
-        assert!(!capabilities.supports_materialized_views);
-        assert!(capabilities.supports_triggers);
-        assert!(!capabilities.supports_functions);
-        assert!(!capabilities.supports_procedures);
+        assert!(capabilities.supports_section(SidebarSection::Views));
+        assert!(!capabilities.supports_section(SidebarSection::MaterializedViews));
+        assert!(capabilities.supports_section(SidebarSection::Triggers));
+        assert!(!capabilities.supports_section(SidebarSection::Functions));
+        assert!(!capabilities.supports_section(SidebarSection::Procedures));
+        assert_eq!(capabilities.default_schema, Some("main"));
     }
 
     #[test]
     fn postgres_hides_top_level_triggers_but_keeps_other_objects() {
         let capabilities = SidebarObjectCapabilities::for_driver("postgres");
 
-        assert!(capabilities.supports_views);
-        assert!(capabilities.supports_materialized_views);
-        assert!(!capabilities.supports_triggers);
-        assert!(capabilities.supports_functions);
-        assert!(capabilities.supports_procedures);
-        assert!(!capabilities.supports_events);
+        assert!(capabilities.supports_section(SidebarSection::Views));
+        assert!(capabilities.supports_section(SidebarSection::MaterializedViews));
+        assert!(!capabilities.supports_section(SidebarSection::Triggers));
+        assert!(capabilities.supports_section(SidebarSection::Functions));
+        assert!(capabilities.supports_section(SidebarSection::Procedures));
+        assert!(capabilities.supports_section(SidebarSection::Sequences));
+        assert!(capabilities.supports_section(SidebarSection::Domains));
+        assert!(capabilities.supports_section(SidebarSection::Extensions));
+        assert!(!capabilities.supports_section(SidebarSection::Events));
+        assert_eq!(capabilities.default_schema, Some("public"));
     }
 
     #[test]
     fn mysql_supports_event_sidebar_section() {
         let capabilities = SidebarObjectCapabilities::for_driver("mysql");
 
-        assert!(capabilities.supports_events);
         assert!(capabilities.supports_section(SidebarSection::Events));
+        assert!(!capabilities.supports_section(SidebarSection::MaterializedViews));
+        assert!(capabilities.supports_section(SidebarSection::Triggers));
+    }
+
+    #[test]
+    fn registry_aliases_resolve_to_the_same_capabilities() {
+        assert_eq!(
+            SidebarObjectCapabilities::for_driver("postgresql"),
+            SidebarObjectCapabilities::for_driver("postgres"),
+        );
+        assert_eq!(
+            SidebarObjectCapabilities::for_driver("mariadb"),
+            SidebarObjectCapabilities::for_driver("mysql"),
+        );
+    }
+
+    #[test]
+    fn unknown_driver_fails_closed_to_tables_and_queries() {
+        let capabilities = SidebarObjectCapabilities::for_driver("not-a-driver");
+
+        assert!(capabilities.supports_section(SidebarSection::Tables));
+        assert!(capabilities.supports_section(SidebarSection::Queries));
+        assert!(!capabilities.supports_section(SidebarSection::Views));
+        assert!(!capabilities.supports_schemas);
     }
 
     #[test]
     fn redis_only_keeps_saved_queries_tree() {
         let capabilities = SidebarObjectCapabilities::for_driver("redis");
 
-        assert!(!capabilities.supports_views);
-        assert!(!capabilities.supports_materialized_views);
-        assert!(!capabilities.supports_triggers);
-        assert!(!capabilities.supports_functions);
-        assert!(!capabilities.supports_procedures);
-        assert!(capabilities.supports_section(SidebarSection::Queries));
         assert!(!capabilities.supports_section(SidebarSection::Views));
+        assert!(!capabilities.supports_section(SidebarSection::MaterializedViews));
+        assert!(!capabilities.supports_section(SidebarSection::Triggers));
+        assert!(!capabilities.supports_section(SidebarSection::Functions));
+        assert!(!capabilities.supports_section(SidebarSection::Procedures));
+        assert!(capabilities.supports_section(SidebarSection::Queries));
+        assert!(capabilities.supports_section(SidebarSection::RedisDatabases));
     }
 
     #[test]

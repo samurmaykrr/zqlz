@@ -34,6 +34,7 @@ pub mod sqlite;
 pub use mysql::{
     MysqlExplainError, parse_json_explain as parse_mysql_json_explain, parse_mysql_explain,
     parse_tabular_explain as parse_mysql_tabular_explain,
+    parse_tree_explain as parse_mysql_tree_explain,
 };
 pub use plan::{ActualTime, JoinType, NodeCost, NodeType, PlanNode, PlanNodeIterator, QueryPlan};
 pub use postgres::{

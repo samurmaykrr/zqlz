@@ -60,7 +60,7 @@ pub use widgets::{
 // Re-export batch execution types
 pub use batch::{
     BatchExecutionResult, BatchExecutor, BatchOptions, BatchResult, ExecutionMode, StatementError,
-    StatementStatus, split_statements,
+    StatementStatus, split_statements, split_statements_for_dialect,
 };
 
 // Re-export schema metadata types

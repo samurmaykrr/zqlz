@@ -126,6 +126,49 @@ pub struct CommentsConfig {
     pub block_comment_end: Option<String>,
 }
 
+/// How a dialect spells auto-increment, as declared in `config.toml`.
+///
+/// Mirrors [`crate::AutoIncrementStyle`], which cannot derive serde itself
+/// because it is part of the driver-facing API rather than the config schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoIncrementStyleConfig {
+    /// Keyword after the column definition (SQLite `AUTOINCREMENT`, MySQL `AUTO_INCREMENT`).
+    #[default]
+    Suffix,
+    /// A dedicated type name (PostgreSQL `SERIAL`).
+    #[serde(rename = "type_name")]
+    TypeName,
+    /// `GENERATED ALWAYS AS IDENTITY`.
+    Generated,
+}
+
+impl From<AutoIncrementStyleConfig> for AutoIncrementStyle {
+    fn from(style: AutoIncrementStyleConfig) -> Self {
+        match style {
+            AutoIncrementStyleConfig::Suffix => AutoIncrementStyle::Suffix,
+            AutoIncrementStyleConfig::TypeName => AutoIncrementStyle::TypeName,
+            AutoIncrementStyleConfig::Generated => AutoIncrementStyle::Generated,
+        }
+    }
+}
+
+/// Auto-increment configuration.
+///
+/// Absent for dialects with no auto-increment concept (ClickHouse, Redis, MongoDB).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoIncrementConfig {
+    /// Keyword emitted in DDL, empty when the style implies its own syntax.
+    #[serde(default)]
+    pub keyword: String,
+    /// How the keyword is applied.
+    #[serde(default)]
+    pub style: AutoIncrementStyleConfig,
+    /// Human-readable note shown in the table designer.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Main dialect configuration loaded from config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialectConfig {
@@ -157,6 +200,9 @@ pub struct DialectConfig {
     /// Comment styles
     #[serde(default)]
     pub comments: CommentsConfig,
+    /// Auto-increment spelling, absent when the dialect has no such concept.
+    #[serde(default)]
+    pub auto_increment: Option<AutoIncrementConfig>,
 }
 
 impl Default for DialectConfig {
@@ -176,6 +222,7 @@ impl Default for DialectConfig {
                 block_comment_start: Some("/*".to_string()),
                 block_comment_end: Some("*/".to_string()),
             },
+            auto_increment: None,
         }
     }
 }
@@ -844,8 +891,9 @@ impl DialectBundle {
 // ============================================================================
 
 use crate::dialect::{
-    CommentStyles, DataTypeCategory as LegacyDataTypeCategory, DataTypeInfo as LegacyDataTypeInfo,
-    DialectInfo, ExplainConfig, FunctionCategory as LegacyFunctionCategory,
+    AutoIncrementInfo, AutoIncrementStyle, CommentStyles,
+    DataTypeCategory as LegacyDataTypeCategory, DataTypeInfo as LegacyDataTypeInfo, DialectInfo,
+    ExplainConfig, FunctionCategory as LegacyFunctionCategory,
     KeywordCategory as LegacyKeywordCategory, KeywordInfo, SqlFunctionInfo,
 };
 
@@ -1135,7 +1183,16 @@ impl From<&DialectBundle> for DialectInfo {
             functions,
             data_types,
             table_options: vec![],
-            auto_increment: None,
+            auto_increment: config.auto_increment.as_ref().map(|auto_increment| {
+                AutoIncrementInfo {
+                    keyword: Cow::Owned(auto_increment.keyword.clone()),
+                    style: auto_increment.style.into(),
+                    description: auto_increment
+                        .description
+                        .as_ref()
+                        .map(|description| Cow::Owned(description.clone())),
+                }
+            }),
             identifier_quote: config.syntax.identifier_quote,
             string_quote: config.syntax.string_quote,
             case_sensitive_identifiers: config.syntax.case_sensitive,
@@ -1227,6 +1284,7 @@ mod tests {
                 block_comment_start: None,
                 block_comment_end: None,
             },
+            auto_increment: None,
         };
 
         assert!(!config.is_sql());
@@ -1321,6 +1379,61 @@ kind = "Keyword"
         assert_eq!(config.syntax_quality.text.as_deref(), Some("GET user:1"));
         assert_eq!(config.syntax_quality.expected[0].token, "GET");
         assert_eq!(config.syntax_quality.expected[0].kind, "Keyword");
+        assert!(
+            config.auto_increment.is_none(),
+            "redis has no auto-increment concept"
+        );
+    }
+
+    #[test]
+    fn parse_auto_increment_section() {
+        let config: DialectConfig = toml::from_str(
+            r#"
+id = "sqlite"
+display_name = "SQLite"
+
+[auto_increment]
+keyword = "AUTOINCREMENT"
+style = "suffix"
+description = "Only valid for INTEGER PRIMARY KEY."
+"#,
+        )
+        .expect("should parse an auto_increment section");
+
+        let auto_increment = config
+            .auto_increment
+            .as_ref()
+            .expect("auto_increment should be present");
+        assert_eq!(auto_increment.keyword, "AUTOINCREMENT");
+        assert_eq!(auto_increment.style, AutoIncrementStyleConfig::Suffix);
+
+        let bundle = DialectBundle::new(config, CompletionsConfig::default());
+        let info: DialectInfo = (&bundle).into();
+        let info_auto_increment = info
+            .auto_increment
+            .expect("conversion should carry auto_increment through to DialectInfo");
+        assert_eq!(info_auto_increment.keyword, "AUTOINCREMENT");
+        assert_eq!(info_auto_increment.style, AutoIncrementStyle::Suffix);
+    }
+
+    #[test]
+    fn parse_auto_increment_type_name_style() {
+        let config: DialectConfig = toml::from_str(
+            r#"
+id = "postgres"
+display_name = "PostgreSQL"
+
+[auto_increment]
+keyword = "SERIAL"
+style = "type_name"
+"#,
+        )
+        .expect("should parse the type_name style");
+
+        assert_eq!(
+            config.auto_increment.expect("present").style,
+            AutoIncrementStyleConfig::TypeName
+        );
     }
 
     #[test]

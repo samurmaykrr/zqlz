@@ -7,7 +7,7 @@ pub mod pool;
 pub mod reconnect;
 pub mod widgets;
 
-pub use config::SavedConnection;
+pub use config::{AgentAccess, AgentAccessPolicy, SavedConnection};
 pub use health::{
     HealthCheckConfig, HealthCheckResult, HealthChecker, HealthStatus, HealthThresholds, PingError,
     PingResult, create_shared_checker, ping_database, ping_database_with_timeout,

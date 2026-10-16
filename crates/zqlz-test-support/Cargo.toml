@@ -1,0 +1,13 @@
+[package]
+name = "zqlz-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared GPUI window-test scaffolding for zqlz's render_tests.rs modules"
+
+[lib]
+path = "src/zqlz_test_support.rs"
+
+[dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+zqlz-ui = { workspace = true }

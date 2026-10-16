@@ -520,6 +520,22 @@ fn extract_word_at_offset(text: &str, offset: usize) -> Option<String> {
     extract_identifier_at_offset(text, offset).map(|token| token.name)
 }
 
+/// `(schema, table)` when the identifier at `offset` is the table half of
+/// `schema.table` and the qualifier names one of `schema_names`. The schema
+/// comes back in its `schema_names` spelling.
+pub fn schema_qualified_table_at(
+    text: &str,
+    offset: usize,
+    schema_names: &[String],
+) -> Option<(String, String)> {
+    let token = extract_identifier_at_offset(text, offset)?;
+    let (qualifier, _) = previous_qualified_identifier(text, token.range.start)?;
+    let schema = schema_names
+        .iter()
+        .find(|schema| schema.eq_ignore_ascii_case(&qualifier))?;
+    Some((schema.clone(), token.name))
+}
+
 fn extract_identifier_at_offset(text: &str, offset: usize) -> Option<IdentifierToken> {
     if offset >= text.len() || !text.is_char_boundary(offset) {
         return None;
@@ -664,6 +680,24 @@ mod tests {
             comment: None,
             enum_values: None,
         }
+    }
+
+    #[test]
+    fn schema_qualified_table_at_resolves_known_schema_qualifiers() {
+        let schemas = vec!["public".to_string(), "app".to_string()];
+        let text = r#"SELECT o.id FROM app.organizations o JOIN "App"."memberships" m"#;
+        let at = |needle: &str| text.find(needle).unwrap() + 2;
+
+        assert_eq!(
+            schema_qualified_table_at(text, at("organizations"), &schemas),
+            Some(("app".to_string(), "organizations".to_string()))
+        );
+        assert_eq!(
+            schema_qualified_table_at(text, at("memberships"), &schemas),
+            Some(("app".to_string(), "memberships".to_string()))
+        );
+        // `o.id` is an alias qualifier, not a schema.
+        assert_eq!(schema_qualified_table_at(text, at("id "), &schemas), None);
     }
 
     fn test_table(name: &str) -> zqlz_core::TableInfo {

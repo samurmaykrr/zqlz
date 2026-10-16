@@ -26,7 +26,22 @@ impl DdlGenerator {
 
     /// Wrap an identifier with the dialect's quote character.
     fn quote_ident(name: &str, quote: char) -> String {
-        format!("{}{}{}", quote, name, quote)
+        // An embedded quote character is escaped by doubling it.
+        let escaped = name.replace(quote, &format!("{quote}{quote}"));
+        format!("{quote}{escaped}{quote}")
+    }
+
+    /// Schema-qualified index reference: the index lives in the table's schema,
+    /// not the session search_path.
+    fn qualified_index_name(schema: Option<&str>, name: &str, quote: char) -> String {
+        match schema {
+            Some(schema) if !schema.is_empty() => format!(
+                "{}.{}",
+                Self::quote_ident(schema, quote),
+                Self::quote_ident(name, quote)
+            ),
+            _ => Self::quote_ident(name, quote),
+        }
     }
 
     /// Build a schema-qualified, quoted table reference (e.g. `"myschema"."users"`).
@@ -45,6 +60,9 @@ impl DdlGenerator {
 
     /// Generate CREATE TABLE statement
     pub fn generate_create_table(design: &TableDesign) -> anyhow::Result<String> {
+        if design.dialect == DatabaseDialect::Mysql {
+            return Ok(super::mysql_ddl::create_table(design));
+        }
         let info = Self::dialect_info(&design.dialect);
         let q = info.identifier_quote;
         let mut ddl = String::new();
@@ -140,16 +158,7 @@ impl DdlGenerator {
                         comment.replace('\'', "''")
                     ));
                 }
-                DatabaseDialect::Mysql => {
-                    // MySQL table comment is an option appended after the closing paren,
-                    // but we've already emitted `;` — use ALTER TABLE to set it.
-                    ddl.push_str(&format!(
-                        "\n\nALTER TABLE {} COMMENT = '{}';",
-                        table_ref,
-                        comment.replace('\'', "''")
-                    ));
-                }
-                DatabaseDialect::Sqlite => {}
+                DatabaseDialect::Mysql | DatabaseDialect::Sqlite => {}
             }
         }
 
@@ -167,17 +176,7 @@ impl DdlGenerator {
                             comment.replace('\'', "''")
                         ));
                     }
-                    DatabaseDialect::Mysql => {
-                        // MySQL sets column comments via MODIFY COLUMN with the COMMENT clause
-                        ddl.push_str(&format!(
-                            "\n\nALTER TABLE {} MODIFY COLUMN {} {} COMMENT '{}';",
-                            table_ref,
-                            Self::quote_ident(&col.name, q),
-                            Self::column_type_spec(col),
-                            comment.replace('\'', "''")
-                        ));
-                    }
-                    DatabaseDialect::Sqlite => {}
+                    DatabaseDialect::Mysql | DatabaseDialect::Sqlite => {}
                 }
             }
         }
@@ -195,6 +194,9 @@ impl DdlGenerator {
         original: &TableDesign,
         modified: &TableDesign,
     ) -> anyhow::Result<Vec<String>> {
+        if modified.dialect == DatabaseDialect::Mysql {
+            return Ok(super::mysql_ddl::alter_table(original, modified));
+        }
         let info = Self::dialect_info(&modified.dialect);
         let q = info.identifier_quote;
         let mut statements = Vec::new();
@@ -205,14 +207,7 @@ impl DdlGenerator {
         // --- Table rename ---
         if original.table_name != modified.table_name {
             let new_name = Self::quote_ident(&modified.table_name, q);
-            match modified.dialect {
-                DatabaseDialect::Mysql => {
-                    statements.push(format!("ALTER TABLE {} RENAME TO {};", table, new_name));
-                }
-                _ => {
-                    statements.push(format!("ALTER TABLE {} RENAME TO {};", table, new_name));
-                }
-            }
+            statements.push(format!("ALTER TABLE {} RENAME TO {};", table, new_name));
         }
 
         // After a potential rename, subsequent statements target the new name
@@ -280,7 +275,14 @@ impl DdlGenerator {
         for new_col in &modified.columns {
             if let Some(old_col) = find_original_col(new_col) {
                 let alter_stmts =
-                    Self::generate_column_alterations(&table, old_col, new_col, &info);
+                    Self::generate_column_alterations(
+                        &table,
+                        original,
+                        &modified.table_name,
+                        old_col,
+                        new_col,
+                        &info,
+                    );
                 statements.extend(alter_stmts);
             }
         }
@@ -289,22 +291,11 @@ impl DdlGenerator {
         for fk in &original.foreign_keys {
             let still_exists = modified.foreign_keys.iter().any(|f| f.name == fk.name);
             if !still_exists && let Some(ref name) = fk.name {
-                match modified.dialect {
-                    DatabaseDialect::Mysql => {
-                        statements.push(format!(
-                            "ALTER TABLE {} DROP FOREIGN KEY {};",
-                            table,
-                            Self::quote_ident(name, q)
-                        ));
-                    }
-                    _ => {
-                        statements.push(format!(
-                            "ALTER TABLE {} DROP CONSTRAINT {};",
-                            table,
-                            Self::quote_ident(name, q)
-                        ));
-                    }
-                }
+                statements.push(format!(
+                    "ALTER TABLE {} DROP CONSTRAINT {};",
+                    table,
+                    Self::quote_ident(name, q)
+                ));
             }
         }
 
@@ -323,26 +314,17 @@ impl DdlGenerator {
         // --- Dropped indexes ---
         for idx in &original.indexes {
             if !modified.indexes.iter().any(|i| i.name == idx.name) && !idx.is_primary {
-                match modified.dialect {
-                    DatabaseDialect::Mysql => {
-                        statements.push(format!(
-                            "DROP INDEX {} ON {};",
-                            Self::quote_ident(&idx.name, q),
-                            table
-                        ));
-                    }
-                    _ => {
-                        // The index lives in the table's schema, not the session search_path.
-                        let index_ref = match modified.schema.as_deref() {
-                            Some(schema) if !schema.is_empty() => format!(
-                                "{}.{}",
-                                Self::quote_ident(schema, q),
-                                Self::quote_ident(&idx.name, q)
-                            ),
-                            _ => Self::quote_ident(&idx.name, q),
-                        };
-                        statements.push(format!("DROP INDEX IF EXISTS {};", index_ref));
-                    }
+                if original.constraint_indexes.contains(&idx.name) {
+                    statements.push(format!(
+                        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};",
+                        table,
+                        Self::quote_ident(&idx.name, q)
+                    ));
+                } else {
+                    statements.push(format!(
+                        "DROP INDEX IF EXISTS {};",
+                        Self::qualified_index_name(modified.schema.as_deref(), &idx.name, q)
+                    ));
                 }
             }
         }
@@ -358,22 +340,11 @@ impl DdlGenerator {
         for cc in &original.check_constraints {
             let still_exists = modified.check_constraints.iter().any(|c| c.name == cc.name);
             if !still_exists && let Some(ref name) = cc.name {
-                match modified.dialect {
-                    DatabaseDialect::Mysql => {
-                        statements.push(format!(
-                            "ALTER TABLE {} DROP CHECK {};",
-                            table,
-                            Self::quote_ident(name, q)
-                        ));
-                    }
-                    _ => {
-                        statements.push(format!(
-                            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};",
-                            table,
-                            Self::quote_ident(name, q)
-                        ));
-                    }
-                }
+                statements.push(format!(
+                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};",
+                    table,
+                    Self::quote_ident(name, q)
+                ));
             }
         }
 
@@ -409,6 +380,8 @@ impl DdlGenerator {
     /// ALTER COLUMN syntax.
     fn generate_column_alterations(
         table: &str,
+        original: &TableDesign,
+        table_name: &str,
         old: &ColumnDesign,
         new: &ColumnDesign,
         info: &DialectInfo,
@@ -462,16 +435,6 @@ impl DdlGenerator {
                     }
                 }
             }
-            // MySQL uses MODIFY COLUMN which re-specifies the entire column
-            "mysql" | "mariadb" => {
-                if type_changed || nullable_changed || default_changed {
-                    stmts.push(format!(
-                        "ALTER TABLE {} MODIFY COLUMN {};",
-                        table,
-                        Self::generate_column_definition(new, info).trim()
-                    ));
-                }
-            }
             // SQLite has very limited ALTER TABLE — only ADD COLUMN and
             // RENAME COLUMN are supported. Type/nullable/default changes
             // are not possible without recreating the table. We emit a
@@ -497,8 +460,9 @@ impl DdlGenerator {
             match dialect_id {
                 "postgresql" | "postgres" => {
                     if new.is_unique {
-                        let constraint_name =
-                            format!("{}_{}_unique", table.replace(q, ""), new.name);
+                        // Postgres' own default name; naming it explicitly keeps
+                        // the constraint droppable by the same rule later.
+                        let constraint_name = format!("{}_{}_key", table_name, new.name);
                         stmts.push(format!(
                             "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({});",
                             table,
@@ -506,31 +470,24 @@ impl DdlGenerator {
                             col
                         ));
                     } else {
-                        let constraint_name =
-                            format!("{}_{}_unique", table.replace(q, ""), new.name);
-                        stmts.push(format!(
-                            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};",
-                            table,
-                            Self::quote_ident(&constraint_name, q)
-                        ));
-                    }
-                }
-                "mysql" | "mariadb" => {
-                    if new.is_unique {
-                        let idx_name = format!("{}_{}_unique", table.replace(q, ""), new.name);
-                        stmts.push(format!(
-                            "CREATE UNIQUE INDEX {} ON {} ({});",
-                            Self::quote_ident(&idx_name, q),
-                            table,
-                            col
-                        ));
-                    } else {
-                        let idx_name = format!("{}_{}_unique", table.replace(q, ""), new.name);
-                        stmts.push(format!(
-                            "DROP INDEX {} ON {};",
-                            Self::quote_ident(&idx_name, q),
-                            table
-                        ));
+                        let name = old
+                            .unique_constraint_name
+                            .clone()
+                            .unwrap_or_else(|| format!("{}_{}_key", table_name, old.name));
+                        let is_plain_index = old.unique_constraint_name.is_some()
+                            && !original.constraint_indexes.contains(&name);
+                        if is_plain_index {
+                            stmts.push(format!(
+                                "DROP INDEX IF EXISTS {};",
+                                Self::qualified_index_name(original.schema.as_deref(), &name, q)
+                            ));
+                        } else {
+                            stmts.push(format!(
+                                "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};",
+                                table,
+                                Self::quote_ident(&name, q)
+                            ));
+                        }
                     }
                 }
                 _ => {
@@ -770,29 +727,8 @@ impl DdlGenerator {
                     format!(" {}", opts.join(" "))
                 }
             }
-            DatabaseDialect::Mysql => {
-                let mut opts = Vec::new();
-                if let Some(ref engine) = options.engine {
-                    opts.push(format!("ENGINE={}", engine));
-                }
-                if let Some(ref charset) = options.charset {
-                    opts.push(format!("DEFAULT CHARSET={}", charset));
-                }
-                if let Some(ref collation) = options.collation {
-                    opts.push(format!("COLLATE={}", collation));
-                }
-                if let Some(start) = options.auto_increment_start {
-                    opts.push(format!("AUTO_INCREMENT={}", start));
-                }
-                if let Some(ref row_format) = options.row_format {
-                    opts.push(format!("ROW_FORMAT={}", row_format));
-                }
-                if opts.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", opts.join(" "))
-                }
-            }
+            // MySQL tables are generated by `mysql_ddl`.
+            DatabaseDialect::Mysql => String::new(),
         }
     }
 }
@@ -917,6 +853,110 @@ mod tests {
             statements[0].starts_with("ALTER TABLE `shop`.`orders_returns` ADD COLUMN"),
             "expected database-qualified ALTER, got: {}",
             statements[0]
+        );
+    }
+
+    fn unique_design(
+        dialect: DatabaseDialect,
+        unique: bool,
+        constraint_name: Option<&str>,
+        constraint_backed: bool,
+    ) -> TableDesign {
+        let mut column = ColumnDesign::named("code").text();
+        column.is_unique = unique;
+        column.unique_constraint_name = constraint_name.map(str::to_string);
+        let mut design = TableDesign::new("customers", dialect)
+            .with_column(ColumnDesign::named("id").integer().primary_key())
+            .with_column(column);
+        design.schema = Some("zqlz_lab".to_string());
+        if let (true, Some(name)) = (constraint_backed, constraint_name) {
+            design.constraint_indexes.insert(name.to_string());
+        }
+        design
+    }
+
+    #[test]
+    fn add_unique_uses_postgres_default_key_name_ignoring_schema_qualifier() {
+        let pg = DatabaseDialect::Postgres;
+        let add = DdlGenerator::generate_alter_table(
+            &unique_design(pg.clone(), false, None, false),
+            &unique_design(pg, true, None, false),
+        )
+        .unwrap();
+        assert_eq!(
+            add,
+            ["ALTER TABLE \"zqlz_lab\".\"customers\" ADD CONSTRAINT \"customers_code_key\" UNIQUE (\"code\");"]
+        );
+    }
+
+    #[test]
+    fn drop_unique_uses_introspected_constraint_name() {
+        for name in ["customers_code_key", "my_custom_uq"] {
+            let pg = DatabaseDialect::Postgres;
+            let drop = DdlGenerator::generate_alter_table(
+                &unique_design(pg.clone(), true, Some(name), true),
+                &unique_design(pg, false, None, false),
+            )
+            .unwrap();
+            assert_eq!(
+                drop,
+                [format!(
+                    "ALTER TABLE \"zqlz_lab\".\"customers\" DROP CONSTRAINT IF EXISTS \"{name}\";"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn drop_unique_index_that_is_not_a_constraint_uses_drop_index() {
+        let pg = DatabaseDialect::Postgres;
+        let drop = DdlGenerator::generate_alter_table(
+            &unique_design(pg.clone(), true, Some("customers_code_uidx"), false),
+            &unique_design(pg, false, None, false),
+        )
+        .unwrap();
+        assert_eq!(drop, ["DROP INDEX IF EXISTS \"zqlz_lab\".\"customers_code_uidx\";"]);
+    }
+
+    #[test]
+    fn drop_unique_without_known_name_falls_back_to_default_key_name() {
+        let pg = DatabaseDialect::Postgres;
+        let drop = DdlGenerator::generate_alter_table(
+            &unique_design(pg.clone(), true, None, false),
+            &unique_design(pg, false, None, false),
+        )
+        .unwrap();
+        assert_eq!(
+            drop,
+            ["ALTER TABLE \"zqlz_lab\".\"customers\" DROP CONSTRAINT IF EXISTS \"customers_code_key\";"]
+        );
+    }
+
+    #[test]
+    fn mysql_drop_unique_uses_introspected_index_name() {
+        let my = DatabaseDialect::Mysql;
+        let drop = DdlGenerator::generate_alter_table(
+            &unique_design(my.clone(), true, Some("code"), false),
+            &unique_design(my, false, None, false),
+        )
+        .unwrap();
+        assert_eq!(drop, ["ALTER TABLE `zqlz_lab`.`customers` DROP INDEX `code`;"]);
+    }
+
+    #[test]
+    fn dropping_constraint_backed_index_from_index_list_drops_the_constraint() {
+        let build = |with_index: bool| {
+            let mut design = unique_design(DatabaseDialect::Postgres, false, None, false);
+            if with_index {
+                design.indexes.push(IndexDesign::named("customers_code_key").column("code").unique());
+                design.constraint_indexes.insert("customers_code_key".to_string());
+            }
+            design
+        };
+        let drop = DdlGenerator::generate_alter_table(&build(true), &build(false)).unwrap();
+        assert_eq!(
+            drop,
+            ["ALTER TABLE \"zqlz_lab\".\"customers\" DROP CONSTRAINT IF EXISTS \"customers_code_key\";"]
         );
     }
 

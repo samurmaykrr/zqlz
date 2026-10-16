@@ -55,7 +55,6 @@ pub(super) struct FkSelectDelegate {
     pub(super) schema_name: Option<String>,
     pub(super) cache_key: String,
     pub(super) referenced_columns: Vec<String>,
-    pub(super) connection_id: Uuid,
     pub(super) viewer_panel: WeakEntity<TableViewerPanel>,
     pub(super) request_id: u64,
 }
@@ -90,7 +89,6 @@ impl SelectDelegate for FkSelectDelegate {
     ) -> Task<()> {
         let query = query.trim().to_string();
         let viewer_panel = self.viewer_panel.clone();
-        let connection_id = self.connection_id;
         let referenced_table = self.table_name.clone();
         let referenced_schema = self.schema_name.clone();
         let cache_key = self.cache_key.clone();
@@ -101,7 +99,6 @@ impl SelectDelegate for FkSelectDelegate {
             smol::Timer::after(Duration::from_millis(120)).await;
             if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
                 cx.emit(TableViewerEvent::LoadFkValues {
-                    connection_id,
                     referenced_table,
                     referenced_schema,
                     cache_key,

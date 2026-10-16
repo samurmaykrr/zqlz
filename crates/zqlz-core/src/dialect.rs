@@ -483,10 +483,13 @@ impl ExplainConfig {
     pub fn mysql() -> Self {
         Self {
             explain_format: Cow::Borrowed("EXPLAIN {sql}"),
-            query_plan_format: Some(Cow::Borrowed("EXPLAIN FORMAT=TREE {sql}")),
+            // The classic table works on every server; FORMAT=JSON (5.6+/8.0) is the
+            // richest source for the visual plan and falls back to the table when
+            // a server rejects it or answers in a shape we cannot read.
+            query_plan_format: Some(Cow::Borrowed("EXPLAIN FORMAT=JSON {sql}")),
             analyze_format: Some(Cow::Borrowed("EXPLAIN ANALYZE {sql}")),
             explain_description: Cow::Borrowed("Shows query execution plan"),
-            query_plan_description: Some(Cow::Borrowed("Shows tree-formatted execution plan")),
+            query_plan_description: Some(Cow::Borrowed("Shows JSON-formatted execution plan")),
             analyze_is_safe: false,
         }
     }

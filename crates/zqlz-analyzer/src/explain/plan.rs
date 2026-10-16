@@ -364,6 +364,9 @@ pub enum NodeType {
     // Limit/Offset
     Limit,
 
+    // Row filter applied on top of another node's output (MySQL)
+    Filter,
+
     // Materialize
     Materialize,
     Memoize,
@@ -490,6 +493,7 @@ impl NodeType {
             Self::MergeAppend => "Merge Append",
             Self::RecursiveUnion => "Recursive Union",
             Self::Limit => "Limit",
+            Self::Filter => "Filter",
             Self::Materialize => "Materialize",
             Self::Memoize => "Memoize",
             Self::Hash => "Hash",
@@ -541,6 +545,7 @@ impl NodeType {
             Self::MergeAppend => "Merge append (combines sorted inputs)",
             Self::RecursiveUnion => "Recursive union (recursive CTE)",
             Self::Limit => "Limit (restricts output rows)",
+            Self::Filter => "Filter (discards rows that fail a condition)",
             Self::Materialize => "Materialize (stores results in memory)",
             Self::Memoize => "Memoize (caches repeated lookups)",
             Self::Hash => "Hash (builds hash table for join)",

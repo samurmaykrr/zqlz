@@ -25,6 +25,22 @@ pub use objects_panel::*;
 /// Schema introspection interface
 #[async_trait]
 pub trait SchemaIntrospection: Send + Sync {
+    /// Which object kinds this connection can actually enumerate, refined with
+    /// runtime knowledge (e.g. server flavor detected after connecting).
+    ///
+    /// `None` means "no runtime refinement" — callers fall back to the static
+    /// driver-level answer from `DatabaseDriver::object_kinds`.
+    fn object_kind_support(&self) -> Option<ObjectKindSupport> {
+        None
+    }
+
+    /// Schema name to assume when objects carry no schema qualifier.
+    ///
+    /// `None` means the driver has no schema level (or no meaningful default).
+    fn default_schema_name(&self) -> Option<String> {
+        None
+    }
+
     /// List all databases
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>>;
 
@@ -75,6 +91,18 @@ pub trait SchemaIntrospection: Send + Sync {
 
     /// Get indexes for a table
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>>;
+
+    /// Get indexes for every table in a schema, keyed by bare table name.
+    ///
+    /// Same contract as [`Self::list_all_columns`]: one round-trip where the
+    /// backend supports it, `Ok(None)` when the caller must fall back to
+    /// per-table [`Self::get_indexes`].
+    async fn list_all_indexes(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<IndexInfo>>>> {
+        Ok(None)
+    }
 
     /// Get foreign keys for a table
     async fn get_foreign_keys(

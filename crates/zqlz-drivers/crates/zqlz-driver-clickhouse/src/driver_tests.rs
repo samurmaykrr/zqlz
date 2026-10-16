@@ -96,7 +96,7 @@ mod driver_capabilities_tests {
         let driver = ClickHouseDriver::new();
         let caps = driver.capabilities();
         assert!(caps.supports_views);
-        assert!(caps.supports_schemas);
+        assert!(!caps.supports_schemas); // Databases are the namespace, not schemas
         assert!(caps.supports_multiple_databases);
         assert!(!caps.supports_foreign_keys); // ClickHouse doesn't have foreign keys
         assert!(!caps.supports_triggers); // ClickHouse doesn't have triggers

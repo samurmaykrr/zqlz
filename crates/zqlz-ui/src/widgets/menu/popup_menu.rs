@@ -7,8 +7,9 @@ use crate::widgets::{Side, Size, StyledExt, kbd::Kbd};
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext, Bounds, Context, DismissEvent, Edges, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
-    Styled, WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
+    ParentElement, Pixels, Point, Render, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, WeakEntity, Window, anchored, div,
+    prelude::FluentBuilder, px, rems,
 };
 use gpui::{ClickEvent, MouseDownEvent, OwnedMenuItem, Subscription};
 use std::rc::Rc;
@@ -207,6 +208,19 @@ impl PopupMenuItem {
         match reason {
             Some(reason) => self.disabled(true).tooltip(reason),
             None => self,
+        }
+    }
+
+    /// The text announced by assistive technology for this item.
+    ///
+    /// `ElementItem` renders an arbitrary element, so there is no text to
+    /// recover; separators are not reported at all.
+    fn a11y_label(&self) -> Option<SharedString> {
+        match self {
+            PopupMenuItem::Item { label, .. }
+            | PopupMenuItem::Label(label)
+            | PopupMenuItem::Submenu { label, .. } => Some(label.clone()),
+            PopupMenuItem::Separator | PopupMenuItem::ElementItem { .. } => None,
         }
     }
 
@@ -1178,6 +1192,7 @@ impl PopupMenu {
             .py_0()
             .px(INNER_PADDING)
             .items_center()
+            .when_some(item.a11y_label(), |this, label| this.aria_label(label))
             .selected(selected)
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered {
@@ -1392,6 +1407,7 @@ impl Render for PopupMenu {
 
         v_flex()
             .id("popup-menu")
+            .role(Role::Menu)
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::select_up))

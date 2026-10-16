@@ -43,6 +43,11 @@ line_comment = "--"
 block_comment_start = "/*"
 block_comment_end = "*/"
 
+[auto_increment]
+keyword = "SERIAL"
+style = "type_name"
+description = "Use SERIAL, BIGSERIAL, or SMALLSERIAL types for auto-increment"
+
 [syntax_quality]
 text = """
 CREATE TABLE "categories" (

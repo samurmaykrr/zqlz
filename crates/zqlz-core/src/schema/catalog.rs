@@ -99,6 +99,15 @@ pub struct ObjectKindSupport {
     pub triggers: bool,
     pub sequences: bool,
     pub types: bool,
+    /// MySQL scheduled events.
+    #[serde(default)]
+    pub events: bool,
+    /// Domain types (Postgres `CREATE DOMAIN`, MSSQL alias types).
+    #[serde(default)]
+    pub domains: bool,
+    /// Installed extensions (Postgres).
+    #[serde(default)]
+    pub extensions: bool,
 }
 
 impl ObjectKindSupport {
@@ -112,9 +121,13 @@ impl ObjectKindSupport {
         triggers: false,
         sequences: false,
         types: false,
+        events: false,
+        domains: false,
+        extensions: false,
     };
 
-    /// The full relational set (Postgres-like).
+    /// The full relational set (Postgres-like). Events, domains, and
+    /// extensions stay opt-in per driver.
     pub const ALL_RELATIONAL: Self = Self {
         tables: true,
         views: true,
@@ -124,6 +137,9 @@ impl ObjectKindSupport {
         triggers: true,
         sequences: true,
         types: true,
+        events: false,
+        domains: false,
+        extensions: false,
     };
 }
 

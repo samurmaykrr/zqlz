@@ -10,6 +10,7 @@
 
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::TableRef;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
 
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
@@ -41,9 +42,7 @@ impl ConnectionSidebar {
     pub(in crate::widgets) fn show_table_context_menu(
         &mut self,
         conn_id: Uuid,
-        table_name: String,
-        object_schema: Option<String>,
-        database_name: Option<String>,
+        table: TableRef,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -56,6 +55,8 @@ impl ConnectionSidebar {
             self.table_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
+        let table_name = table.name.clone();
+        let object_schema = table.schema.clone();
         let sidebar_weak = cx.entity().downgrade();
         let table_for_menu = table_name.clone();
         let action_context = self.focus_handle.clone();
@@ -66,7 +67,7 @@ impl ConnectionSidebar {
             object_name: table_name.clone(),
             object_schema: object_schema.clone(),
             object_type: "table".to_string(),
-            database_name: database_name.clone(),
+            database_name: table.database.clone(),
         };
 
         if let Some(menu_state) = &self.table_context_menu {
@@ -88,14 +89,12 @@ impl ConnectionSidebar {
                         .max_h(px(400.0))
                         .item(PopupMenuItem::new("Open Table").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let table = table_for_menu.clone();
-                            let db_name = database_name.clone();
+                            let table = table.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::OpenTable {
                                         connection_id: conn_id,
-                                        table_name: table.clone(),
-                                        database_name: db_name.clone(),
+                                        table: table.clone(),
                                     });
                                 });
                             }
@@ -103,12 +102,12 @@ impl ConnectionSidebar {
                         .separator()
                         .item(PopupMenuItem::new("Design Table").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let table = table_for_menu.clone();
+                            let table = table.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::DesignTable {
                                         connection_id: conn_id,
-                                        table_name: table.clone(),
+                                        table: table.clone(),
                                     });
                                 });
                             }
@@ -141,36 +140,36 @@ impl ConnectionSidebar {
                         }))
                         .item(PopupMenuItem::new("Delete Table").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let table = table_for_menu.clone();
+                            let table = table.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::DeleteTable {
                                         connection_id: conn_id,
-                                        table_name: table.clone(),
+                                        table: table.clone(),
                                     });
                                 });
                             }
                         }))
                         .item(PopupMenuItem::new("Empty Table").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let table = table_for_menu.clone();
+                            let table = table.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::EmptyTable {
                                         connection_id: conn_id,
-                                        table_name: table.clone(),
+                                        table: table.clone(),
                                     });
                                 });
                             }
                         }))
                         .item(PopupMenuItem::new("Duplicate Table").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let table = table_for_menu.clone();
+                            let table = table.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::DuplicateTable {
                                         connection_id: conn_id,
-                                        table_name: table.clone(),
+                                        table: table.clone(),
                                     });
                                 });
                             }
@@ -242,12 +241,12 @@ impl ConnectionSidebar {
                         .separator()
                         .item(PopupMenuItem::new("Rename").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let table = table_for_menu.clone();
+                            let table = table.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::RenameTable {
                                         connection_id: conn_id,
-                                        table_name: table.clone(),
+                                        table: table.clone(),
                                     });
                                 });
                             }

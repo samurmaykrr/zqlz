@@ -8,6 +8,64 @@ use url::Url;
 use uuid::Uuid;
 use zqlz_core::ConnectionConfig;
 
+/// How much an external AI agent (driving ZQLZ through `zqlz mcp`) may do on
+/// a connection. Reads are always allowed; this only governs writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentAccess {
+    /// Writes are refused.
+    ReadOnly,
+    /// Every write waits for the user to approve it in a dialog.
+    #[default]
+    Ask,
+    /// Writes run immediately; the user is still notified.
+    Auto,
+}
+
+impl AgentAccess {
+    pub const ALL: [Self; 3] = [Self::ReadOnly, Self::Ask, Self::Auto];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Read-only",
+            Self::Ask => "Ask Before Writes",
+            Self::Auto => "Allow Writes",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|access| access.as_str() == value)
+    }
+
+    /// Key under which the level is persisted in the app settings table.
+    pub fn setting_key(connection_id: Uuid) -> String {
+        format!("agent_access:{connection_id}")
+    }
+}
+
+/// UI-side cache of per-connection agent access, loaded from storage at startup.
+#[derive(Default)]
+pub struct AgentAccessPolicy(pub std::collections::HashMap<Uuid, AgentAccess>);
+
+impl gpui::Global for AgentAccessPolicy {}
+
+impl AgentAccessPolicy {
+    pub fn get(cx: &gpui::App, connection_id: Uuid) -> AgentAccess {
+        cx.try_global::<Self>()
+            .and_then(|policy| policy.0.get(&connection_id).copied())
+            .unwrap_or_default()
+    }
+}
+
 /// A saved database connection configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedConnection {

@@ -30,7 +30,7 @@ pub mod service;
 mod panel;
 
 // Re-exports for convenience
-pub use events::TableDesignerEvent;
+pub use events::{TableDesignerActivity, TableDesignerEvent};
 pub use models::{
     CheckConstraintDesign, ColumnDesign, DataTypeCategory, DataTypeInfo, DatabaseDialect,
     ForeignKeyDesign, IndexDesign, TableDesign, TableOptions, ValidationError, get_data_types,

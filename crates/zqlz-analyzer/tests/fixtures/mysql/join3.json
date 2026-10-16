@@ -1,0 +1,107 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "148227.71"
+    },
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "s",
+          "access_type": "index",
+          "possible_keys": [
+            "PRIMARY"
+          ],
+          "key": "PRIMARY",
+          "used_key_parts": [
+            "status_code"
+          ],
+          "key_length": "130",
+          "rows_examined_per_scan": 7,
+          "rows_produced_per_join": 7,
+          "filtered": "100.00",
+          "using_index": true,
+          "cost_info": {
+            "read_cost": "1.00",
+            "eval_cost": "0.70",
+            "prefix_cost": "1.70",
+            "data_read_per_join": "952"
+          },
+          "used_columns": [
+            "status_code"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "o",
+          "access_type": "ref",
+          "possible_keys": [
+            "PRIMARY",
+            "uq_order_number",
+            "idx_orders_tenant_time",
+            "fk_order_status",
+            "idx_order_tenant_status"
+          ],
+          "key": "idx_order_tenant_status",
+          "used_key_parts": [
+            "tenant_id",
+            "status_code"
+          ],
+          "key_length": "274",
+          "ref": [
+            "const",
+            "erp_lab.s.status_code"
+          ],
+          "rows_examined_per_scan": 5247,
+          "rows_produced_per_join": 36735,
+          "filtered": "100.00",
+          "index_condition": "(`erp_lab`.`o`.`tenant_id` = '6a4fb4a2-5f37-5199-ad1f-70a1760e373c')",
+          "cost_info": {
+            "read_cost": "16951.77",
+            "eval_cost": "3673.53",
+            "prefix_cost": "20627.00",
+            "data_read_per_join": "50M"
+          },
+          "used_columns": [
+            "order_id",
+            "tenant_id",
+            "order_number",
+            "status_code"
+          ]
+        }
+      },
+      {
+        "table": {
+          "table_name": "i",
+          "access_type": "ref",
+          "possible_keys": [
+            "uq_order_line",
+            "idx_order_item_order"
+          ],
+          "key": "idx_order_item_order",
+          "used_key_parts": [
+            "order_id"
+          ],
+          "key_length": "144",
+          "ref": [
+            "erp_lab.o.order_id"
+          ],
+          "rows_examined_per_scan": 3,
+          "rows_produced_per_join": 122957,
+          "filtered": "100.00",
+          "cost_info": {
+            "read_cost": "115304.94",
+            "eval_cost": "12295.78",
+            "prefix_cost": "148227.71",
+            "data_read_per_join": "72M"
+          },
+          "used_columns": [
+            "order_id",
+            "quantity"
+          ]
+        }
+      }
+    ]
+  }
+}

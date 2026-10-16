@@ -43,6 +43,11 @@ line_comment = "--"
 block_comment_start = "/*"
 block_comment_end = "*/"
 
+[auto_increment]
+keyword = "IDENTITY"
+style = "suffix"
+description = "Auto-incrementing column using IDENTITY(1,1)"
+
 [syntax_quality]
 text = """
 SELECT TOP 10 [User Name], JSON_VALUE(payload, '$.id') AS id

@@ -15,24 +15,6 @@ impl ConnectionSidebar {
         self.virtual_rows_dirty = true;
     }
 
-    fn schema_objects_from_connection(conn: &ConnectionEntry) -> SchemaObjects {
-        SchemaObjects {
-            tables: conn.tables.clone(),
-            views: conn.views.clone(),
-            materialized_views: conn.materialized_views.clone(),
-            triggers: conn.triggers.clone(),
-            functions: conn.functions.clone(),
-            procedures: conn.procedures.clone(),
-            events: conn.events.clone(),
-            sequences: conn.sequences.clone(),
-            domains: conn.domains.clone(),
-            types: conn.types.clone(),
-            extensions: conn.extensions.clone(),
-            schema_name: conn.schema_name.clone(),
-            schema_names: conn.schema_names.clone(),
-        }
-    }
-
     fn table_name_exists_in_schema(
         tables: &[String],
         key_schema_name: Option<&str>,
@@ -70,82 +52,6 @@ impl ConnectionSidebar {
         });
     }
 
-    fn database_schema_data_from_schema_objects(
-        schema: SchemaObjects,
-        previous: Option<&DatabaseSchemaData>,
-    ) -> DatabaseSchemaData {
-        let SchemaObjects {
-            tables,
-            views,
-            materialized_views,
-            triggers,
-            functions,
-            procedures,
-            events,
-            sequences,
-            domains,
-            types,
-            extensions,
-            schema_name,
-            schema_names,
-        } = schema;
-
-        let mut schema_data = DatabaseSchemaData {
-            schema_name,
-            schema_names,
-            schema_expanded: previous.is_some_and(|previous| previous.schema_expanded),
-            collapsed_schema_groups: previous
-                .map(|previous| previous.collapsed_schema_groups.clone())
-                .unwrap_or_default(),
-            collapsed_schema_section_keys: previous
-                .map(|previous| previous.collapsed_schema_section_keys.clone())
-                .unwrap_or_default(),
-            tables,
-            views,
-            materialized_views,
-            triggers,
-            functions,
-            procedures,
-            events,
-            sequences,
-            domains,
-            types,
-            extensions,
-            table_details: previous
-                .map(|previous| previous.table_details.clone())
-                .unwrap_or_default(),
-            expanded_table_keys: previous
-                .map(|previous| previous.expanded_table_keys.clone())
-                .unwrap_or_default(),
-            loading_table_keys: previous
-                .map(|previous| previous.loading_table_keys.clone())
-                .unwrap_or_default(),
-            tables_expanded: previous.is_some_and(|previous| previous.tables_expanded),
-            views_expanded: previous.is_some_and(|previous| previous.views_expanded),
-            materialized_views_expanded: previous
-                .is_some_and(|previous| previous.materialized_views_expanded),
-            triggers_expanded: previous.is_some_and(|previous| previous.triggers_expanded),
-            functions_expanded: previous.is_some_and(|previous| previous.functions_expanded),
-            procedures_expanded: previous.is_some_and(|previous| previous.procedures_expanded),
-            events_expanded: previous.is_some_and(|previous| previous.events_expanded),
-            tables_loading: false,
-            views_loading: false,
-            materialized_views_loading: false,
-            triggers_loading: false,
-            functions_loading: false,
-            procedures_loading: false,
-        };
-
-        Self::retain_current_table_state(
-            &mut schema_data.table_details,
-            &mut schema_data.expanded_table_keys,
-            &mut schema_data.loading_table_keys,
-            &schema_data.tables,
-        );
-
-        schema_data
-    }
-
     fn apply_database_schema_to_connections(
         connections: &mut [ConnectionEntry],
         conn_id: Uuid,
@@ -163,18 +69,25 @@ impl ConnectionSidebar {
             database.is_active = database.name == database_name;
         }
 
-        if let Some(database) = conn
+        let target = conn
             .databases
-            .iter_mut()
-            .find(|database| database.name == database_name)
-        {
-            let schema =
-                Self::database_schema_data_from_schema_objects(schema, database.schema.as_ref());
+            .iter()
+            .position(|database| database.name == database_name);
+
+        // A database taking ownership of the schema for the first time inherits
+        // the connection-scope expansion state it was rendering until now.
+        if let Some(target) = target {
+            let previous = conn.databases[target]
+                .schema
+                .as_ref()
+                .unwrap_or(&conn.schema);
+            let schema = DatabaseSchemaData::from(schema).with_expansion_from(Some(previous));
+            let database = &mut conn.databases[target];
             database.is_active = true;
             database.is_loading = false;
             database.schema = Some(schema);
         } else {
-            let schema = Self::database_schema_data_from_schema_objects(schema, None);
+            let schema = DatabaseSchemaData::from(schema).with_expansion_from(Some(&conn.schema));
             conn.databases.push(SidebarDatabaseInfo {
                 name: database_name.to_string(),
                 size_bytes: None,
@@ -237,30 +150,11 @@ impl ConnectionSidebar {
             }
             if !connected {
                 conn.is_expanded = false;
-                conn.tables.clear();
-                conn.views.clear();
-                conn.materialized_views.clear();
-                conn.triggers.clear();
-                conn.functions.clear();
-                conn.procedures.clear();
-                conn.events.clear();
-                conn.sequences.clear();
-                conn.domains.clear();
-                conn.types.clear();
-                conn.extensions.clear();
                 conn.redis_databases.clear();
                 conn.databases.clear();
-                conn.schema_name = None;
-                conn.schema_names.clear();
-                conn.collapsed_schema_groups.clear();
-                conn.collapsed_schema_section_keys.clear();
-                conn.tables_loading = false;
-                conn.views_loading = false;
-                conn.materialized_views_loading = false;
-                conn.triggers_loading = false;
-                conn.functions_loading = false;
-                conn.procedures_loading = false;
-                conn.events_expanded = false;
+                conn.schema = DatabaseSchemaData::default();
+                conn.queries_expanded = false;
+                conn.redis_databases_expanded = false;
             }
         }
         if !connected {
@@ -291,29 +185,39 @@ impl ConnectionSidebar {
         cx: &mut Context<Self>,
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.tables = tables;
-            conn.schema_name = schema_name;
-            conn.schema_names = schema_names;
-            conn.tables_loading = false;
-
-            let active_database_name = conn
+            // The placeholder node created at connect time is no longer waiting
+            // on anything once its tables land.
+            if let Some(database) = conn
                 .databases
-                .iter()
+                .iter_mut()
                 .find(|database| database.is_active)
-                .map(|database| database.name.clone());
-            if let Some(active_database_name) = active_database_name {
-                let schema = Self::schema_objects_from_connection(conn);
-                if let Some(database) = conn
-                    .databases
-                    .iter_mut()
-                    .find(|database| database.name == active_database_name)
-                {
-                    database.is_loading = false;
-                    database.schema = Some(Self::database_schema_data_from_schema_objects(
-                        schema,
-                        database.schema.as_ref(),
-                    ));
-                }
+            {
+                database.is_loading = false;
+            }
+
+            let schema = conn.schema_mut(None);
+            schema.tables = tables;
+            schema.schema_name = schema_name;
+            schema.schema_names = schema_names;
+            schema.loading_sections.remove(&SidebarSection::Tables);
+        }
+        self.invalidate_virtual_rows();
+        cx.notify();
+    }
+
+    /// Replace one section's object list, clearing its loading state.
+    pub fn set_section_objects(
+        &mut self,
+        id: Uuid,
+        section: SidebarSection,
+        names: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            let schema = conn.schema_mut(None);
+            schema.loading_sections.remove(&section);
+            if let Some(objects) = schema.objects_mut(section) {
+                *objects = names;
             }
         }
         self.invalidate_virtual_rows();
@@ -322,12 +226,7 @@ impl ConnectionSidebar {
 
     /// Update views only (lazy or eager load).
     pub fn set_views_only(&mut self, id: Uuid, views: Vec<String>, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.views = views;
-            conn.views_loading = false;
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.set_section_objects(id, SidebarSection::Views, views, cx);
     }
 
     /// Update materialized views only (lazy or eager load).
@@ -337,22 +236,12 @@ impl ConnectionSidebar {
         materialized_views: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.materialized_views = materialized_views;
-            conn.materialized_views_loading = false;
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.set_section_objects(id, SidebarSection::MaterializedViews, materialized_views, cx);
     }
 
     /// Update functions only (lazy or eager load).
     pub fn set_functions_only(&mut self, id: Uuid, functions: Vec<String>, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.functions = functions;
-            conn.functions_loading = false;
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.set_section_objects(id, SidebarSection::Functions, functions, cx);
     }
 
     /// Update procedures only (lazy or eager load).
@@ -362,22 +251,12 @@ impl ConnectionSidebar {
         procedures: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.procedures = procedures;
-            conn.procedures_loading = false;
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.set_section_objects(id, SidebarSection::Procedures, procedures, cx);
     }
 
     /// Update triggers only (lazy or eager load).
     pub fn set_triggers_only(&mut self, id: Uuid, triggers: Vec<String>, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.triggers = triggers;
-            conn.triggers_loading = false;
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.set_section_objects(id, SidebarSection::Triggers, triggers, cx);
     }
 
     /// Apply a loaded sidebar section payload for one connection.
@@ -408,40 +287,12 @@ impl ConnectionSidebar {
             SidebarSection::Triggers => {
                 self.set_triggers_only(connection_id, names, cx);
             }
-            SidebarSection::Events => {
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.id == connection_id) {
-                    conn.events = names;
-                }
-                self.invalidate_virtual_rows();
-                cx.notify();
-            }
-            SidebarSection::Sequences => {
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.id == connection_id) {
-                    conn.sequences = names;
-                }
-                self.invalidate_virtual_rows();
-                cx.notify();
-            }
-            SidebarSection::Domains => {
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.id == connection_id) {
-                    conn.domains = names;
-                }
-                self.invalidate_virtual_rows();
-                cx.notify();
-            }
-            SidebarSection::Types => {
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.id == connection_id) {
-                    conn.types = names;
-                }
-                self.invalidate_virtual_rows();
-                cx.notify();
-            }
-            SidebarSection::Extensions => {
-                if let Some(conn) = self.connections.iter_mut().find(|c| c.id == connection_id) {
-                    conn.extensions = names;
-                }
-                self.invalidate_virtual_rows();
-                cx.notify();
+            SidebarSection::Events
+            | SidebarSection::Sequences
+            | SidebarSection::Domains
+            | SidebarSection::Types
+            | SidebarSection::Extensions => {
+                self.set_section_objects(connection_id, section, names, cx);
             }
             SidebarSection::Tables | SidebarSection::Queries | SidebarSection::RedisDatabases => {
                 self.clear_section_loading(connection_id, section, cx);
@@ -459,21 +310,7 @@ impl ConnectionSidebar {
         cx: &mut Context<Self>,
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            match section {
-                SidebarSection::Tables => conn.tables_loading = false,
-                SidebarSection::Views => conn.views_loading = false,
-                SidebarSection::MaterializedViews => conn.materialized_views_loading = false,
-                SidebarSection::Triggers => conn.triggers_loading = false,
-                SidebarSection::Functions => conn.functions_loading = false,
-                SidebarSection::Procedures => conn.procedures_loading = false,
-                SidebarSection::Sequences
-                | SidebarSection::Events
-                | SidebarSection::Domains
-                | SidebarSection::Types
-                | SidebarSection::Extensions
-                | SidebarSection::Queries
-                | SidebarSection::RedisDatabases => {}
-            }
+            conn.schema_mut(None).loading_sections.remove(&section);
         }
         self.invalidate_virtual_rows();
         cx.notify();
@@ -497,45 +334,20 @@ impl ConnectionSidebar {
         cx.notify();
     }
 
-    /// Update a connection's schema info
+    /// Replace the schema objects rendering currently shows for a connection,
+    /// keeping which sections the user has expanded.
     pub fn set_schema(&mut self, id: Uuid, schema: SchemaObjects, cx: &mut Context<Self>) {
-        let SchemaObjects {
-            tables,
-            views,
-            materialized_views,
-            triggers,
-            functions,
-            procedures,
-            events,
-            sequences,
-            domains,
-            types,
-            extensions,
-            schema_name,
-            schema_names,
-        } = schema;
-
         Self::retain_current_table_state(
             &mut self.table_details,
             &mut self.expanded_table_keys,
             &mut self.loading_table_keys,
-            &tables,
+            &schema.tables,
         );
 
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.tables = tables;
-            conn.views = views;
-            conn.materialized_views = materialized_views;
-            conn.triggers = triggers;
-            conn.functions = functions;
-            conn.procedures = procedures;
-            conn.events = events;
-            conn.sequences = sequences;
-            conn.domains = domains;
-            conn.types = types;
-            conn.extensions = extensions;
-            conn.schema_name = schema_name;
-            conn.schema_names = schema_names;
+            let target = conn.schema_mut(None);
+            let updated = DatabaseSchemaData::from(schema).with_expansion_from(Some(target));
+            *target = updated;
         }
         self.invalidate_virtual_rows();
         cx.notify();
@@ -555,6 +367,24 @@ impl ConnectionSidebar {
 
     /// Record which object actions the connection advertises, so object menus can
     /// explain why an action is unavailable.
+    /// Replace the driver-derived capability baseline with the
+    /// connection-refined one (e.g. runtime-detected MariaDB sequences).
+    pub fn set_object_capabilities(
+        &mut self,
+        id: Uuid,
+        capabilities: SidebarObjectCapabilities,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if conn.object_capabilities == capabilities {
+                return;
+            }
+            conn.object_capabilities = capabilities;
+        }
+        self.invalidate_virtual_rows();
+        cx.notify();
+    }
+
     pub fn set_object_features(
         &mut self,
         id: Uuid,
@@ -640,10 +470,9 @@ impl ConnectionSidebar {
                 .map(ToOwned::to_owned)
                 .or(existing_active_database_name)
                 .or(single_database_name);
-            let active_schema = Self::database_schema_data_from_schema_objects(
-                Self::schema_objects_from_connection(conn),
-                None,
-            );
+            // Discovery names the database the connection scope was standing in
+            // for, so its schema state moves across intact.
+            let active_schema = conn.schema(effective_active_database.as_deref()).clone();
             let mut existing: HashMap<String, SidebarDatabaseInfo> = conn
                 .databases
                 .drain(..)
@@ -696,8 +525,8 @@ impl ConnectionSidebar {
         cx.notify();
     }
 
-    /// Set the list of all databases on the server for a connection.
-    /// Migrates existing connection-level schema data into the active database node.
+    /// Replace the list of all databases on the server for a connection,
+    /// carrying the schema state the active database was already rendering.
     pub fn set_databases(
         &mut self,
         id: Uuid,
@@ -706,46 +535,7 @@ impl ConnectionSidebar {
         cx: &mut Context<Self>,
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            let previous_active_schema = active_database.and_then(|active_database| {
-                conn.databases
-                    .iter()
-                    .find(|database| database.name == active_database)
-                    .and_then(|database| database.schema.clone())
-            });
-            let connection_schema_state = DatabaseSchemaData {
-                schema_expanded: conn.schema_expanded,
-                collapsed_schema_groups: conn.collapsed_schema_groups.clone(),
-                collapsed_schema_section_keys: conn.collapsed_schema_section_keys.clone(),
-                tables_expanded: conn.tables_expanded,
-                views_expanded: conn.views_expanded,
-                materialized_views_expanded: conn.materialized_views_expanded,
-                triggers_expanded: conn.triggers_expanded,
-                functions_expanded: conn.functions_expanded,
-                procedures_expanded: conn.procedures_expanded,
-                events_expanded: conn.events_expanded,
-                ..DatabaseSchemaData::default()
-            };
-            let previous_schema = previous_active_schema
-                .as_ref()
-                .unwrap_or(&connection_schema_state);
-            let active_schema = Self::database_schema_data_from_schema_objects(
-                SchemaObjects {
-                    tables: conn.tables.clone(),
-                    views: conn.views.clone(),
-                    materialized_views: conn.materialized_views.clone(),
-                    triggers: conn.triggers.clone(),
-                    functions: conn.functions.clone(),
-                    procedures: conn.procedures.clone(),
-                    events: conn.events.clone(),
-                    sequences: conn.sequences.clone(),
-                    domains: conn.domains.clone(),
-                    types: conn.types.clone(),
-                    extensions: conn.extensions.clone(),
-                    schema_name: conn.schema_name.clone(),
-                    schema_names: conn.schema_names.clone(),
-                },
-                Some(previous_schema),
-            );
+            let active_schema = conn.schema(active_database).clone();
 
             conn.databases = databases
                 .into_iter()
@@ -838,67 +628,95 @@ impl ConnectionSidebar {
         cx.notify();
     }
 
-    /// Remove a table from a connection's schema
-    pub fn remove_table(&mut self, conn_id: Uuid, table_name: &str, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            conn.tables.retain(|t| t != table_name);
+    /// Mutate one section's object list where rendering reads it.
+    fn update_section_objects(
+        &mut self,
+        conn_id: Uuid,
+        section: SidebarSection,
+        mutate: impl Fn(&mut Vec<String>),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(objects) = conn.schema_mut(None).objects_mut(section)
+        {
+            mutate(objects);
         }
         self.invalidate_virtual_rows();
         cx.notify();
+    }
+
+    pub fn remove_table(&mut self, conn_id: Uuid, table_name: &str, cx: &mut Context<Self>) {
+        self.update_section_objects(
+            conn_id,
+            SidebarSection::Tables,
+            |tables| tables.retain(|t| t != table_name),
+            cx,
+        );
     }
 
     /// Add a table to a connection's schema
     pub fn add_table(&mut self, conn_id: Uuid, table_name: String, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
-            && !conn.tables.contains(&table_name)
-        {
-            conn.tables.push(table_name);
-            conn.tables.sort();
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.update_section_objects(
+            conn_id,
+            SidebarSection::Tables,
+            |tables| {
+                if !tables.contains(&table_name) {
+                    tables.push(table_name.clone());
+                    tables.sort();
+                }
+            },
+            cx,
+        );
     }
 
     /// Remove a view from a connection's schema
     pub fn remove_view(&mut self, conn_id: Uuid, view_name: &str, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            conn.views.retain(|v| v != view_name);
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.update_section_objects(
+            conn_id,
+            SidebarSection::Views,
+            |views| views.retain(|v| v != view_name),
+            cx,
+        );
     }
 
     /// Add a view to a connection's schema
     pub fn add_view(&mut self, conn_id: Uuid, view_name: String, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
-            && !conn.views.contains(&view_name)
-        {
-            conn.views.push(view_name);
-            conn.views.sort();
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.update_section_objects(
+            conn_id,
+            SidebarSection::Views,
+            |views| {
+                if !views.contains(&view_name) {
+                    views.push(view_name.clone());
+                    views.sort();
+                }
+            },
+            cx,
+        );
     }
 
     /// Remove a trigger from a connection's schema
     pub fn remove_trigger(&mut self, conn_id: Uuid, trigger_name: &str, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            conn.triggers.retain(|t| t != trigger_name);
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.update_section_objects(
+            conn_id,
+            SidebarSection::Triggers,
+            |triggers| triggers.retain(|t| t != trigger_name),
+            cx,
+        );
     }
 
     /// Add a trigger to a connection's schema
     pub fn add_trigger(&mut self, conn_id: Uuid, trigger_name: String, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
-            && !conn.triggers.contains(&trigger_name)
-        {
-            conn.triggers.push(trigger_name);
-            conn.triggers.sort();
-        }
-        self.invalidate_virtual_rows();
-        cx.notify();
+        self.update_section_objects(
+            conn_id,
+            SidebarSection::Triggers,
+            |triggers| {
+                if !triggers.contains(&trigger_name) {
+                    triggers.push(trigger_name.clone());
+                    triggers.sort();
+                }
+            },
+            cx,
+        );
     }
 
     /// Set saved queries for a connection
@@ -1002,12 +820,19 @@ impl ConnectionSidebar {
     /// before the parallel eager-load queries complete.
     pub fn set_all_sections_loading(&mut self, conn_id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            conn.tables_loading = true;
-            conn.views_loading = conn.object_capabilities.supports_views;
-            conn.materialized_views_loading = conn.object_capabilities.supports_materialized_views;
-            conn.triggers_loading = conn.object_capabilities.supports_triggers;
-            conn.functions_loading = conn.object_capabilities.supports_functions;
-            conn.procedures_loading = conn.object_capabilities.supports_procedures;
+            let eagerly_loaded = [
+                SidebarSection::Tables,
+                SidebarSection::Views,
+                SidebarSection::MaterializedViews,
+                SidebarSection::Triggers,
+                SidebarSection::Functions,
+                SidebarSection::Procedures,
+            ]
+            .into_iter()
+            .filter(|section| conn.object_capabilities.supports_section(*section))
+            .collect::<Vec<_>>();
+
+            conn.schema_mut(None).loading_sections.extend(eagerly_loaded);
         }
         self.invalidate_virtual_rows();
         cx.notify();
@@ -1122,10 +947,9 @@ impl ConnectionSidebar {
 mod tests {
     use super::ConnectionSidebar;
     use crate::widgets::sidebar::types::{
-        ConnectionEntry, DatabaseSchemaData, SchemaObjects, SidebarDatabaseInfo,
-        SidebarTableDetailsData, SidebarTableKey,
+        ConnectionEntry, DatabaseSchemaData, SchemaObjects, SidebarDatabaseInfo, SidebarSection,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use uuid::Uuid;
 
     fn schema_objects() -> SchemaObjects {
@@ -1134,20 +958,6 @@ mod tests {
             schema_name: Some("public".to_string()),
             schema_names: vec!["public".to_string()],
             ..SchemaObjects::default()
-        }
-    }
-
-    fn table_key(
-        connection_id: Uuid,
-        database_name: Option<&str>,
-        schema_name: Option<&str>,
-        table_name: &str,
-    ) -> SidebarTableKey {
-        SidebarTableKey {
-            conn_id: connection_id,
-            database_name: database_name.map(ToOwned::to_owned),
-            schema_name: schema_name.map(ToOwned::to_owned),
-            table_name: table_name.to_string(),
         }
     }
 
@@ -1262,17 +1072,6 @@ mod tests {
             "postgres@localhost".to_string(),
             "postgres".to_string(),
         );
-        let users_key = table_key(connection_id, Some("postgres"), Some("public"), "users");
-        let old_key = table_key(connection_id, Some("postgres"), Some("public"), "old_table");
-        let mut table_details = HashMap::new();
-        table_details.insert(
-            users_key.clone(),
-            SidebarTableDetailsData {
-                fields: vec!["id".to_string()],
-                ..SidebarTableDetailsData::default()
-            },
-        );
-        table_details.insert(old_key.clone(), SidebarTableDetailsData::default());
 
         connection.databases = vec![SidebarDatabaseInfo {
             name: "postgres".to_string(),
@@ -1284,13 +1083,10 @@ mod tests {
                 schema_name: Some("public".to_string()),
                 schema_names: vec!["public".to_string()],
                 schema_expanded: true,
-                collapsed_schema_groups: HashSet::from(["public".to_string()]),
-                collapsed_schema_section_keys: HashSet::from(["public::tables".to_string()]),
+                expanded_schema_groups: HashSet::from(["public".to_string()]),
+                expanded_schema_section_keys: HashSet::from(["public::tables".to_string()]),
                 tables: vec!["public.users".to_string(), "public.old_table".to_string()],
-                table_details,
-                expanded_table_keys: HashSet::from([users_key.clone(), old_key.clone()]),
-                loading_table_keys: HashSet::from([old_key.clone()]),
-                tables_expanded: true,
+                expanded_sections: HashSet::from([SidebarSection::Tables]),
                 ..DatabaseSchemaData::default()
             }),
             collections: Vec::new(),
@@ -1328,21 +1124,16 @@ mod tests {
             .expect("schema should remain loaded");
 
         assert!(schema.schema_expanded);
-        assert!(schema.collapsed_schema_groups.contains("public"));
+        assert!(schema.expanded_schema_groups.contains("public"));
         assert!(
             schema
-                .collapsed_schema_section_keys
+                .expanded_schema_section_keys
                 .contains("public::tables")
         );
-        assert!(schema.tables_expanded);
+        assert!(schema.expanded_sections.contains(&SidebarSection::Tables));
         assert_eq!(
             schema.tables,
             vec!["public.users".to_string(), "public.accounts".to_string()]
         );
-        assert!(schema.table_details.contains_key(&users_key));
-        assert!(schema.expanded_table_keys.contains(&users_key));
-        assert!(!schema.table_details.contains_key(&old_key));
-        assert!(!schema.expanded_table_keys.contains(&old_key));
-        assert!(schema.loading_table_keys.is_empty());
     }
 }

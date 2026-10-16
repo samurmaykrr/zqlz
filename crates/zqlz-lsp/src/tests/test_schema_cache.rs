@@ -105,7 +105,10 @@ fn table_details(name: &str, columns: &[&str]) -> zqlz_services::TableDetails {
 fn test_merge_table_details_batch_populates_every_table() {
     let mut lsp = create_test_lsp();
     let batch = std::collections::HashMap::from([
-        ("invoices".to_string(), table_details("invoices", &["total"])),
+        (
+            "invoices".to_string(),
+            table_details("invoices", &["total"]),
+        ),
         ("payments".to_string(), table_details("payments", &["paid"])),
     ]);
 
@@ -251,11 +254,27 @@ fn test_merge_table_columns_batch_matches_merge_table_details_batch() {
     );
 
     assert_eq!(
-        via_details.schema_cache.foreign_keys_by_table.get("orders").map(Vec::len),
-        via_columns.schema_cache.foreign_keys_by_table.get("orders").map(Vec::len),
+        via_details
+            .schema_cache
+            .foreign_keys_by_table
+            .get("orders")
+            .map(Vec::len),
+        via_columns
+            .schema_cache
+            .foreign_keys_by_table
+            .get("orders")
+            .map(Vec::len),
     );
     assert_eq!(
-        via_details.schema_cache.reverse_foreign_keys.get("customers").map(Vec::len),
-        via_columns.schema_cache.reverse_foreign_keys.get("customers").map(Vec::len),
+        via_details
+            .schema_cache
+            .reverse_foreign_keys
+            .get("customers")
+            .map(Vec::len),
+        via_columns
+            .schema_cache
+            .reverse_foreign_keys
+            .get("customers")
+            .map(Vec::len),
     );
 }

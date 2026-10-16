@@ -14,7 +14,13 @@ fn is_operator_char(character: char) -> bool {
 fn trailing_operator_run(before_cursor: &str) -> &str {
     let start = before_cursor
         .rfind(|character| !is_operator_char(character))
-        .map(|index| index + before_cursor[index..].chars().next().map_or(1, char::len_utf8))
+        .map(|index| {
+            index
+                + before_cursor[index..]
+                    .chars()
+                    .next()
+                    .map_or(1, char::len_utf8)
+        })
         .unwrap_or(0);
     &before_cursor[start..]
 }

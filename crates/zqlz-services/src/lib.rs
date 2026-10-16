@@ -69,22 +69,16 @@ pub use refresh_service::{
 };
 pub use schema_service::{SchemaService, SidebarSectionLoadData};
 pub use table_service::{
-    build_open_viewer_schema_viewer_metadata, build_schema_only_query_result, decide_delete_tables,
-    decide_design_tables, decide_duplicate_tables, decide_empty_tables,
-    decide_open_tables_workflow, decide_open_viewer_count_workflow,
-    should_use_schema_only_table_browse_fallback, BrowseLastPageRequest, BrowseNearEndPageRequest,
-    BrowseTableWithFiltersRequest, CommitCellChange, CommitTableChangesOutcome,
-    CommitTableChangesRequest, DeleteTablesDecision, DeleteTablesDecisionRequest,
-    DeleteTablesOutcome, DeleteTablesRequest, DesignTablesDecision, DesignTablesDecisionRequest,
+    build_open_viewer_schema_viewer_metadata, build_schema_only_query_result, plan_fetch,
+    should_use_schema_only_table_browse_fallback, CommitCellChange, CommitTableChangesOutcome,
+    CommitTableChangesRequest, CountPlan, DeleteTablesOutcome, DeleteTablesRequest,
     DumpTablesSqlOutcome, DumpTablesSqlRequest, DuplicateTableOperation, DuplicateTableResult,
-    DuplicateTablesDecision, DuplicateTablesDecisionRequest, DuplicateTablesOutcome,
-    DuplicateTablesRequest, EmptyTablesDecision, EmptyTablesDecisionRequest, EmptyTablesOutcome,
-    EmptyTablesRequest, FailedModifiedCellCommit, FailedNewRowCommit, ForeignKeyValueOption,
-    GenerateTableChangesSqlRequest, LoadDistinctValuesOutcome, LoadDistinctValuesRequest,
-    LoadForeignKeyValuesOutcome, LoadForeignKeyValuesRequest, ModifiedCellSqlChange,
-    OpenTableViewerCountDecision, OpenTableViewerCountDecisionRequest, OpenTablesDecision,
-    OpenTablesDecisionRequest, OpenViewerInitialLoadOutcome, OpenViewerInitialLoadRequest,
-    OpenViewerSchemaLoad, OpenViewerSchemaViewerMetadata, RenameTableRequest, TableWorkflowError,
+    DuplicateTablesOutcome, DuplicateTablesRequest, EmptyTablesOutcome, EmptyTablesRequest,
+    FailedModifiedCellCommit, FailedNewRowCommit, FetchMode, FetchOutcome, FetchPlan,
+    ForeignKeyValueOption, GenerateTableChangesSqlRequest, KnownTotal, LoadDistinctValuesOutcome,
+    LoadDistinctValuesRequest, LoadForeignKeyValuesOutcome, LoadForeignKeyValuesRequest,
+    ModifiedCellSqlChange, OpenViewerSchemaLoad, OpenViewerSchemaViewerMetadata, QuerySnapshot,
+    RenameTableRequest, RowWindow,
 };
 pub use table_service::{
     CellUpdateData, CellUpdateOutcome, RowDeleteData, RowInsertData, TableService,

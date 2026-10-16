@@ -1,6 +1,7 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use sqlparser::ast::Statement;
 use sqlparser::dialect::Dialect as SqlParserDialect;
-use sqlparser::parser::Parser;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithLocation, Tokenizer};
 
 use crate::diagnostics::{
@@ -14,12 +15,11 @@ pub(crate) fn check_sqlparser_syntax(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    if is_compound_routine_statement(sql) {
+    if !crate::mysql_syntax::is_mysql(dialect) && is_compound_routine_statement(sql) {
         return diagnostics;
     }
 
-    let mut tokenizer = Tokenizer::new(dialect, sql);
-    let tokens = match tokenizer.tokenize_with_location() {
+    let tokens = match tokenize(dialect, sql) {
         Ok(tokens) => tokens,
         Err(error) => {
             let line = error.location.line.saturating_sub(1) as u32;
@@ -39,7 +39,8 @@ pub(crate) fn check_sqlparser_syntax(
         }
     };
 
-    let mut parser = Parser::new(dialect).with_tokens_with_locations(tokens);
+    let mut parser =
+        Parser::new(dialect).with_tokens_with_locations(prepare_statements(dialect, tokens));
     match parser.parse_statements() {
         Ok(_statements) => {}
         Err(error) => {
@@ -60,6 +61,87 @@ pub(crate) fn check_sqlparser_syntax(
     }
 
     diagnostics
+}
+
+/// Valid PostgreSQL statements that sqlparser has no grammar for. Without this,
+/// one `REFRESH MATERIALIZED VIEW` marks the whole buffer as a syntax error and
+/// switches off schema validation for every other statement in it.
+const UNSUPPORTED_STATEMENT_KEYWORDS: &[&str] = &[
+    "REFRESH",
+    "VACUUM",
+    "REINDEX",
+    "CLUSTER",
+    "CHECKPOINT",
+    "DO",
+];
+
+/// Drops statements that begin with an [`UNSUPPORTED_STATEMENT_KEYWORDS`] word,
+/// keeping their terminating `;`. Tokens keep their locations, so diagnostics
+/// for the remaining statements still point at the right place.
+pub(crate) fn skip_unsupported_statements(
+    tokens: Vec<TokenWithLocation>,
+) -> Vec<TokenWithLocation> {
+    let mut kept = Vec::with_capacity(tokens.len());
+    let mut at_statement_start = true;
+    let mut skipping = false;
+    for token in tokens {
+        match &token.token {
+            Token::SemiColon => {
+                skipping = false;
+                at_statement_start = true;
+            }
+            Token::Whitespace(_) if at_statement_start => {}
+            Token::Word(word) if at_statement_start => {
+                at_statement_start = false;
+                skipping = word.quote_style.is_none()
+                    && UNSUPPORTED_STATEMENT_KEYWORDS
+                        .iter()
+                        .any(|keyword| word.value.eq_ignore_ascii_case(keyword));
+            }
+            _ => at_statement_start = false,
+        }
+        if !skipping {
+            kept.push(token);
+        }
+    }
+    kept
+}
+
+/// [`Parser::parse_sql`] that tolerates [`UNSUPPORTED_STATEMENT_KEYWORDS`]
+/// statements by leaving them out of the result.
+pub(crate) fn parse_supported_statements(
+    dialect: &dyn SqlParserDialect,
+    sql: &str,
+) -> Result<Vec<Statement>, ParserError> {
+    let tokens =
+        tokenize(dialect, sql).map_err(|error| ParserError::TokenizerError(error.to_string()))?;
+    Parser::new(dialect)
+        .with_tokens_with_locations(prepare_statements(dialect, tokens))
+        .parse_statements()
+}
+
+/// Tokenizes `sql` the way every diagnostics pass must see it; for MySQL that is the
+/// [`crate::mysql_syntax::mask_sql`] view, whose locations still match the buffer.
+pub(crate) fn tokenize(
+    dialect: &dyn SqlParserDialect,
+    sql: &str,
+) -> Result<Vec<TokenWithLocation>, sqlparser::tokenizer::TokenizerError> {
+    if crate::mysql_syntax::is_mysql(dialect) {
+        Tokenizer::new(dialect, &crate::mysql_syntax::mask_sql(sql)).tokenize_with_location()
+    } else {
+        Tokenizer::new(dialect, sql).tokenize_with_location()
+    }
+}
+
+fn prepare_statements(
+    dialect: &dyn SqlParserDialect,
+    tokens: Vec<TokenWithLocation>,
+) -> Vec<TokenWithLocation> {
+    if crate::mysql_syntax::is_mysql(dialect) {
+        crate::mysql_syntax::prepare_statements(dialect, tokens)
+    } else {
+        skip_unsupported_statements(tokens)
+    }
 }
 
 /// True for `CREATE ... FUNCTION|PROCEDURE|TRIGGER|EVENT`, whose `BEGIN ... END` bodies

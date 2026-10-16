@@ -4,8 +4,8 @@ use crate::widgets::{ActiveTheme, Icon, IconName, Selectable, Sizable, Size, Sty
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Div, Edges, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, px, relative,
+    ParentElement, Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled,
+    Window, div, px, relative,
 };
 
 type TabClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -578,6 +578,9 @@ impl RenderOnce for Tab {
 
         self.base
             .id(self.ix)
+            .role(Role::Tab)
+            .aria_selected(self.selected)
+            .when_some(self.label.clone(), |this, label| this.aria_label(label))
             .flex()
             .flex_wrap()
             .gap_1()

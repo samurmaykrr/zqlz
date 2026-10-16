@@ -9,6 +9,7 @@ name = "zqlz"
 path = "src/cli.rs"
 
 [dependencies]
+libc.workspace = true
 # Argument parsing
 clap = { version = "4", features = ["derive", "env"] }
 

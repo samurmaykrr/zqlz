@@ -1,0 +1,4 @@
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	PRIMARY	orders_orders	NULL	index	NULL	fk_order_currency	12	NULL	152189	100.00	Using index
+2	UNION	orders_order_items	NULL	index	NULL	idx_order_item_order	144	NULL	488256	100.00	Using index
+3	UNION RESULT	<union1,2>	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	Using temporary

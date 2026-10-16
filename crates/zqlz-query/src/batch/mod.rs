@@ -10,5 +10,5 @@ mod tests;
 
 pub use executor::{
     BatchExecutionResult, BatchExecutor, BatchOptions, BatchResult, ExecutionMode, StatementError,
-    StatementStatus, split_statements,
+    StatementStatus, split_statements, split_statements_for_dialect,
 };

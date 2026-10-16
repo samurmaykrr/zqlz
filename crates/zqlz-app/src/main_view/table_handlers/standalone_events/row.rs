@@ -15,7 +15,7 @@ use zqlz_core::{
     ColumnMeta, DocumentCellUpdateRequest, DocumentDeleteRequest, DocumentSaveRequest,
     DriverCategory, KeyValueDeleteRequest, Value,
 };
-use zqlz_services::{CommitCellChange, CommitTableChangesRequest, RowInsertData};
+use zqlz_services::{CommitCellChange, CommitTableChangesRequest, FetchMode, RowInsertData};
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
     notification::Notification, v_flex,
@@ -24,13 +24,9 @@ use zqlz_ui::widgets::{
 use crate::app::AppState;
 use crate::components::{PendingCellChange, TableViewerEvent, TableViewerPanel};
 
-use super::super::super::table_handlers_utils::conversion::resolve_schema_qualifier;
-use crate::main_view::table_handlers_utils::sql::{
-    build_search_clause_for_columns, resolve_search_columns,
-};
+use super::super::super::table_handlers_utils::conversion::viewer_table;
 
 pub(in crate::main_view) struct SaveNewRowRequest {
-    pub connection_id: Uuid,
     pub table_name: String,
     pub new_row_index: usize,
     pub row_data: Vec<String>,
@@ -143,15 +139,15 @@ pub(in crate::main_view) fn handle_save_new_row_event(
         return;
     };
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(
-            request.connection_id,
-            viewer_entity.read(cx).database_name().as_deref(),
-        )
-    else {
-        tracing::error!("Connection not found: {}", request.connection_id);
-        return;
+    let (table, connection) = match viewer_table(viewer_entity.read(cx), cx) {
+        Ok(target) => target,
+        Err(error) => {
+            window.push_notification(
+                Notification::error(format!("Cannot save the row: {error}")),
+                cx,
+            );
+            return;
+        }
     };
 
     let table_service = app_state.table_service.clone();
@@ -165,11 +161,7 @@ pub(in crate::main_view) fn handle_save_new_row_event(
         .collect();
     let column_names = request.column_names;
     let window_handle = window.window_handle();
-    let connection_id = request.connection_id;
     let new_row_index = request.new_row_index;
-
-    let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     // Insert the new row in background
     cx.spawn(async move |cx| {
@@ -178,8 +170,7 @@ pub(in crate::main_view) fn handle_save_new_row_event(
         let result = table_service
             .insert_row(
                 connection.clone(),
-                &table_name,
-                schema_qualifier.as_deref(),
+                &table,
                 RowInsertData {
                     column_names,
                     values: row_data,
@@ -214,12 +205,7 @@ pub(in crate::main_view) fn handle_save_new_row_event(
                 }
 
                 // Emit refresh event directly (no nested viewer_entity.update)
-                cx.emit(TableViewerEvent::RefreshTable {
-                    connection_id,
-                    table_name: table_name.clone(),
-                    driver_category: viewer.driver_category,
-                    database_name: viewer.database_name.clone(),
-                });
+                cx.emit(TableViewerEvent::RefreshTable);
             } else if let Some(ref err) = error_message {
                 tracing::error!(
                     "Failed to insert new row: table={}, error={}",
@@ -283,71 +269,18 @@ pub(in crate::main_view) fn handle_delete_rows_event(
         return;
     };
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(
-            connection_id,
-            viewer_entity.read(cx).database_name().as_deref(),
-        )
-    else {
-        tracing::error!("Connection not found: {}", connection_id);
-        return;
+    let (table, connection) = match viewer_table(viewer_entity.read(cx), cx) {
+        Ok(target) => target,
+        Err(error) => {
+            window.push_notification(
+                Notification::error(format!("Cannot delete rows: {error}")),
+                cx,
+            );
+            return;
+        }
     };
 
     let table_service = app_state.table_service.clone();
-    let table_name = table_name.to_string();
-    let connection = connection.clone();
-    // Get connection name for tab title
-    let connection_name = app_state
-        .connection_service
-        .get_saved_connection_name(connection_id)
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    // Capture the is_view state and database_name before loading
-    let is_view = viewer_entity.read(cx).is_view();
-    let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
-
-    // Extract active filter/sort/search state so the post-delete refresh preserves it
-    let (where_clauses, order_by_clauses, visible_columns) =
-        viewer_entity.read_with(cx, |viewer, cx| {
-            let mut where_clauses: Vec<String> = Vec::new();
-            let mut order_by_clauses: Vec<String> = Vec::new();
-
-            if let Some(filter_state) = &viewer.filter_panel_state {
-                let (filters, sorts) = filter_state.read_with(cx, |state, _cx| {
-                    (state.get_filter_conditions(), state.get_sort_criteria())
-                });
-                where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
-                order_by_clauses = sorts
-                    .iter()
-                    .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
-                    .collect();
-            }
-
-            if let Some(search_clause) = build_search_clause_for_columns(
-                &connection,
-                &resolve_search_columns(
-                    &viewer.column_meta,
-                    viewer
-                        .performance_profile
-                        .as_ref()
-                        .map(|profile| profile.searchable_columns.clone()),
-                ),
-                &viewer.search_text,
-                false,
-            ) {
-                where_clauses.push(search_clause);
-            }
-
-            let visible_columns: Vec<String> = viewer
-                .column_visibility_state
-                .as_ref()
-                .map(|state| state.read(cx).visible_columns())
-                .unwrap_or_else(|| viewer.column_meta.iter().map(|c| c.name.clone()).collect());
-
-            (where_clauses, order_by_clauses, visible_columns)
-        });
 
     let row_delete_data = zqlz_services::RowDeleteData {
         all_column_names: all_column_names.to_vec(),
@@ -357,64 +290,21 @@ pub(in crate::main_view) fn handle_delete_rows_event(
     window
         .spawn(cx, async move |cx| {
             match table_service
-                .delete_rows(
-                    connection.clone(),
-                    &table_name,
-                    schema_qualifier.as_deref(),
-                    row_delete_data,
-                )
+                .delete_rows(connection, &table, row_delete_data)
                 .await
             {
                 Ok(deleted_count) => {
                     tracing::info!("Deleted {} rows successfully", deleted_count);
 
-                    // Refresh the table preserving active filters/sorts/search
-                    match table_service
-                        .browse_table_with_filters(
-                            connection,
-                            zqlz_services::BrowseTableWithFiltersRequest {
-                                table_name: &table_name,
-                                schema: schema_qualifier.as_deref(),
-                                where_clauses,
-                                order_by_clauses,
-                                visible_columns,
-                                limit: None,
-                                offset: None,
-                                cached_total: None,
-                            },
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
-                                viewer.load_table(
-                                    connection_id,
-                                    connection_name.clone(),
-                                    table_name.clone(),
-                                    database_name.clone(),
-                                    is_view,
-                                    result,
-                                    zqlz_core::DriverCategory::Relational,
-                                    window,
-                                    cx,
-                                );
-                                window.push_notification(
-                                    Notification::success(format!(
-                                        "{} row(s) deleted",
-                                        deleted_count
-                                    )),
-                                    cx,
-                                );
-                            }) {
-                                tracing::debug!(error = %error, "Skipped delete-rows success UI update after viewer dropped");
-                            }
-                        }
-                        Err(refresh_err) => {
-                            tracing::error!(
-                                "Failed to refresh table after delete: {}",
-                                refresh_err
-                            );
-                        }
+                    // Refresh keeps the user's page, filters, sorts and search.
+                    if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        viewer.reload(FetchMode::Refresh, window, cx);
+                        window.push_notification(
+                            Notification::success(format!("{} row(s) deleted", deleted_count)),
+                            cx,
+                        );
+                    }) {
+                        tracing::debug!(error = %error, "Skipped delete-rows refresh after viewer dropped");
                     }
                 }
                 Err(e) => {
@@ -563,9 +453,6 @@ pub(in crate::main_view) fn handle_commit_changes_event(
         return;
     };
 
-    // Capture viewer state before the async spawn
-    let is_view = viewer_entity.read(cx).is_view();
-    let database_name = viewer_entity.read(cx).database_name();
     let driver_category = viewer_entity.read(cx).driver_category;
 
     if matches!(driver_category, DriverCategory::Document) {
@@ -584,27 +471,23 @@ pub(in crate::main_view) fn handle_commit_changes_event(
         return;
     }
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(connection_id, database_name.as_deref())
-    else {
-        tracing::error!("Connection not found: {}", connection_id);
-        return;
+    let (table, connection) = match viewer_table(viewer_entity.read(cx), cx) {
+        Ok(target) => target,
+        Err(error) => {
+            window.push_notification(
+                Notification::error(format!("Cannot commit changes: {error}")),
+                cx,
+            );
+            return;
+        }
     };
 
     let table_service = app_state.table_service.clone();
-    let connection_name = app_state
-        .connection_service
-        .get_saved_connection_name(connection_id)
-        .unwrap_or_else(|| "Unknown".to_string());
-    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
-    let connection = connection.clone();
 
     window
         .spawn(cx, async move |cx| {
             let commit_request = CommitTableChangesRequest {
-                table_name: table_name.clone(),
-                schema: schema_qualifier.clone(),
+                table: table.clone(),
                 column_meta: column_meta.clone(),
                 modified_cells: modified_cells
                     .iter()
@@ -667,24 +550,9 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     tracing::debug!(error = %error, "Skipped pending-change clear after viewer dropped");
                 }
 
-                // Refresh table data
-                if let Ok(result) = table_service
-                    .browse_table(connection, &table_name, schema_qualifier.as_deref(), None, None)
-                    .await
-                    && let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
-                        viewer.load_table(
-                            connection_id,
-                            connection_name.clone(),
-                            table_name.clone(),
-                            database_name.clone(),
-                            is_view,
-                            result,
-                            driver_category,
-                            window,
-                            cx,
-                        );
-                    })
-                {
+                if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
+                    viewer.reload(FetchMode::Refresh, window, cx);
+                }) {
                     tracing::debug!(error = %error, "Skipped post-commit table reload after viewer dropped");
                 }
 

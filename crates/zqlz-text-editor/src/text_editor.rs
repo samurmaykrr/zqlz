@@ -4994,6 +4994,13 @@ impl Render for TextEditor {
         self.flush_pending_hover(window, cx);
 
         div()
+            // An id is what makes this reachable in the accessibility tree; a
+            // role alone is not enough.
+            .id("text-editor")
+            .role(Role::MultilineTextInput)
+            // Deliberately no aria_value: the buffer can be megabytes, and
+            // pushing it through the tree on every frame would be ruinous.
+            // Content reaches assistive technology via the input handler.
             .size_full()
             .relative()
             // Required for keyboard events to be routed here.
@@ -11380,6 +11387,42 @@ mod tests {
         assert!(
             !editor.read_with(cx, |editor, _| editor.lsp.has_completion_menu()),
             "moving the cursor must dismiss the completion menu"
+        );
+    }
+
+    // ========================================================================
+    // Accessibility — modeled on gpui's own `write_a11y_info` tests: render
+    // the editor for real, convert the returned element, and read back the
+    // accesskit node it writes to, rather than re-typing the role/aria setup
+    // separately in the test.
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_editor_reports_multiline_text_input_role_without_pushing_buffer_content(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{Element as _, IntoElement as _, Render as _, accesskit};
+
+        let (editor, cx) = build_focused_editor("select first_name from users", cx);
+
+        let (role, node) = editor.update_in(cx, |editor, window, cx| {
+            let element = editor.render(window, cx).into_element();
+            let role = element.a11y_role();
+            let mut node = accesskit::Node::new(gpui::Role::MultilineTextInput);
+            element.write_a11y_info(&mut node);
+            (role, node)
+        });
+
+        assert_eq!(
+            role,
+            Some(gpui::Role::MultilineTextInput),
+            "the editor container must carry both an id and a role to be reachable in the a11y tree"
+        );
+        assert_eq!(
+            node.value(),
+            None,
+            "the buffer can be megabytes, so its content must reach assistive technology \
+             through the input handler, never as an aria value pushed every frame"
         );
     }
 }

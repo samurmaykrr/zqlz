@@ -8,13 +8,14 @@ use crate::{
     SchemaCache,
     schema_validation_issue::{ValidationIssue, ValidationSeverity, ValidationSymbolRole},
     schema_validation_lookup,
+    schema_validation_lookup::CteScope,
 };
 
 pub(crate) struct TableValidationContext<'a> {
     pub(crate) schema: &'a SchemaCache,
     pub(crate) available_tables: &'a HashMap<String, String>,
     pub(crate) select_aliases: &'a HashSet<String>,
-    pub(crate) cte_names: &'a HashSet<String>,
+    pub(crate) cte_names: &'a CteScope,
 }
 
 pub(crate) fn validate_table_with_joins<F, G>(
@@ -29,10 +30,10 @@ pub(crate) fn validate_table_with_joins<F, G>(
         &HashMap<String, String>,
         &HashSet<String>,
         &SchemaCache,
-        &HashSet<String>,
+        &CteScope,
         &mut Vec<ValidationIssue>,
     ),
-    G: FnMut(&Query, &SchemaCache, &HashSet<String>, &mut Vec<ValidationIssue>),
+    G: FnMut(&Query, &SchemaCache, &CteScope, &mut Vec<ValidationIssue>),
 {
     validate_table_factor(
         &table_with_joins.relation,
@@ -67,7 +68,7 @@ pub(crate) fn validate_table_with_joins<F, G>(
 pub(crate) fn validate_table_factor<F, G>(
     table_factor: &TableFactor,
     schema: &SchemaCache,
-    cte_names: &HashSet<String>,
+    cte_names: &CteScope,
     issues: &mut Vec<ValidationIssue>,
     validate_expression: &mut F,
     validate_query: &mut G,
@@ -77,10 +78,10 @@ pub(crate) fn validate_table_factor<F, G>(
         &HashMap<String, String>,
         &HashSet<String>,
         &SchemaCache,
-        &HashSet<String>,
+        &CteScope,
         &mut Vec<ValidationIssue>,
     ),
-    G: FnMut(&Query, &SchemaCache, &HashSet<String>, &mut Vec<ValidationIssue>),
+    G: FnMut(&Query, &SchemaCache, &CteScope, &mut Vec<ValidationIssue>),
 {
     match table_factor {
         TableFactor::Table { name, .. } => {
@@ -119,12 +120,13 @@ pub(crate) fn validate_table_factor<F, G>(
 pub(crate) fn validate_table_reference(
     table_name: &ObjectName,
     schema: &SchemaCache,
-    cte_names: &HashSet<String>,
+    cte_names: &CteScope,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    if cte_names.contains(
+    if cte_names.contains_key(
         &schema_validation_lookup::object_name_lookup_key(table_name).to_ascii_lowercase(),
-    ) {
+    ) || schema_validation_lookup::is_unvalidated_relation(&table_name.to_string(), schema)
+    {
         return;
     }
     if schema_validation_lookup::schema_table_name(table_name, schema).is_none() {
@@ -146,6 +148,9 @@ pub(crate) fn validate_columns(
     schema: &SchemaCache,
     issues: &mut Vec<ValidationIssue>,
 ) {
+    if schema_validation_lookup::is_unvalidated_relation(&table_name.to_string(), schema) {
+        return;
+    }
     if let Some(column_names) = schema_validation_lookup::schema_column_names(table_name, schema) {
         for column in columns {
             if !column_names.contains(&column.value.to_ascii_lowercase()) {
@@ -171,7 +176,7 @@ fn validate_join_operator<F>(
     available_tables: &HashMap<String, String>,
     select_aliases: &HashSet<String>,
     schema: &SchemaCache,
-    cte_names: &HashSet<String>,
+    cte_names: &CteScope,
     issues: &mut Vec<ValidationIssue>,
     validate_expression: &mut F,
 ) where
@@ -180,7 +185,7 @@ fn validate_join_operator<F>(
         &HashMap<String, String>,
         &HashSet<String>,
         &SchemaCache,
-        &HashSet<String>,
+        &CteScope,
         &mut Vec<ValidationIssue>,
     ),
 {
@@ -232,7 +237,7 @@ fn validate_join_constraint<F>(
     available_tables: &HashMap<String, String>,
     select_aliases: &HashSet<String>,
     schema: &SchemaCache,
-    cte_names: &HashSet<String>,
+    cte_names: &CteScope,
     issues: &mut Vec<ValidationIssue>,
     validate_expression: &mut F,
 ) where
@@ -241,7 +246,7 @@ fn validate_join_constraint<F>(
         &HashMap<String, String>,
         &HashSet<String>,
         &SchemaCache,
-        &HashSet<String>,
+        &CteScope,
         &mut Vec<ValidationIssue>,
     ),
 {

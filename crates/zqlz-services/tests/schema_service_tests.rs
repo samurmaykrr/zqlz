@@ -15,7 +15,7 @@ use zqlz_services::SchemaService;
 
 use common::{
     mock_single_value_result, mysql_connection, mysql_connection_with_bulk_columns,
-    postgres_connection, MockConnection,
+    postgres_connection, postgres_connection_with_bulk_columns, MockConnection,
 };
 
 // ============ MySQL Driver Path Tests ============
@@ -959,6 +959,31 @@ async fn get_table_details_uses_cached_columns() {
 }
 
 #[tokio::test]
+async fn table_details_cache_is_scoped_by_database() {
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let app: Arc<dyn Connection> =
+        Arc::new(MockConnection::new("app").with_connected_database("app"));
+    let audit: Arc<dyn Connection> =
+        Arc::new(MockConnection::new("audit").with_connected_database("audit"));
+
+    service
+        .get_table_details(app.clone(), conn_id, "users", Some("public"))
+        .await
+        .expect("details load in app");
+
+    assert!(service
+        .peek_table_details_cache(app.as_ref(), conn_id, "users", Some("public"))
+        .is_some());
+    assert!(
+        service
+            .peek_table_details_cache(audit.as_ref(), conn_id, "users", Some("public"))
+            .is_none(),
+        "public.users in another database must not be served from app's cache"
+    );
+}
+
+#[tokio::test]
 async fn table_details_cache_is_scoped_by_schema() {
     let conn = mysql_connection("scope_db");
     let service = SchemaService::new();
@@ -992,13 +1017,13 @@ async fn table_details_cache_is_scoped_by_schema() {
     assert_eq!(schema_b_details.name, "users");
 
     assert!(service
-        .peek_table_details_cache(conn_id, "users", Some("schema_a"))
+        .peek_table_details_cache(conn.as_ref(), conn_id, "users", Some("schema_a"))
         .is_some());
     assert!(service
-        .peek_table_details_cache(conn_id, "users", Some("schema_b"))
+        .peek_table_details_cache(conn.as_ref(), conn_id, "users", Some("schema_b"))
         .is_some());
     assert!(service
-        .peek_table_details_cache(conn_id, "users", Some("schema_c"))
+        .peek_table_details_cache(conn.as_ref(), conn_id, "users", Some("schema_c"))
         .is_none());
 }
 
@@ -1115,7 +1140,7 @@ async fn invalidate_connection_cache_clears_table_details_cache() {
 
     assert!(
         service
-            .peek_table_details_cache(conn_id, "users", None)
+            .peek_table_details_cache(connection.as_ref(), conn_id, "users", None)
             .is_some(),
         "table details should be cached after the first lookup"
     );
@@ -1124,7 +1149,7 @@ async fn invalidate_connection_cache_clears_table_details_cache() {
 
     assert!(
         service
-            .peek_table_details_cache(conn_id, "users", None)
+            .peek_table_details_cache(connection.as_ref(), conn_id, "users", None)
             .is_none(),
         "refresh invalidation should clear cached table details"
     );
@@ -1139,7 +1164,7 @@ async fn invalidate_connection_cache_clears_table_details_cache() {
         .expect("schema reload after invalidation");
 
     let reloaded_details = service
-        .get_table_details(connection, conn_id, "users", None)
+        .get_table_details(connection.clone(), conn_id, "users", None)
         .await
         .expect("reloaded table details");
 
@@ -1153,7 +1178,7 @@ async fn invalidate_connection_cache_clears_table_details_cache() {
     );
     assert!(
         service
-            .peek_table_details_cache(conn_id, "users", None)
+            .peek_table_details_cache(connection.as_ref(), conn_id, "users", None)
             .is_some(),
         "table details should be cached again after reload"
     );
@@ -2499,7 +2524,7 @@ async fn scoped_schema_load_keeps_table_details_readable_without_reload() {
 
     assert!(
         service
-            .peek_table_details_cache(conn_id, "users", None)
+            .peek_table_details_cache(connection.as_ref(), conn_id, "users", None)
             .is_some(),
         "peek should still see warmed details after a targeted load"
     );
@@ -2625,5 +2650,48 @@ async fn warm_schema_columns_writes_the_key_get_table_details_reads() {
         conn.get_columns_count(),
         columns_before,
         "warmed columns should satisfy get_table_details without a new query"
+    );
+}
+
+#[tokio::test]
+async fn warm_schema_columns_asks_postgres_for_every_schema() {
+    // PostgreSQL lists relations across all schemas as `schema.table`; scoping the
+    // bulk fetch to the default schema ("public") warmed nothing when every table
+    // lives elsewhere.
+    let conn = postgres_connection_with_bulk_columns("lab", "public");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .warm_schema_columns(
+            connection,
+            conn_id,
+            vec!["zqlz_lab.users".to_string()],
+            Some("public".to_string()),
+        )
+        .await;
+
+    assert_eq!(*conn.list_all_columns_schemas.lock(), vec![None]);
+}
+
+#[tokio::test]
+async fn warm_schema_columns_keeps_the_schema_scope_for_mysql() {
+    let conn = mysql_connection_with_bulk_columns("scoped_db");
+    let service = SchemaService::new();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .warm_schema_columns(
+            connection,
+            Uuid::new_v4(),
+            vec!["users".to_string()],
+            Some("scoped_db".to_string()),
+        )
+        .await;
+
+    assert_eq!(
+        *conn.list_all_columns_schemas.lock(),
+        vec![Some("scoped_db".to_string())]
     );
 }

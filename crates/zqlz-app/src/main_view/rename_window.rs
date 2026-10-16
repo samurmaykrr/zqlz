@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::{ConnectionScope, validate_view_name};
+use zqlz_core::{TableRef, validate_view_name};
 use zqlz_services::{ConnectionService, RenameTableRequest, TableService};
 use zqlz_ui::widgets::{
     ActiveTheme as _, Disableable, Root,
@@ -25,11 +25,9 @@ enum RenameTarget {
     Table {
         connection_id: Uuid,
         old_name: String,
+        table: TableRef,
         connection_service: Arc<ConnectionService>,
         table_service: Arc<TableService>,
-        /// Database the table was listed from; a bare rename would otherwise
-        /// target the session's current database.
-        target_database: Option<String>,
         main_view: WeakEntity<MainView>,
     },
     View {
@@ -86,18 +84,13 @@ impl RenameTarget {
         match self {
             Self::Table {
                 connection_id,
-                old_name,
+                table,
                 connection_service,
                 table_service,
-                target_database,
                 ..
             } => {
-                let scope = target_database
-                    .clone()
-                    .map(ConnectionScope::Database)
-                    .unwrap_or(ConnectionScope::Default);
                 let resolved_connection = connection_service
-                    .resolve_connection(*connection_id, scope)
+                    .resolve_connection(*connection_id, table.scope())
                     .await
                     .map_err(|error| error.to_string())?;
 
@@ -105,9 +98,8 @@ impl RenameTarget {
                     .rename_table(
                         resolved_connection.connection,
                         RenameTableRequest {
-                            source_table_name: old_name.clone(),
+                            table: table.clone(),
                             target_table_name: new_name.to_string(),
-                            namespace: resolved_connection.effective_namespace,
                         },
                     )
                     .await
@@ -202,24 +194,21 @@ pub(super) struct RenameWindow {
 }
 
 impl RenameWindow {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn open_table(
         connection_id: Uuid,
-        table_name: String,
-        _driver_name: String,
+        table: TableRef,
         connection_service: Arc<ConnectionService>,
         table_service: Arc<TableService>,
-        target_database: Option<String>,
         main_view: WeakEntity<MainView>,
         cx: &mut App,
     ) {
         Self::open(
             RenameTarget::Table {
                 connection_id,
-                old_name: table_name,
+                old_name: table.name.clone(),
+                table,
                 connection_service,
                 table_service,
-                target_database,
                 main_view,
             },
             cx,

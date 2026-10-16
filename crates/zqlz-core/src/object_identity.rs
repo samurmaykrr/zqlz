@@ -1,10 +1,10 @@
 use crate::ObjectsPanelObjectRef;
 
-/// Parse a Redis database node label (for example `db0`) into its numeric index.
+/// Parse a Redis database node label (`db0`) or a bare index (`0`, what
+/// `normalize_database_scope_name` produces) into its numeric index.
 pub fn parse_redis_database_index(database_name: &str) -> Option<u16> {
-    database_name
-        .strip_prefix("db")
-        .and_then(|value| value.parse::<u16>().ok())
+    let name = database_name.trim();
+    name.strip_prefix("db").unwrap_or(name).parse::<u16>().ok()
 }
 
 /// Build a canonical qualified object identifier for UI and version-history actions.
@@ -52,6 +52,10 @@ mod tests {
         assert_eq!(parse_redis_database_index("db"), None);
         assert_eq!(parse_redis_database_index("database1"), None);
         assert_eq!(parse_redis_database_index("db99999"), None);
+        assert_eq!(parse_redis_database_index("15"), Some(15));
+        assert_eq!(parse_redis_database_index(" 0 "), Some(0));
+        assert_eq!(parse_redis_database_index(""), None);
+        assert_eq!(parse_redis_database_index("-1"), None);
     }
 
     #[test]

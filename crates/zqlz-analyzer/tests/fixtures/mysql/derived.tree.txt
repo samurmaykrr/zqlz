@@ -1,0 +1,6 @@
+-> Table scan on d  (cost=32737..32739 rows=5)
+    -> Materialize  (cost=32736..32736 rows=5)
+        -> Filter: (count(0) > 1)  (cost=32736 rows=5)
+            -> Group aggregate: count(0)  (cost=32736 rows=5)
+                -> Covering index scan on orders_orders using fk_order_status  (cost=17517 rows=152189)
+

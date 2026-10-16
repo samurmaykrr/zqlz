@@ -125,6 +125,16 @@ actions!(
     ]
 );
 
+// Developer / diagnostics actions
+actions!(
+    dev,
+    [
+        /// Copy the window's most recent accessibility tree to the clipboard as
+        /// JSON, for inspecting what is exposed to assistive technology.
+        CopyAccessibilityTree,
+    ]
+);
+
 // Versioning actions
 actions!(
     versioning,

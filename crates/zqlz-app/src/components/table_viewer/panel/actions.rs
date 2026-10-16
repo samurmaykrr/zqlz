@@ -126,12 +126,12 @@ impl TableViewerPanel {
     }
 
     pub fn emit_add_row(&mut self, cx: &mut Context<Self>) {
-        let Some(connection_id) = self.connection_id else {
+        if self.connection_id.is_none() {
             return;
-        };
+        }
 
         if matches!(self.driver_category, DriverCategory::KeyValue) {
-            cx.emit(TableViewerEvent::AddRedisKey { connection_id });
+            cx.emit(TableViewerEvent::AddRedisKey);
             return;
         }
 
@@ -147,9 +147,9 @@ impl TableViewerPanel {
             tracing::info!("Skipping row insert: table does not support row inserts");
             return;
         }
-        let Some(table_name) = &self.table_name else {
+        if self.table_name.is_none() {
             return;
-        };
+        }
 
         let all_column_names: Vec<String> = table_state.read_with(cx, |table, _cx| {
             table
@@ -160,26 +160,22 @@ impl TableViewerPanel {
                 .collect()
         });
 
-        cx.emit(TableViewerEvent::AddRow {
-            connection_id,
-            table_name: table_name.clone(),
-            all_column_names,
-        });
+        cx.emit(TableViewerEvent::AddRow { all_column_names });
     }
 
     pub fn emit_open_new_row_in_form(&mut self, cx: &mut Context<Self>) {
-        let Some(connection_id) = self.connection_id else {
-            return;
-        };
-
-        if matches!(self.driver_category, DriverCategory::KeyValue) {
-            cx.emit(TableViewerEvent::AddRedisKey { connection_id });
+        if self.connection_id.is_none() {
             return;
         }
 
-        let Some(table_name) = &self.table_name else {
+        if matches!(self.driver_category, DriverCategory::KeyValue) {
+            cx.emit(TableViewerEvent::AddRedisKey);
             return;
-        };
+        }
+
+        if self.table_name.is_none() {
+            return;
+        }
         let Some(table_state) = &self.table_state else {
             return;
         };
@@ -214,8 +210,6 @@ impl TableViewerPanel {
         };
 
         cx.emit(TableViewerEvent::AddRowForm {
-            connection_id,
-            table_name: table_name.clone(),
             column_meta,
             row_values: Some(row_values),
             row_index: Some(row_index),
@@ -225,12 +219,12 @@ impl TableViewerPanel {
     /// Emit AddRowForm event to open the form-based row editor for inserting a new row
     #[allow(dead_code)]
     pub fn emit_add_row_form(&mut self, cx: &mut Context<Self>) {
-        let Some(connection_id) = self.connection_id else {
+        if self.connection_id.is_none() {
             return;
-        };
+        }
 
         if matches!(self.driver_category, DriverCategory::KeyValue) {
-            cx.emit(TableViewerEvent::AddRedisKey { connection_id });
+            cx.emit(TableViewerEvent::AddRedisKey);
             return;
         }
 
@@ -241,16 +235,14 @@ impl TableViewerPanel {
             tracing::info!("Skipping row form insert: table does not support row inserts");
             return;
         }
-        let Some(table_name) = &self.table_name else {
+        if self.table_name.is_none() {
             return;
-        };
+        }
 
         let column_meta: Vec<ColumnMeta> =
             table_state.read_with(cx, |table, _cx| table.delegate().column_meta.clone());
 
         cx.emit(TableViewerEvent::AddRowForm {
-            connection_id,
-            table_name: table_name.clone(),
             column_meta,
             row_values: None,
             row_index: None,
@@ -306,12 +298,12 @@ impl TableViewerPanel {
                 DriverCategory::KeyValue | DriverCategory::Document
             )
         {
-            let Some(connection_id) = self.connection_id else {
+            if self.connection_id.is_none() {
                 return;
-            };
-            let Some(table_name) = &self.table_name else {
+            }
+            if self.table_name.is_none() {
                 return;
-            };
+            }
 
             let (all_column_names, rows_to_delete) = table_state.read_with(cx, |table, _cx| {
                 let delegate = table.delegate();
@@ -330,8 +322,6 @@ impl TableViewerPanel {
             });
 
             cx.emit(TableViewerEvent::DeleteRows {
-                connection_id,
-                table_name: table_name.clone(),
                 all_column_names,
                 rows_to_delete,
             });
@@ -350,12 +340,12 @@ impl TableViewerPanel {
         let Some(table_state) = &self.table_state else {
             return;
         };
-        let Some(connection_id) = self.connection_id else {
+        if self.connection_id.is_none() {
             return;
-        };
-        let Some(table_name) = &self.table_name else {
+        }
+        if self.table_name.is_none() {
             return;
-        };
+        }
 
         let (modified_cells, deleted_rows, new_rows, column_meta, _, _, all_rows) = table_state
             .read_with(cx, |table, _cx| {
@@ -367,8 +357,6 @@ impl TableViewerPanel {
         }
 
         cx.emit(TableViewerEvent::CommitChanges {
-            connection_id,
-            table_name: table_name.clone(),
             modified_cells,
             deleted_rows,
             new_rows,
@@ -413,12 +401,12 @@ impl TableViewerPanel {
         let Some(table_state) = &self.table_state else {
             return;
         };
-        let Some(connection_id) = self.connection_id else {
+        if self.connection_id.is_none() {
             return;
-        };
-        let Some(table_name) = &self.table_name else {
+        }
+        if self.table_name.is_none() {
             return;
-        };
+        }
 
         let (modified_cells, deleted_rows, new_rows, column_meta, _, _, all_rows) = table_state
             .read_with(cx, |table, _cx| {
@@ -430,8 +418,6 @@ impl TableViewerPanel {
         }
 
         cx.emit(TableViewerEvent::GenerateChangesSql {
-            connection_id,
-            table_name: table_name.clone(),
             modified_cells,
             deleted_rows,
             new_rows,
@@ -444,10 +430,10 @@ impl TableViewerPanel {
     pub fn emit_open_row_editor(&mut self, cx: &mut Context<Self>) {
         tracing::debug!("emit_open_row_editor called");
 
-        let Some(connection_id) = self.connection_id else {
+        if self.connection_id.is_none() {
             tracing::debug!("No connection_id available");
             return;
-        };
+        }
         let Some(table_name) = &self.table_name else {
             tracing::debug!("No table_name available");
             return;
@@ -487,8 +473,6 @@ impl TableViewerPanel {
         );
 
         cx.emit(TableViewerEvent::EditRow {
-            connection_id,
-            table_name: table_name.clone(),
             row_index,
             row_values,
             column_meta,

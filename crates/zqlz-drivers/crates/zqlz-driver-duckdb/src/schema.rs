@@ -25,6 +25,14 @@ use super::DuckDbConnection;
 
 #[async_trait]
 impl SchemaIntrospection for DuckDbConnection {
+    fn object_kind_support(&self) -> Option<ObjectKindSupport> {
+        Some(super::driver::OBJECT_KINDS)
+    }
+
+    fn default_schema_name(&self) -> Option<String> {
+        Some("main".to_string())
+    }
+
     // ---- structured introspection: delegated to the shared engine ----
 
     async fn list_databases(&self) -> Result<Vec<zqlz_core::DatabaseInfo>> {
@@ -35,12 +43,34 @@ impl SchemaIntrospection for DuckDbConnection {
         self.schema_engine.list_schemas().await
     }
 
+    /// Without a schema, every user schema of the open database is listed;
+    /// names outside `main` come back as `schema.name`, like PostgreSQL's.
     async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>> {
-        self.schema_engine.list_tables(schema).await
+        if schema.is_some() {
+            return self.schema_engine.list_tables(schema).await;
+        }
+        let mut tables = Vec::new();
+        for schema in self.user_schema_names()? {
+            for mut table in self.schema_engine.list_tables(Some(&schema)).await? {
+                table.name = qualify_outside_main(&schema, table.name);
+                tables.push(table);
+            }
+        }
+        Ok(tables)
     }
 
     async fn list_views(&self, schema: Option<&str>) -> Result<Vec<ViewInfo>> {
-        self.schema_engine.list_views(schema).await
+        if schema.is_some() {
+            return self.schema_engine.list_views(schema).await;
+        }
+        let mut views = Vec::new();
+        for schema in self.user_schema_names()? {
+            for mut view in self.schema_engine.list_views(Some(&schema)).await? {
+                view.name = qualify_outside_main(&schema, view.name);
+                views.push(view);
+            }
+        }
+        Ok(views)
     }
 
     async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
@@ -190,6 +220,14 @@ impl SchemaIntrospection for DuckDbConnection {
     }
 }
 
+fn qualify_outside_main(schema: &str, name: String) -> String {
+    if schema == "main" {
+        name
+    } else {
+        format!("{schema}.{name}")
+    }
+}
+
 /// DuckDB implementation of the raw-catalog port.
 pub struct DuckDbCatalog {
     connection: Arc<Mutex<duckdb::Connection>>,
@@ -237,7 +275,8 @@ impl CatalogSource for DuckDbCatalog {
         let schema = schema.unwrap_or("main").to_string();
 
         let tables = self.query(
-            "SELECT table_name, estimated_size, column_count FROM duckdb_tables() WHERE schema_name = ?",
+            "SELECT table_name, estimated_size, column_count FROM duckdb_tables()
+             WHERE database_name = current_database() AND schema_name = ? AND NOT internal",
             &[Value::String(schema.clone())],
         )?;
         let mut relations: Vec<RawRelationRow> = tables
@@ -255,7 +294,8 @@ impl CatalogSource for DuckDbCatalog {
             .collect();
 
         let views = self.query(
-            "SELECT view_name, sql FROM duckdb_views() WHERE schema_name = ?",
+            "SELECT view_name, sql FROM duckdb_views()
+             WHERE database_name = current_database() AND schema_name = ? AND NOT internal",
             &[Value::String(schema.clone())],
         )?;
         relations.extend(views.rows.iter().map(|row| {

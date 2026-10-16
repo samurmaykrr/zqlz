@@ -38,15 +38,8 @@ impl TableViewerPanel {
                     .tooltip("Refresh Table")
                     .disabled(connection_id.is_none() || table_name.is_none())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let (Some(conn_id), Some(tbl_name)) =
-                            (this.connection_id, &this.table_name)
-                        {
-                            cx.emit(TableViewerEvent::RefreshTable {
-                                connection_id: conn_id,
-                                table_name: tbl_name.clone(),
-                                driver_category: this.driver_category,
-                                database_name: this.database_name.clone(),
-                            });
+                        if this.connection_id.is_some() && this.table_name.is_some() {
+                            cx.emit(TableViewerEvent::RefreshTable);
                         }
                     })),
             )

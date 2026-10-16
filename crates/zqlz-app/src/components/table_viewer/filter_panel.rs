@@ -20,6 +20,7 @@ use crate::icons::ZqlzIcon;
 
 use super::filter_types::{
     ColumnSelectItem, FilterCondition, FilterOperator, SortCriterion, SortDirection,
+    combine_filter_sql,
 };
 use crate::workspace_state::{WorkspaceSessionFilterCondition, WorkspaceSessionSortCriterion};
 
@@ -626,35 +627,13 @@ impl FilterPanelState {
 
     /// Generate WHERE clause SQL from current filters and copy to clipboard
     pub fn copy_filter_sql(&self, cx: &mut Context<Self>) {
-        let filter_conditions = self.get_filter_conditions();
-        let enabled_filters: Vec<_> = filter_conditions
-            .iter()
-            .filter(|f| f.enabled && f.to_sql().is_some())
-            .collect();
-
-        if enabled_filters.is_empty() {
+        let Some(condition) =
+            combine_filter_sql(&self.get_filter_conditions(), FilterCondition::to_sql)
+        else {
             tracing::warn!("No enabled filters to copy");
             return;
-        }
-
-        // Build WHERE clause
-        let mut where_parts = Vec::new();
-        for (idx, filter) in enabled_filters.iter().enumerate() {
-            if let Some(sql) = filter.to_sql() {
-                if idx > 0 {
-                    // Add logical operator from previous filter
-                    let prev_filter = enabled_filters[idx - 1];
-                    where_parts.push(prev_filter.logical_operator.sql().to_string());
-                }
-                where_parts.push(sql);
-            }
-        }
-
-        let where_clause = if where_parts.is_empty() {
-            "-- No valid filter conditions".to_string()
-        } else {
-            format!("WHERE {}", where_parts.join(" "))
         };
+        let where_clause = format!("WHERE {condition}");
 
         // Copy to clipboard
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(where_clause.clone()));

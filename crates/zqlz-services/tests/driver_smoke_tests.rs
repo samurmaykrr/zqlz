@@ -1,10 +1,10 @@
+use std::sync::Arc;
 use zqlz_core::{
     CellUpdateRequest, Connection, ConnectionConfig, ConnectionFeatureSet, DatabaseDriver,
     DocumentDeleteRequest, DocumentQueryRequest, DocumentSaveRequest, DriverCategory,
     KeyValueDeleteRequest, KeyValueKind, KeyValueSaveRequest, KeyValueScanRequest, RowIdentifier,
-    Value,
+    TableRef, Value,
 };
-use std::sync::Arc;
 use zqlz_drivers::{
     mongodb::MongoDbDriver, mysql::MySqlDriver, postgres::PostgresDriver, redis::RedisDriver,
     sqlite::SqliteConnection,
@@ -215,8 +215,7 @@ async fn sqlite_keyless_table_edits_affect_exactly_one_row() {
     let outcome = service
         .update_cell(
             connection.clone(),
-            "workflows",
-            None,
+            &TableRef::new(None, None, "workflows"),
             CellUpdateData {
                 column_name: "note".to_string(),
                 new_value: Some(Value::String("edited".to_string())),
@@ -245,8 +244,7 @@ async fn sqlite_keyless_table_edits_affect_exactly_one_row() {
     let deleted = service
         .delete_rows(
             connection.clone(),
-            "workflows",
-            None,
+            &TableRef::new(None, None, "workflows"),
             RowDeleteData {
                 all_column_names: vec!["workflow_id".to_string(), "note".to_string()],
                 rows: vec![vec![

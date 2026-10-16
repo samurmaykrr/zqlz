@@ -135,6 +135,21 @@ impl ConnectionManager {
     #[tracing::instrument(skip(self, saved), fields(connection_id = %saved.id, connection_name = %saved.name, driver = %saved.driver))]
     pub async fn connect(&self, saved: &SavedConnection) -> Result<Uuid> {
         tracing::info!("connecting to saved connection");
+        let conn = self.open_unregistered(saved).await?;
+
+        let conn_id = saved.id;
+        self.active.write().insert(conn_id, conn);
+
+        tracing::info!(connection_id = %conn_id, "connection established");
+        Ok(conn_id)
+    }
+
+    /// Open a connection without registering it in the active pool.
+    ///
+    /// Out-of-process callers (CLI/MCP over IPC) use this so they never replace
+    /// or close the session the GUI holds under the same saved id. The caller
+    /// owns the connection and must close it.
+    pub async fn open_unregistered(&self, saved: &SavedConnection) -> Result<Arc<dyn Connection>> {
         let driver = self
             .drivers
             .get(&saved.driver)
@@ -151,16 +166,10 @@ impl ConnectionManager {
             "building connection config from saved params"
         );
 
-        let conn = driver.connect(&config).await.map_err(|e| {
-            tracing::error!(error = %e, "failed to connect");
+        driver.connect(&config).await.map_err(|e| {
+            tracing::debug!(error = %e, "failed to connect");
             e
-        })?;
-
-        let conn_id = saved.id;
-        self.active.write().insert(conn_id, conn);
-
-        tracing::info!(connection_id = %conn_id, "connection established");
-        Ok(conn_id)
+        })
     }
 
     /// Disconnect a connection and all its database-specific connections
@@ -214,8 +223,8 @@ impl ConnectionManager {
     /// or creates a new one from the saved connection config with the database
     /// parameter overridden.
     ///
-    /// For drivers that can query across databases (MySQL, ClickHouse), this
-    /// returns the main connection since no separate connection is needed.
+    /// Drivers whose `resolve_scope` needs no dedicated connection (ClickHouse,
+    /// or MySQL for the database it connected to) get the main connection.
     pub async fn get_for_database(
         &self,
         id: Uuid,
@@ -288,7 +297,7 @@ impl ConnectionManager {
             return Some(main_conn);
         };
 
-        if !main_conn.requires_database_scoped_connection() {
+        if !main_conn.requires_dedicated_connection_for(database_name) {
             return Some(main_conn);
         }
 
@@ -298,7 +307,8 @@ impl ConnectionManager {
         match cached {
             Some(conn) if !conn.is_closed() => Some(conn),
             _ => {
-                tracing::warn!(
+                // Callers probe before an open has created it; not an error.
+                tracing::debug!(
                     connection_id = %id,
                     database = %normalized_database_name,
                     "database-specific connection not yet cached"
@@ -644,6 +654,8 @@ mod tests {
         requires_heartbeat: bool,
         busy: bool,
         pinged: AtomicBool,
+        /// MySQL-like: only SQL for other databases needs its own connection.
+        own_database: Option<&'static str>,
     }
 
     impl MockConnection {
@@ -655,6 +667,7 @@ mod tests {
                 requires_heartbeat: true,
                 busy: false,
                 pinged: AtomicBool::new(false),
+                own_database: None,
             }
         }
 
@@ -687,6 +700,13 @@ mod tests {
 
         fn requires_database_scoped_connection(&self) -> bool {
             self.requires_scoped_connection
+        }
+
+        fn requires_dedicated_connection_for(&self, database_name: &str) -> bool {
+            match self.own_database {
+                Some(own_database) => database_name != own_database,
+                None => self.requires_scoped_connection,
+            }
         }
 
         fn normalize_database_scope_name(&self, database_name: &str) -> String {
@@ -891,6 +911,81 @@ mod tests {
                 .get_for_database_cached(connection_id, Some("analytics"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn cached_lookup_for_a_session_database_driver_routes_per_database() {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        let main: Arc<dyn Connection> = Arc::new(MockConnection {
+            own_database: Some("shop"),
+            ..MockConnection::new("mysql", false)
+        });
+        manager.active.write().insert(connection_id, main.clone());
+
+        // Its own database keeps the main connection.
+        let own = manager.get_for_database_cached(connection_id, Some("shop"));
+        assert!(own.is_some_and(|conn| Arc::ptr_eq(&conn, &main)));
+        // Another database never silently runs on the main session.
+        assert!(
+            manager
+                .get_for_database_cached(connection_id, Some("analytics"))
+                .is_none()
+        );
+
+        let analytics: Arc<dyn Connection> = Arc::new(MockConnection::new("mysql", false));
+        manager
+            .database_connections
+            .write()
+            .insert((connection_id, "analytics".to_string()), analytics.clone());
+        let routed = manager.get_for_database_cached(connection_id, Some("analytics"));
+        assert!(routed.is_some_and(|conn| Arc::ptr_eq(&conn, &analytics)));
+    }
+
+    /// Opt-in, against a real MySQL (see the MySQL driver's live tests for the
+    /// `ZQLZ_MYSQL_*` variables): an editor database other than the connection's
+    /// own gets a connection whose session runs in it.
+    #[tokio::test]
+    async fn mysql_database_scope_runs_sql_in_that_database() {
+        if std::env::var("ZQLZ_MYSQL_INTEGRATION").as_deref() != Ok("1") {
+            eprintln!("skipping live MySQL test; set ZQLZ_MYSQL_INTEGRATION=1");
+            return;
+        }
+        let env = |name: &str, default: &str| {
+            std::env::var(format!("ZQLZ_MYSQL_{name}")).unwrap_or_else(|_| default.to_string())
+        };
+        let saved = SavedConnection::new("live mysql".into(), "mysql".into())
+            .with_param("host", &env("HOST", "127.0.0.1"))
+            .with_param("port", &env("PORT", "3306"))
+            .with_param("user", &env("USER", "root"))
+            .with_param("password", &env("PASSWORD", ""))
+            .with_param("database", "mysql");
+        let manager = ConnectionManager::new();
+        manager.add_saved(saved.clone());
+        let id = manager.connect(&saved).await.expect("connect to MySQL");
+        let main = manager.get(id).unwrap();
+        let scratch = "zqlz_scope_live";
+        main.execute(&format!("DROP DATABASE IF EXISTS {scratch}"), &[]).await.unwrap();
+        main.execute(&format!("CREATE DATABASE {scratch}"), &[]).await.unwrap();
+
+        let current_database = |conn: Arc<dyn Connection>| async move {
+            let result = conn.query("SELECT DATABASE()", &[]).await.unwrap();
+            result.rows[0].values[0].to_string()
+        };
+        let scoped = manager.get_for_database(id, scratch).await.unwrap();
+        let scoped_database = current_database(scoped.clone()).await;
+        let cached = manager.get_for_database_cached(id, Some(scratch)).unwrap();
+        let own = manager.get_for_database(id, "mysql").await.unwrap();
+        let unknown = manager.get_for_database(id, "zqlz_scope_missing").await;
+
+        main.execute(&format!("DROP DATABASE IF EXISTS {scratch}"), &[]).await.unwrap();
+        assert!(!Arc::ptr_eq(&scoped, &main));
+        assert!(Arc::ptr_eq(&cached, &scoped));
+        assert!(Arc::ptr_eq(&own, &main));
+        let unknown = unknown.err().expect("unknown database must not fall back");
+        assert!(unknown.to_string().contains("Unknown database"), "{unknown}");
+        assert_eq!(scoped_database, scratch);
+        manager.disconnect(id).await.unwrap();
     }
 
     #[test]

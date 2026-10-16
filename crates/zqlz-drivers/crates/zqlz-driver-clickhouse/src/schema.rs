@@ -241,8 +241,40 @@ impl zqlz_core::CatalogSource for ClickHouseCatalog {
     }
 }
 
+impl ClickHouseConnection {
+    /// Table engine by table name, which `TableInfo` has no field for.
+    async fn table_engines(&self, schema: Option<&str>) -> Result<HashMap<String, String>> {
+        let database = schema.unwrap_or(self.database());
+        let result = self
+            .query(
+                "SELECT name, engine FROM system.tables
+                 WHERE database = ? AND is_temporary = 0",
+                &[Value::String(database.to_string())],
+            )
+            .await?;
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.get(0)?.as_str()?.to_string(),
+                    row.get(1)?.as_str()?.to_string(),
+                ))
+            })
+            .collect())
+    }
+}
+
 #[async_trait]
 impl SchemaIntrospection for ClickHouseConnection {
+    fn object_kind_support(&self) -> Option<zqlz_core::ObjectKindSupport> {
+        Some(super::driver::OBJECT_KINDS)
+    }
+
+    fn default_schema_name(&self) -> Option<String> {
+        None
+    }
+
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         let result = self
             .query("SELECT name, engine FROM system.databases", &[])
@@ -315,6 +347,20 @@ impl SchemaIntrospection for ClickHouseConnection {
             .collect())
     }
 
+    /// The objects panel loads every kind at once; building it from the
+    /// per-kind rows keeps the driver's own columns (engine, rows, bytes).
+    async fn list_tables_extended(&self, schema: Option<&str>) -> Result<ObjectsPanelData> {
+        let mut data = ObjectsPanelData::new(clickhouse_generic_objects_panel_columns());
+        for kind_id in ["table", "view", "materialized_view"] {
+            data.rows.extend(
+                self.list_objects_panel_data_for_kind(schema, kind_id)
+                    .await?
+                    .rows,
+            );
+        }
+        Ok(data)
+    }
+
     async fn list_objects_panel_data_for_kind(
         &self,
         schema: Option<&str>,
@@ -322,7 +368,10 @@ impl SchemaIntrospection for ClickHouseConnection {
     ) -> Result<ObjectsPanelData> {
         match kind_id {
             "database" => clickhouse_database_objects_panel_data(self.list_databases().await?),
-            "table" => clickhouse_table_objects_panel_data(self.list_tables(schema).await?),
+            "table" => {
+                let engines = self.table_engines(schema).await?;
+                clickhouse_table_objects_panel_data(self.list_tables(schema).await?, &engines)
+            }
             "view" | "materialized_view" => {
                 clickhouse_view_objects_panel_data(self.list_views(schema).await?, kind_id)
             }
@@ -595,7 +644,10 @@ fn clickhouse_database_objects_panel_data(
     Ok(data)
 }
 
-fn clickhouse_table_objects_panel_data(tables: Vec<TableInfo>) -> Result<ObjectsPanelData> {
+fn clickhouse_table_objects_panel_data(
+    tables: Vec<TableInfo>,
+    engines: &HashMap<String, String>,
+) -> Result<ObjectsPanelData> {
     let mut data = ObjectsPanelData::new(clickhouse_generic_objects_panel_columns());
     for table in tables {
         let database = table.schema.clone();
@@ -607,7 +659,10 @@ fn clickhouse_table_objects_panel_data(tables: Vec<TableInfo>) -> Result<Objects
         );
         values.insert(
             "engine".to_string(),
-            table.comment.unwrap_or_else(|| "-".to_string()),
+            engines
+                .get(&table.name)
+                .cloned()
+                .unwrap_or_else(|| "-".to_string()),
         );
         values.insert(
             "rows".to_string(),

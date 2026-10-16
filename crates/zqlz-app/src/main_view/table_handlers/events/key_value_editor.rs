@@ -18,7 +18,6 @@ use zqlz_ui::widgets::{WindowExt, notification::Notification};
 use crate::app::AppState;
 use crate::components::{KeyValueEditorEvent, RedisValueType, TableViewerPanel};
 use crate::main_view::MainView;
-use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
 use crate::workspace::WorkspaceController;
 
 fn map_redis_value_type(value_type: RedisValueType) -> KeyValueKind {
@@ -303,24 +302,23 @@ impl MainView {
                     .and_then(|v| v.read_with(cx, |viewer, _cx| viewer.database_name()).ok())
                     .flatten();
 
-                let Some(connection) = app_state
-                    .connections
-                    .get_for_database_cached(connection_id, database_name.as_deref())
-                else {
+                // Relational rows are saved to the table the viewer resolved.
+                let source_table = source_viewer
+                    .as_ref()
+                    .and_then(|viewer| viewer.read_with(cx, |viewer, _cx| viewer.table()).ok())
+                    .flatten();
+                let Some(connection) = app_state.connections.get_for_database_cached(
+                    connection_id,
+                    source_table
+                        .as_ref()
+                        .map_or(database_name.as_deref(), |table| table.database.as_deref()),
+                ) else {
                     tracing::error!("Connection not found: {}", connection_id);
                     return;
                 };
 
                 let table_service = app_state.table_service.clone();
                 let document_service = app_state.document_service.clone();
-                let schema_qualifier = source_viewer.as_ref().and_then(|v| {
-                    v.read_with(cx, |viewer, _cx| {
-                        let db = viewer.database_name();
-                        resolve_schema_qualifier(&connection, &db)
-                    })
-                    .ok()
-                    .flatten()
-                });
                 let connection = connection.clone();
                 let table_name = table_name.clone();
                 let column_names = column_names.clone();
@@ -424,12 +422,11 @@ impl MainView {
                                 "Document database context is unavailable".to_string(),
                             )),
                         }
-                    } else if is_new {
+                    } else if let Some(table) = source_table.as_ref().filter(|_| is_new) {
                         table_service
                             .insert_row(
                                 connection.clone(),
-                                &table_name,
-                                schema_qualifier.as_deref(),
+                                table,
                                 RowInsertData {
                                     column_names: column_names.clone(),
                                     values: typed_values
@@ -446,7 +443,7 @@ impl MainView {
                                 },
                             )
                             .await
-                    } else {
+                    } else if let Some(table) = &source_table {
                         // For updates, update each changed column individually
                         // using the existing cell-level update API
                         let mut update_error: Option<String> = None;
@@ -476,12 +473,7 @@ impl MainView {
                             };
 
                             if let Err(e) = table_service
-                                .update_cell(
-                                    connection.clone(),
-                                    &table_name,
-                                    schema_qualifier.as_deref(),
-                                    cell_update,
-                                )
+                                .update_cell(connection.clone(), table, cell_update)
                                 .await
                             {
                                 update_error =
@@ -494,6 +486,10 @@ impl MainView {
                             Some(err) => Err(zqlz_services::ServiceError::UpdateFailed(err)),
                             None => Ok(()),
                         }
+                    } else {
+                        Err(zqlz_services::ServiceError::UpdateFailed(
+                            "The table is still opening".to_string(),
+                        ))
                     };
 
                     let is_success = result.is_ok();

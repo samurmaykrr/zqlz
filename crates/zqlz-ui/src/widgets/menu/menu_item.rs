@@ -1,8 +1,8 @@
 use crate::widgets::{ActiveTheme, Disableable, StyledExt, h_flex, tooltip::Tooltip};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, prelude::FluentBuilder as _,
+    ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, prelude::FluentBuilder as _,
 };
 use smallvec::SmallVec;
 
@@ -16,6 +16,9 @@ pub(crate) struct MenuItemElement {
     style: StyleRefinement,
     disabled: bool,
     selected: bool,
+    /// Announced by assistive technology. Menu item children are arbitrary
+    /// elements, so the text cannot be recovered from them.
+    aria_label: Option<SharedString>,
     tooltip: Option<SharedString>,
     on_click: Option<MenuItemClickHandler>,
     on_hover: Option<MenuItemHoverHandler>,
@@ -32,11 +35,18 @@ impl MenuItemElement {
             style: StyleRefinement::default(),
             disabled: false,
             selected: false,
+            aria_label: None,
             tooltip: None,
             on_click: None,
             on_hover: None,
             children: SmallVec::new(),
         }
+    }
+
+    /// Set the label announced by assistive technology.
+    pub(crate) fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
     }
 
     /// Set ListItem as the selected item style.
@@ -97,6 +107,9 @@ impl RenderOnce for MenuItemElement {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         h_flex()
             .id(self.id)
+            .role(Role::MenuItem)
+            .when_some(self.aria_label.clone(), |this, label| this.aria_label(label))
+            .aria_selected(self.selected)
             .group(&self.group_name)
             .gap_x_1()
             .py_1()

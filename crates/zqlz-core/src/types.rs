@@ -1052,6 +1052,17 @@ impl Value {
     }
 }
 
+/// Floats print like Postgres (`Infinity`, `-Infinity`, `NaN`) instead of Rust's `inf`/`NaN` spellings.
+fn write_float(f: &mut std::fmt::Formatter<'_>, wide: f64, plain: &dyn std::fmt::Display) -> std::fmt::Result {
+    if wide.is_nan() {
+        write!(f, "NaN")
+    } else if wide.is_infinite() {
+        write!(f, "{}Infinity", if wide < 0.0 { "-" } else { "" })
+    } else {
+        write!(f, "{plain}")
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1061,8 +1072,8 @@ impl std::fmt::Display for Value {
             Value::Int16(v) => write!(f, "{}", v),
             Value::Int32(v) => write!(f, "{}", v),
             Value::Int64(v) => write!(f, "{}", v),
-            Value::Float32(v) => write!(f, "{}", v),
-            Value::Float64(v) => write!(f, "{}", v),
+            Value::Float32(v) => write_float(f, f64::from(*v), v),
+            Value::Float64(v) => write_float(f, *v, v),
             Value::Decimal(v) => write!(f, "{}", v),
             Value::String(v) => write!(f, "{}", v),
             Value::Bytes(v) => write!(f, "<{} bytes>", v.len()),
@@ -1156,6 +1167,14 @@ mod tests {
     fn parse_from_string_still_maps_empty_and_null_to_null_for_non_string_columns() {
         assert_eq!(Value::parse_from_string("", "integer"), Value::Null);
         assert_eq!(Value::parse_from_string("NULL", "boolean"), Value::Null);
+    }
+
+    #[test]
+    fn floats_display_with_postgres_spellings() {
+        assert_eq!(Value::Float64(f64::INFINITY).to_string(), "Infinity");
+        assert_eq!(Value::Float64(f64::NEG_INFINITY).to_string(), "-Infinity");
+        assert_eq!(Value::Float32(f32::NAN).to_string(), "NaN");
+        assert_eq!(Value::Float64(1.5).to_string(), "1.5");
     }
 
     #[test]

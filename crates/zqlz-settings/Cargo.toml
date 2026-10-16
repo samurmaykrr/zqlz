@@ -16,3 +16,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+zqlz-test-support = { workspace = true }

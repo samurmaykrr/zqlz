@@ -57,6 +57,7 @@ mod actions;
 mod clipboard;
 mod column_ops;
 mod export;
+mod fetch;
 mod filters;
 mod loader;
 mod render;
@@ -74,8 +75,6 @@ pub(super) struct SelectionStatsSummary {
 
 #[derive(Clone, Debug)]
 pub(crate) struct TablePerformanceProfile {
-    pub is_heavy_table: bool,
-    pub recommended_page_size: usize,
     pub searchable_columns: Vec<String>,
 }
 
@@ -96,6 +95,10 @@ pub struct TableViewerPanel {
     /// Table name (shown in panel title)
     pub(super) table_name: Option<String>,
 
+    /// The table as the open resolved it against the catalog. Every fetch reads
+    /// this, so paging never pays for resolution again.
+    pub(super) table: Option<zqlz_core::TableRef>,
+
     /// Database name for MySQL multi-database context (e.g. "sakila")
     pub(crate) database_name: Option<String>,
 
@@ -110,6 +113,20 @@ pub struct TableViewerPanel {
 
     /// Loading state (shows spinner)
     pub(super) is_loading: bool,
+
+    /// The open-time load for this viewer. Owned here so closing the tab
+    /// cancels it, while opening another table leaves it running.
+    pub(crate) open_task: Option<Task<anyhow::Result<()>>>,
+
+    /// The row fetch in flight; replacing it cancels the previous one.
+    pub(super) fetch_task: Option<Task<()>>,
+
+    /// The filters the pagination total was counted under, so it is only reused
+    /// while they still apply.
+    pub(super) counted_where_clauses: Vec<String>,
+
+    /// Restored session filters must be fetched once the controls exist.
+    pub(super) reload_after_session_restore: bool,
 
     /// Filter panel state
     pub(crate) filter_panel_state: Option<Entity<FilterPanelState>>,
@@ -207,6 +224,11 @@ impl TableViewerPanel {
             driver_category: DriverCategory::Relational,
             row_count: 0,
             is_loading: false,
+            open_task: None,
+            table: None,
+            fetch_task: None,
+            counted_where_clauses: Vec::new(),
+            reload_after_session_restore: false,
             filter_panel_state: None,
             column_visibility_state: None,
             filter_expanded: false,
@@ -234,11 +256,6 @@ impl TableViewerPanel {
         }
     }
 
-    /// Returns whether this panel is displaying a database view (vs a table)
-    pub fn is_view(&self) -> bool {
-        self.is_view
-    }
-
     /// Returns the connection ID (if set)
     pub(crate) fn connection_id(&self) -> Option<Uuid> {
         self.connection_id
@@ -254,17 +271,17 @@ impl TableViewerPanel {
         self.database_name.clone()
     }
 
+    /// The table this viewer shows, once its open has resolved it.
+    pub(crate) fn table(&self) -> Option<zqlz_core::TableRef> {
+        self.table.clone()
+    }
+
     pub(crate) fn session_state_snapshot(
         &self,
         cx: &App,
-    ) -> Option<(
-        Uuid,
-        String,
-        Option<String>,
-        WorkspaceSessionTableViewerState,
-    )> {
+    ) -> Option<(Uuid, zqlz_core::TableRef, WorkspaceSessionTableViewerState)> {
         let connection_id = self.connection_id?;
-        let table_name = self.table_name.clone()?;
+        let table = self.table.clone()?;
         let filters = self
             .filter_panel_state
             .as_ref()
@@ -302,8 +319,7 @@ impl TableViewerPanel {
 
         Some((
             connection_id,
-            table_name,
-            self.database_name.clone(),
+            table,
             WorkspaceSessionTableViewerState {
                 filters,
                 sorts,
@@ -331,6 +347,9 @@ impl TableViewerPanel {
             return;
         };
 
+        self.reload_after_session_restore = !session_state.filters.is_empty()
+            || !session_state.sorts.is_empty()
+            || !session_state.search_text.trim().is_empty();
         self.search_text = session_state.search_text.clone();
         if let Some(filter_state) = &self.filter_panel_state {
             filter_state.update(cx, |state, cx| {

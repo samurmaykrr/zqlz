@@ -16,12 +16,13 @@ use uuid::Uuid;
 use zqlz_internal_storage::InternalStorage;
 use zqlz_internal_storage::rusqlite;
 
+use zqlz_core::sql_lexing::{SqlLexDialect, split_sql_statements_for_dialect};
 use zqlz_core::{Connection, ConnectionConfig};
 use zqlz_drivers::DriverRegistry;
 
 use crate::ipc::{
-    ColumnInfo, ColumnMeta, FunctionSummary, HistoryEntry, IndexSummary, QueryExecution, Row,
-    StatementResult, ViewSummary,
+    ColumnInfo, ColumnMeta, FunctionSummary, HistoryEntry, IndexSummary, QueryExecution,
+    RelationEntry, Row, StatementResult, ViewSummary,
 };
 
 // ---------------------------------------------------------------------------
@@ -158,22 +159,15 @@ pub fn load_connections() -> Result<Vec<SavedConnection>> {
             let created_at_str: Option<String> = row.get(6)?;
             let updated_at_str: Option<String> = row.get(7)?;
 
-            let id = Uuid::parse_str(&id_str).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })?;
-
-            let params: HashMap<String, String> =
-                serde_json::from_str(&params_json).map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
+            // One damaged row (hand-edited id, broken params) must not take
+            // every other connection down with it.
+            let (Ok(id), Ok(params)) = (
+                Uuid::parse_str(&id_str),
+                serde_json::from_str::<HashMap<String, String>>(&params_json),
+            ) else {
+                eprintln!("Warning: skipping saved connection '{name}': invalid id or parameters");
+                return Ok(None);
+            };
 
             let created_at = created_at_str
                 .as_deref()
@@ -185,7 +179,7 @@ pub fn load_connections() -> Result<Vec<SavedConnection>> {
                 .and_then(|s| s.parse::<chrono::DateTime<chrono::Utc>>().ok())
                 .unwrap_or(created_at);
 
-            Ok(SavedConnection {
+            Ok(Some(SavedConnection {
                 id,
                 name,
                 driver,
@@ -195,11 +189,14 @@ pub fn load_connections() -> Result<Vec<SavedConnection>> {
                 created_at,
                 modified_at,
                 last_connected: None,
-            })
+            }))
         })
         .context("querying connections")?
         .collect::<Result<Vec<_>, _>>()
-        .context("collecting connections")?;
+        .context("collecting connections")?
+        .into_iter()
+        .flatten()
+        .collect();
 
     Ok(connections)
 }
@@ -303,22 +300,22 @@ pub async fn test_connection(saved: &SavedConnection) -> Result<()> {
 
 /// Execute SQL against a saved connection and return a serializable execution record.
 ///
-/// When `single_transaction` is true, all statements are wrapped in an explicit
-/// `BEGIN` / `COMMIT` block.  If any statement produces an error the transaction
-/// is rolled back instead.  The `BEGIN` failure is treated as a soft warning so
-/// that drivers without explicit transaction support (e.g. Redis) still work.
+/// Statements run in order and stop at the first failure (the rest are
+/// reported as skipped) unless `continue_on_error` is set. When
+/// `single_transaction` is true, all statements are wrapped in an explicit
+/// `BEGIN` / `COMMIT` block; if any statement fails the transaction is rolled
+/// back instead.  The `BEGIN` failure is treated as a soft warning so that
+/// drivers without explicit transaction support (e.g. Redis) still work.
 pub async fn execute_query(
     saved: &SavedConnection,
     database: Option<&str>,
     sql: &str,
     single_transaction: bool,
+    continue_on_error: bool,
 ) -> Result<QueryExecution> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let start = std::time::Instant::now();
-    let statements_sql = split_statements(sql);
     let mut statement_results = Vec::new();
     let mut had_error = false;
 
@@ -329,82 +326,38 @@ pub async fn execute_query(
         );
     }
 
-    for stmt_sql in &statements_sql {
+    // MySQL scripts split by MySQL's lexing rules (`#` comments, backslash
+    // escapes, `DELIMITER`), not the standard ones.
+    let dialect = SqlLexDialect::from_profile_id(connection.dialect_id());
+    for stmt_sql in split_sql_statements_for_dialect(sql, dialect) {
         let stmt_sql = stmt_sql.trim();
         if stmt_sql.is_empty() {
             continue;
         }
 
-        let stmt_start = std::time::Instant::now();
-
-        if is_query(stmt_sql) {
-            match connection.query(stmt_sql, &[]).await {
-                Ok(query_result) => {
-                    let duration_ms = stmt_start.elapsed().as_millis() as u64;
-                    let columns = query_result
-                        .columns
-                        .iter()
-                        .map(|c| ColumnMeta {
-                            name: c.name.clone(),
-                            data_type: c.data_type.clone(),
-                        })
-                        .collect();
-                    let rows = query_result
-                        .rows
-                        .iter()
-                        .map(|r| Row {
-                            values: r.values.iter().map(|v| v.to_string()).collect(),
-                        })
-                        .collect();
-                    statement_results.push(StatementResult {
-                        sql: stmt_sql.to_string(),
-                        duration_ms,
-                        columns,
-                        rows,
-                        affected_rows: 0,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    had_error = true;
-                    let duration_ms = stmt_start.elapsed().as_millis() as u64;
-                    statement_results.push(StatementResult {
-                        sql: stmt_sql.to_string(),
-                        duration_ms,
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        affected_rows: 0,
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
-        } else {
-            match connection.execute(stmt_sql, &[]).await {
-                Ok(stmt_result) => {
-                    let duration_ms = stmt_start.elapsed().as_millis() as u64;
-                    statement_results.push(StatementResult {
-                        sql: stmt_sql.to_string(),
-                        duration_ms,
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        affected_rows: stmt_result.affected_rows,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    had_error = true;
-                    let duration_ms = stmt_start.elapsed().as_millis() as u64;
-                    statement_results.push(StatementResult {
-                        sql: stmt_sql.to_string(),
-                        duration_ms,
-                        columns: Vec::new(),
-                        rows: Vec::new(),
-                        affected_rows: 0,
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
+        if had_error && !continue_on_error {
+            statement_results.push(skipped_statement(stmt_sql));
+            continue;
         }
+
+        let stmt_start = std::time::Instant::now();
+        let outcome = if is_query(stmt_sql) {
+            connection
+                .query(stmt_sql, &[])
+                .await
+                .map(|result| statement_from_query(stmt_sql, result))
+        } else {
+            connection
+                .execute(stmt_sql, &[])
+                .await
+                .map(|result| statement_from_execute(stmt_sql, result))
+        };
+        let mut statement = outcome.unwrap_or_else(|e| {
+            had_error = true;
+            failed_statement(stmt_sql, e.to_string())
+        });
+        statement.duration_ms = stmt_start.elapsed().as_millis() as u64;
+        statement_results.push(statement);
     }
 
     if single_transaction {
@@ -423,6 +376,100 @@ pub async fn execute_query(
     })
 }
 
+fn empty_statement(sql: &str) -> StatementResult {
+    StatementResult {
+        sql: sql.to_string(),
+        duration_ms: 0,
+        columns: Vec::new(),
+        rows: Vec::new(),
+        affected_rows: 0,
+        error: None,
+        warnings: Vec::new(),
+        skipped: false,
+    }
+}
+
+fn failed_statement(sql: &str, error: String) -> StatementResult {
+    StatementResult {
+        error: Some(error),
+        ..empty_statement(sql)
+    }
+}
+
+fn skipped_statement(sql: &str) -> StatementResult {
+    StatementResult {
+        skipped: true,
+        ..empty_statement(sql)
+    }
+}
+
+/// A result set (possibly empty) with its columns, rows and notices.
+fn result_set_statement(
+    sql: &str,
+    result: zqlz_core::QueryResult,
+    affected_rows: u64,
+) -> StatementResult {
+    StatementResult {
+        columns: result
+            .columns
+            .iter()
+            .map(|c| ColumnMeta {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+            })
+            .collect(),
+        rows: result
+            .rows
+            .iter()
+            .map(|r| {
+                let mut row = Row {
+                    values: Vec::new(),
+                    cells: r.values.iter().map(|v| v.to_wire_json()).collect(),
+                };
+                row.normalize();
+                row
+            })
+            .collect(),
+        affected_rows,
+        warnings: result.warnings,
+        ..empty_statement(sql)
+    }
+}
+
+/// Mirrors `statement_from_query_result` in `zqlz-query`: a command that went
+/// through `Connection::query` and produced no result set reports only its
+/// row count, so it is not shown as an empty grid.
+fn statement_from_query(sql: &str, result: zqlz_core::QueryResult) -> StatementResult {
+    if result.columns.is_empty() && result.rows.is_empty() && result.affected_rows > 0 {
+        return StatementResult {
+            affected_rows: result.affected_rows,
+            warnings: result.warnings,
+            ..empty_statement(sql)
+        };
+    }
+    result_set_statement(sql, result, 0)
+}
+
+/// Mirrors `statement_from_statement_result` in `zqlz-query`: statements the
+/// server answers with a result set (`INSERT ... RETURNING`, `CALL`, `EXECUTE`,
+/// ...) keep their rows; any other `result` only carries notices.
+fn statement_from_execute(sql: &str, statement: zqlz_core::StatementResult) -> StatementResult {
+    match statement.result {
+        Some(result) if !result.columns.is_empty() => {
+            result_set_statement(sql, result, statement.affected_rows)
+        }
+        Some(result) => StatementResult {
+            affected_rows: statement.affected_rows,
+            warnings: result.warnings,
+            ..empty_statement(sql)
+        },
+        None => StatementResult {
+            affected_rows: statement.affected_rows,
+            ..empty_statement(sql)
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Schema introspection
 // ---------------------------------------------------------------------------
@@ -431,9 +478,7 @@ pub async fn execute_query(
 pub async fn list_databases(saved: &SavedConnection) -> Result<Vec<String>> {
     use zqlz_core::DatabaseInfo;
 
-    let connection = open_connection(saved, None)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, None).await?;
 
     let introspection = connection
         .as_schema_introspection()
@@ -449,9 +494,7 @@ pub async fn list_databases(saved: &SavedConnection) -> Result<Vec<String>> {
 
 /// List table names in a database.
 pub async fn list_tables(saved: &SavedConnection, database: Option<&str>) -> Result<Vec<String>> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let introspection = connection
         .as_schema_introspection()
@@ -464,15 +507,33 @@ pub async fn list_tables(saved: &SavedConnection, database: Option<&str>) -> Res
     Ok(tables.into_iter().map(|t| t.name).collect())
 }
 
+/// List tables and views with their kind (`table`, `view`, `materialized view`).
+pub async fn list_relations(
+    saved: &SavedConnection,
+    database: Option<&str>,
+) -> Result<Vec<RelationEntry>> {
+    let tables = list_tables(saved, database).await?;
+    let mut relations: Vec<RelationEntry> = tables
+        .into_iter()
+        .map(|name| RelationEntry { name, kind: "table".to_string() })
+        .collect();
+    for view in list_views(saved, database).await? {
+        if relations.iter().any(|seen| seen.name == view.name) {
+            continue;
+        }
+        let kind = if view.is_materialized { "materialized view" } else { "view" };
+        relations.push(RelationEntry { name: view.name, kind: kind.to_string() });
+    }
+    Ok(relations)
+}
+
 /// List columns for a specific table.
 pub async fn list_columns(
     saved: &SavedConnection,
     database: Option<&str>,
     table: &str,
 ) -> Result<Vec<ColumnInfo>> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let introspection = connection
         .as_schema_introspection()
@@ -503,18 +564,24 @@ pub async fn list_views(
     saved: &SavedConnection,
     database: Option<&str>,
 ) -> Result<Vec<ViewSummary>> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let introspection = connection
         .as_schema_introspection()
         .ok_or_else(|| anyhow::anyhow!("driver does not support schema introspection"))?;
 
-    let views = introspection
+    // Materialized views are listed separately by the drivers (the summary has
+    // a Materialized column, so they belong here).
+    let mut views = introspection
         .list_views(None)
         .await
         .context("listing views")?;
+    views.extend(
+        introspection
+            .list_materialized_views(None)
+            .await
+            .context("listing materialized views")?,
+    );
 
     Ok(views
         .into_iter()
@@ -528,9 +595,7 @@ pub async fn list_views(
 
 /// List schemas / namespaces on a connection.
 pub async fn list_schemas(saved: &SavedConnection) -> Result<Vec<String>> {
-    let connection = open_connection(saved, None)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, None).await?;
 
     let introspection = connection
         .as_schema_introspection()
@@ -550,13 +615,17 @@ pub async fn list_indexes(
     database: Option<&str>,
     table: &str,
 ) -> Result<Vec<IndexSummary>> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let introspection = connection
         .as_schema_introspection()
         .ok_or_else(|| anyhow::anyhow!("driver does not support schema introspection"))?;
+
+    // An unknown table would otherwise look like a table without indexes.
+    introspection
+        .get_table(None, table)
+        .await
+        .with_context(|| format!("fetching table '{}'", table))?;
 
     let indexes = introspection
         .get_indexes(None, table)
@@ -580,9 +649,7 @@ pub async fn list_functions(
     saved: &SavedConnection,
     database: Option<&str>,
 ) -> Result<Vec<FunctionSummary>> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let introspection = connection
         .as_schema_introspection()
@@ -612,9 +679,7 @@ pub async fn generate_ddl(
     object_name: &str,
     schema: Option<&str>,
 ) -> Result<String> {
-    let connection = open_connection(saved, database)
-        .await
-        .with_context(|| format!("connecting to '{}'", saved.name))?;
+    let connection = open_connection(saved, database).await?;
 
     let introspection = connection
         .as_schema_introspection()
@@ -836,93 +901,135 @@ async fn open_connection(
     Ok(connection)
 }
 
-/// Determine whether a SQL string returns rows (SELECT-like) or modifies data.
+/// Whether a statement is routed through `Connection::query` by its leading
+/// keyword. Only a routing hint: `execute` also returns the rows of anything
+/// else that has a result set.
 fn is_query(sql: &str) -> bool {
-    let upper = sql.trim_start().to_ascii_uppercase();
-    upper.starts_with("SELECT")
-        || upper.starts_with("WITH")
-        || upper.starts_with("SHOW")
-        || upper.starts_with("DESCRIBE")
-        || upper.starts_with("DESC ")
-        || upper.starts_with("EXPLAIN")
-        || upper.starts_with("TABLE ")
-        || upper.starts_with("VALUES")
+    matches!(
+        leading_word(sql).as_str(),
+        "SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "TABLE" | "VALUES"
+    )
 }
 
-/// Split SQL text into individual statements on `;`, respecting string
-/// literals and `--` / `/* */` comments.
-fn split_statements(sql: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
-    let mut chars = sql.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                current.push(c);
-                while let Some(sc) = chars.next() {
-                    current.push(sc);
-                    if sc == '\'' {
-                        if chars.peek() == Some(&'\'') {
-                            current.push(chars.next().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            '"' => {
-                current.push(c);
-                while let Some(sc) = chars.next() {
-                    current.push(sc);
-                    if sc == '"' {
-                        if chars.peek() == Some(&'"') {
-                            current.push(chars.next().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            '-' if chars.peek() == Some(&'-') => {
-                current.push(c);
-                current.push(chars.next().unwrap());
-                while let Some(sc) = chars.by_ref().next() {
-                    current.push(sc);
-                    if sc == '\n' {
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                current.push(c);
-                current.push(chars.next().unwrap());
-                let mut prev = '\0';
-                while let Some(sc) = chars.by_ref().next() {
-                    current.push(sc);
-                    if prev == '*' && sc == '/' {
-                        break;
-                    }
-                    prev = sc;
-                }
-            }
-            ';' => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() {
-                    statements.push(trimmed.to_string());
-                }
-                current.clear();
-            }
-            _ => {
-                current.push(c);
-            }
+/// First keyword of `sql`, upper-cased, skipping whitespace, comments and `(`.
+fn leading_word(sql: &str) -> String {
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map_or("", |(_, tail)| tail);
+        } else {
+            break;
         }
     }
+    rest.chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
 
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        statements.push(trimmed.to_string());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zqlz_core::{ColumnMeta as CoreColumn, QueryResult, Value};
+
+    fn result(
+        columns: &[&str],
+        rows: Vec<Vec<Value>>,
+        affected: u64,
+        notice: &[&str],
+    ) -> QueryResult {
+        let mut result = QueryResult::empty();
+        result.columns = columns
+            .iter()
+            .map(|name| CoreColumn {
+                name: name.to_string(),
+                data_type: "text".into(),
+                ..Default::default()
+            })
+            .collect();
+        result.rows = rows
+            .into_iter()
+            .map(|values| zqlz_core::Row::new(Vec::new(), values))
+            .collect();
+        result.affected_rows = affected;
+        result.warnings = notice.iter().map(|n| n.to_string()).collect();
+        result
     }
 
-    statements
+    #[test]
+    fn leading_word_skips_comments_and_parens() {
+        assert_eq!(leading_word("  /* hi */ -- x\n (select 1)"), "SELECT");
+        assert_eq!(leading_word("withdraw()"), "WITHDRAW");
+        assert!(is_query("values (1)"));
+        assert!(is_query("TABLE users"));
+        assert!(!is_query("insert into t values (1) returning id"));
+        assert!(!is_query("withdraw()"));
+    }
+
+    #[test]
+    fn execute_with_result_set_keeps_rows_and_notices() {
+        let returning = zqlz_core::StatementResult {
+            is_query: true,
+            result: Some(result(
+                &["id", "name"],
+                vec![
+                    vec![Value::Int64(1), Value::Null],
+                    vec![Value::Int64(2), Value::String("NULL".into())],
+                ],
+                0,
+                &["NOTICE: hi"],
+            )),
+            affected_rows: 2,
+            error: None,
+        };
+        let statement = statement_from_execute("INSERT ... RETURNING id", returning);
+        assert_eq!(statement.columns.len(), 2);
+        assert_eq!(statement.rows.len(), 2);
+        assert_eq!(statement.affected_rows, 2);
+        assert_eq!(statement.warnings, vec!["NOTICE: hi"]);
+        // SQL NULL and the string 'NULL' stay distinguishable in the typed cells.
+        assert_eq!(statement.rows[0].cells[1], serde_json::Value::Null);
+        assert_eq!(statement.rows[1].cells[1], serde_json::json!("NULL"));
+    }
+
+    #[test]
+    fn execute_without_result_set_reports_counts_and_notices_only() {
+        let command = zqlz_core::StatementResult {
+            is_query: false,
+            result: Some(result(&[], Vec::new(), 0, &["NOTICE: hi"])),
+            affected_rows: 3,
+            error: None,
+        };
+        let statement = statement_from_execute("UPDATE t SET a = 1", command);
+        assert!(statement.columns.is_empty() && statement.rows.is_empty());
+        assert_eq!(statement.affected_rows, 3);
+        assert_eq!(statement.warnings, vec!["NOTICE: hi"]);
+    }
+
+    #[test]
+    fn query_without_result_set_is_reported_as_a_statement() {
+        let statement = statement_from_query("SELECT 1 INTO t", result(&[], Vec::new(), 4, &[]));
+        assert!(statement.columns.is_empty());
+        assert_eq!(statement.affected_rows, 4);
+
+        let statement =
+            statement_from_query("SELECT 1 WHERE false", result(&["a"], Vec::new(), 0, &[]));
+        assert_eq!(
+            statement.columns.len(),
+            1,
+            "an empty SELECT still shows its columns"
+        );
+    }
+
+    #[test]
+    fn splitting_respects_dollar_quoted_bodies() {
+        let statements = split_sql_statements_for_dialect(
+            "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END $$ LANGUAGE plpgsql; SELECT 1;",
+            SqlLexDialect::Standard,
+        );
+        assert_eq!(statements.len(), 2);
+    }
 }

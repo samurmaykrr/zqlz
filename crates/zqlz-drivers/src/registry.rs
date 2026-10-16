@@ -822,6 +822,35 @@ mod tests {
         );
     }
 
+    /// The table designer emits auto-increment DDL from `DialectInfo`. When dialects
+    /// moved to TOML bundles the conversion dropped the field, so every SQL driver
+    /// silently stopped emitting `AUTOINCREMENT`/`AUTO_INCREMENT`/`IDENTITY`.
+    #[test]
+    fn get_dialect_info_carries_auto_increment_from_the_bundle() {
+        use zqlz_core::AutoIncrementStyle;
+
+        let cases: &[(&str, &str, AutoIncrementStyle)] = &[
+            #[cfg(feature = "sqlite")]
+            ("sqlite", "AUTOINCREMENT", AutoIncrementStyle::Suffix),
+            #[cfg(feature = "mysql")]
+            ("mysql", "AUTO_INCREMENT", AutoIncrementStyle::Suffix),
+            #[cfg(feature = "postgres")]
+            ("postgres", "SERIAL", AutoIncrementStyle::TypeName),
+            #[cfg(feature = "mssql")]
+            ("sqlserver", "IDENTITY", AutoIncrementStyle::Suffix),
+        ];
+
+        for (driver, keyword, style) in cases {
+            let info = super::get_dialect_info(driver);
+            let auto_increment = info.auto_increment.unwrap_or_else(|| {
+                panic!("{driver} dialect info should carry auto-increment configuration")
+            });
+
+            assert_eq!(auto_increment.keyword, *keyword, "keyword for {driver}");
+            assert_eq!(auto_increment.style, *style, "style for {driver}");
+        }
+    }
+
     #[test]
     #[cfg(feature = "mssql")]
     fn get_dialect_info_exposes_bundle_syntax_terms() {

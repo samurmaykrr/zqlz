@@ -413,6 +413,147 @@ impl SqlObjectName {
             name: name.into(),
         }
     }
+
+    /// The namespace, if any, as a borrowed string.
+    pub fn namespace_ref(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+}
+
+/// A table or view exactly as the catalog lists it.
+///
+/// Built from catalog data (sidebar, objects panel) and carried to every table
+/// action, never re-derived by splitting a joined string: a dotted name stays
+/// one name, and an action can't land on a same-named table in another schema
+/// or database.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TableRef {
+    /// Database holding the object; selects the connection. `None` is the
+    /// connection's default.
+    pub database: Option<String>,
+    /// Schema (PostgreSQL), attached database (SQLite) or database (MySQL).
+    pub schema: Option<String>,
+    /// Unqualified object name, as the catalog spells it.
+    pub name: String,
+    #[serde(default)]
+    pub is_view: bool,
+}
+
+impl TableRef {
+    pub fn new(database: Option<String>, schema: Option<String>, name: impl Into<String>) -> Self {
+        Self {
+            database: database.filter(|database| !database.is_empty()),
+            schema: schema.filter(|schema| !schema.is_empty()),
+            name: name.into(),
+            is_view: false,
+        }
+    }
+
+    /// A catalog listing entry. PostgreSQL labels relations from an all-schemas
+    /// listing `schema.name`; that prefix is dropped only when it repeats the
+    /// entry's own schema, so a name containing a dot survives.
+    pub fn from_listing(
+        database: Option<String>,
+        schema: Option<String>,
+        listed_name: &str,
+    ) -> Self {
+        let name = schema
+            .as_deref()
+            .and_then(|schema| listed_name.strip_prefix(schema)?.strip_prefix('.'))
+            .filter(|name| !name.is_empty())
+            .unwrap_or(listed_name);
+        Self::new(database, schema, name)
+    }
+
+    pub fn view(self) -> Self {
+        Self {
+            is_view: true,
+            ..self
+        }
+    }
+
+    /// The only parser for user-typed names (agent, IPC, palette, go-to-definition).
+    ///
+    /// Quote-aware for the dialect, so `"a.b"`, `` `a.b` `` and `[a.b]` are one
+    /// name while `a.b` is schema `a`, table `b`. One part is a name, two are
+    /// `schema.name` (`database.name` on MySQL and ClickHouse, where the database
+    /// is the schema), three are `database.schema.name`. Text that is not an
+    /// identifier path, such as an unquoted name with a space, is taken whole.
+    pub fn parse(
+        input: &str,
+        dialect_id: Option<&str>,
+        default_database: Option<&str>,
+    ) -> Result<Self> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(crate::ZqlzError::Query("Table name is empty".to_string()));
+        }
+        let default_database = default_database.map(ToString::to_string);
+        let mut parts =
+            parse_identifier_path(input, dialect_id).unwrap_or_else(|| vec![input.to_string()]);
+        let name = parts.pop().unwrap_or_default();
+        let database_is_schema = matches!(dialect_id, Some("mysql" | "mariadb" | "clickhouse"));
+        let (database, schema) = match parts.as_slice() {
+            [] => (default_database, None),
+            [namespace] if database_is_schema => (Some(namespace.clone()), Some(namespace.clone())),
+            [schema] => (default_database, Some(schema.clone())),
+            [database, schema] => (Some(database.clone()), Some(schema.clone())),
+            _ => {
+                return Err(crate::ZqlzError::Query(format!(
+                    "\"{input}\" has more than three name parts"
+                )));
+            }
+        };
+        Ok(Self::new(database, schema, name))
+    }
+
+    /// `schema.name` for titles. Never parse it back: a dotted name is ambiguous.
+    pub fn display_name(&self) -> String {
+        match &self.schema {
+            Some(schema) => format!("{schema}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+
+    /// The connection scope statements against this object must run in.
+    pub fn scope(&self) -> ConnectionScope {
+        self.database
+            .clone()
+            .map(ConnectionScope::Database)
+            .unwrap_or(ConnectionScope::Default)
+    }
+
+    /// The name to render into SQL on a connection scoped by [`Self::scope`].
+    pub fn sql_name(&self, connection: &dyn Connection) -> SqlObjectName {
+        connection.table_sql_name(self)
+    }
+}
+
+/// Split a qualified identifier with the dialect's quoting rules, or `None` when
+/// the text is not a plain identifier path.
+fn parse_identifier_path(input: &str, dialect_id: Option<&str>) -> Option<Vec<String>> {
+    use sqlparser::dialect::{
+        ClickHouseDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect,
+        PostgreSqlDialect, SQLiteDialect,
+    };
+    use sqlparser::parser::Parser;
+    use sqlparser::tokenizer::Token;
+
+    let dialect: Box<dyn Dialect> = match dialect_id {
+        Some("mysql" | "mariadb") => Box::new(MySqlDialect {}),
+        Some("postgresql" | "postgres") => Box::new(PostgreSqlDialect {}),
+        Some("sqlite") => Box::new(SQLiteDialect {}),
+        Some("clickhouse") => Box::new(ClickHouseDialect {}),
+        Some("duckdb") => Box::new(DuckDbDialect {}),
+        Some("mssql") => Box::new(MsSqlDialect {}),
+        _ => Box::new(GenericDialect {}),
+    };
+    let mut parser = Parser::new(dialect.as_ref()).try_with_sql(input).ok()?;
+    let object_name = parser.parse_object_name(false).ok()?;
+    if parser.peek_token().token != Token::EOF {
+        return None;
+    }
+    Some(object_name.0.into_iter().map(|ident| ident.value).collect())
 }
 
 /// Options for DROP VIEW statement generation.
@@ -652,6 +793,23 @@ pub trait Connection: Send + Sync {
         None
     }
 
+    /// The database this session is connected to, when the driver knows it
+    /// without a round-trip. Caches key on it, so `public.users` in one
+    /// database is never served for the same name in another.
+    fn connected_database(&self) -> Option<String> {
+        None
+    }
+
+    /// How `table` is named in SQL on a connection scoped by [`TableRef::scope`].
+    /// Drivers whose database is the namespace (MySQL), or that leave their
+    /// default schema unqualified (SQLite `main`), override this.
+    fn table_sql_name(&self, table: &TableRef) -> SqlObjectName {
+        SqlObjectName {
+            namespace: table.schema.clone(),
+            name: table.name.clone(),
+        }
+    }
+
     /// Broad category used by services/UI to route behavior without concrete
     /// driver-name branching.
     fn driver_category(&self) -> DriverCategory {
@@ -697,6 +855,18 @@ pub trait Connection: Send + Sync {
     /// so connection managers create per-database connection instances.
     fn requires_database_scoped_connection(&self) -> bool {
         false
+    }
+
+    /// Whether SQL aimed at `database_name` needs its own connection, cached by
+    /// the connection manager under that (normalized) name.
+    ///
+    /// Defaults to [`Self::requires_database_scoped_connection`]. Drivers that
+    /// introspect any database from one connection but run user SQL in a single
+    /// session database (MySQL) answer per database. Keep this consistent with
+    /// `resolve_scope`'s `requires_dedicated_connection`.
+    fn requires_dedicated_connection_for(&self, database_name: &str) -> bool {
+        let _ = database_name;
+        self.requires_database_scoped_connection()
     }
 
     /// Normalize a database/scope name used for per-database connection lookup.
@@ -1214,7 +1384,155 @@ pub trait PreparedStatement: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::SingleRowDmlScope;
+    use super::{SingleRowDmlScope, TableRef};
+
+    fn table(database: Option<&str>, schema: Option<&str>, name: &str) -> TableRef {
+        TableRef::new(database.map(Into::into), schema.map(Into::into), name)
+    }
+
+    #[test]
+    fn table_ref_parse_cases() {
+        let cases = [
+            (
+                "users",
+                Some("postgresql"),
+                None,
+                table(None, None, "users"),
+            ),
+            (
+                "users",
+                Some("postgresql"),
+                Some("app"),
+                table(Some("app"), None, "users"),
+            ),
+            (
+                "audit.users",
+                Some("postgresql"),
+                Some("app"),
+                table(Some("app"), Some("audit"), "users"),
+            ),
+            (
+                "app.audit.users",
+                Some("postgresql"),
+                None,
+                table(Some("app"), Some("audit"), "users"),
+            ),
+            (
+                "\"odd.name\"",
+                Some("postgresql"),
+                None,
+                table(None, None, "odd.name"),
+            ),
+            (
+                "audit.\"odd.name\"",
+                Some("postgresql"),
+                None,
+                table(None, Some("audit"), "odd.name"),
+            ),
+            (
+                "\"Mixed Case\"",
+                Some("postgresql"),
+                None,
+                table(None, None, "Mixed Case"),
+            ),
+            (
+                "Mixed Case",
+                Some("sqlite"),
+                None,
+                table(None, None, "Mixed Case"),
+            ),
+            (
+                "\"a\"\"b\"",
+                Some("postgresql"),
+                None,
+                table(None, None, "a\"b"),
+            ),
+            (
+                "Users",
+                Some("postgresql"),
+                None,
+                table(None, None, "Users"),
+            ),
+            (
+                "\"select\"",
+                Some("postgresql"),
+                None,
+                table(None, None, "select"),
+            ),
+            (
+                "shop.orders",
+                Some("mysql"),
+                None,
+                table(Some("shop"), Some("shop"), "orders"),
+            ),
+            (
+                "`odd.name`",
+                Some("mysql"),
+                Some("shop"),
+                table(Some("shop"), None, "odd.name"),
+            ),
+            ("`a``b`", Some("mysql"), None, table(None, None, "a`b")),
+            (
+                "[odd.name]",
+                Some("mssql"),
+                None,
+                table(None, None, "odd.name"),
+            ),
+            (
+                "dbo.[odd.name]",
+                Some("mssql"),
+                None,
+                table(None, Some("dbo"), "odd.name"),
+            ),
+            ("  users  ", None, None, table(None, None, "users")),
+        ];
+        for (input, dialect, default_database, expected) in cases {
+            assert_eq!(
+                TableRef::parse(input, dialect, default_database).expect(input),
+                expected,
+                "{input} on {dialect:?}"
+            );
+        }
+        assert!(TableRef::parse("  ", None, None).is_err());
+        assert!(TableRef::parse("a.b.c.d", Some("postgresql"), None).is_err());
+    }
+
+    #[test]
+    fn table_ref_from_listing_drops_only_its_own_schema_prefix() {
+        assert_eq!(
+            TableRef::from_listing(None, Some("audit".into()), "audit.users"),
+            table(None, Some("audit"), "users")
+        );
+        assert_eq!(
+            TableRef::from_listing(None, Some("audit".into()), "audit.odd.name"),
+            table(None, Some("audit"), "odd.name")
+        );
+        assert_eq!(
+            TableRef::from_listing(None, Some("public".into()), "odd.name"),
+            table(None, Some("public"), "odd.name")
+        );
+        assert_eq!(
+            TableRef::from_listing(None, None, "users"),
+            table(None, None, "users")
+        );
+    }
+
+    #[test]
+    fn table_ref_display_name_is_schema_dot_name() {
+        assert_eq!(
+            table(Some("app"), Some("audit"), "odd.name").display_name(),
+            "audit.odd.name"
+        );
+        assert_eq!(table(None, None, "users").display_name(), "users");
+    }
+
+    #[test]
+    fn table_ref_restores_from_json_without_is_view() {
+        let restored: TableRef =
+            serde_json::from_str(r#"{"database":null,"schema":"audit","name":"users"}"#)
+                .expect("old json");
+        assert_eq!(restored, table(None, Some("audit"), "users"));
+    }
 
     #[test]
     fn row_identity_scope_narrows_a_keyless_match_to_one_row() {

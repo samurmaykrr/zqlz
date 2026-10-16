@@ -19,6 +19,8 @@ pub struct MockConnection {
     #[allow(dead_code)]
     pub name: String,
     pub driver: String,
+    /// What `connected_database` reports.
+    pub connected_database: Option<String>,
     pub should_fail: bool,
     /// Default query result returned when no pattern matches
     pub query_results: Vec<QueryResult>,
@@ -43,6 +45,8 @@ pub struct MockConnection {
     pub bulk_columns_supported: bool,
     /// Counts schema-wide column fetches.
     pub list_all_columns_count: Arc<parking_lot::Mutex<usize>>,
+    /// Schema argument of each schema-wide column fetch.
+    pub list_all_columns_schemas: Arc<parking_lot::Mutex<Vec<Option<String>>>>,
     /// Rows reported by `update_cell`. Configurable so tests can exercise the
     /// zero-row branch that a hardcoded `1` used to hide.
     pub cell_update_affected_rows: u64,
@@ -55,6 +59,7 @@ impl MockConnection {
         Self {
             name: name.into(),
             driver: "mock".to_string(),
+            connected_database: None,
             should_fail: false,
             query_results: vec![],
             query_responses: vec![],
@@ -66,6 +71,7 @@ impl MockConnection {
             last_cell_update: Arc::new(parking_lot::Mutex::new(None)),
             bulk_columns_supported: false,
             list_all_columns_count: Arc::new(parking_lot::Mutex::new(0)),
+            list_all_columns_schemas: Arc::new(parking_lot::Mutex::new(Vec::new())),
             cell_update_affected_rows: 1,
             affected_row_count_fidelity: AffectedRowCountFidelity::Exact,
         }
@@ -138,6 +144,12 @@ impl MockConnection {
     }
 
     #[allow(dead_code)]
+    pub fn with_connected_database(mut self, database: impl Into<String>) -> Self {
+        self.connected_database = Some(database.into());
+        self
+    }
+
+    #[allow(dead_code)]
     pub fn with_failure(mut self) -> Self {
         self.should_fail = true;
         self
@@ -204,6 +216,10 @@ impl MockConnection {
 impl Connection for MockConnection {
     fn driver_name(&self) -> &str {
         &self.driver
+    }
+
+    fn connected_database(&self) -> Option<String> {
+        self.connected_database.clone()
     }
 
     fn dialect_id(&self) -> Option<&'static str> {
@@ -751,7 +767,9 @@ impl SchemaIntrospection for MockConnection {
             // going through the counted `get_columns` entry point.
             columns_by_table.insert(table.to_string(), self.mock_columns_for(table));
         }
-        let _ = schema;
+        self.list_all_columns_schemas
+            .lock()
+            .push(schema.map(ToOwned::to_owned));
         Ok(Some(columns_by_table))
     }
 
@@ -950,6 +968,27 @@ pub fn mysql_connection_with_bulk_columns(database_name: &str) -> Arc<MockConnec
         MockConnection::new(database_name)
             .with_driver("mysql")
             .with_query_response("DATABASE()", db_result)
+            .with_bulk_columns(),
+    )
+}
+
+/// Same as [`postgres_connection`], but the mock answers the schema-wide column fetch.
+#[allow(dead_code)]
+pub fn postgres_connection_with_bulk_columns(
+    database_name: &str,
+    schema_name: &str,
+) -> Arc<MockConnection> {
+    let db_result = mock_single_value_result(
+        "current_database()",
+        Value::String(database_name.to_string()),
+    );
+    let schema_result =
+        mock_single_value_result("current_schema()", Value::String(schema_name.to_string()));
+    Arc::new(
+        MockConnection::new(database_name)
+            .with_driver("postgresql")
+            .with_query_response("current_database()", db_result)
+            .with_query_response("current_schema()", schema_result)
             .with_bulk_columns(),
     )
 }

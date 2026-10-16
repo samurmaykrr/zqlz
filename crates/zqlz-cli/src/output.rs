@@ -11,7 +11,7 @@ use comfy_table::{Cell, Table, presets::UTF8_FULL};
 use crate::OutputFormat;
 use crate::ipc::{
     ColumnInfo, ConnectionSummary, FunctionSummary, HistoryEntry, IndexSummary, QueryExecution,
-    StatementResult, ViewSummary,
+    Row, StatementResult, ViewSummary, cell_text,
 };
 
 // ---------------------------------------------------------------------------
@@ -91,23 +91,42 @@ pub fn print_connection_detail(conn: &ConnectionSummary) {
 // Query results
 // ---------------------------------------------------------------------------
 
-/// Render query execution results to a `String`.
+/// What a query run prints, split by stream.
+#[derive(Debug, Default)]
+pub struct Rendered {
+    /// Result data (goes to `--output` when given).
+    pub stdout: String,
+    /// Notices, and, outside table mode, errors and skipped statements.
+    pub stderr: String,
+}
+
+/// Render query execution results.
 ///
-/// The caller decides the destination — use [`print_query_execution`] to write
-/// to stdout or write the returned string to a file for `--output`.
+/// Table mode keeps errors and skipped statements inline so they stay in order
+/// with the results; every other format keeps stdout parseable. Notices
+/// (`RAISE NOTICE`, ...) always go to stderr, except in JSON where they are
+/// part of each statement object.
 pub fn render_query_execution(
     execution: &QueryExecution,
     format: &OutputFormat,
     limit: usize,
     opts: &OutputOptions,
-) -> String {
+) -> Rendered {
     let mut out = String::new();
+    let mut err = String::new();
+    let is_table = matches!(format, OutputFormat::Table);
+    let is_json = matches!(format, OutputFormat::Json);
 
     for statement in &execution.statements {
-        if let Some(error) = &statement.error {
-            writeln!(out, "Error: {error}").ok();
-            writeln!(out, "  SQL: {}", statement.sql).ok();
+        if statement.skipped || statement.error.is_some() {
+            let diagnostics = if is_table { &mut out } else { &mut err };
+            write_failure(diagnostics, statement);
             continue;
+        }
+        if !is_json {
+            for warning in &statement.warnings {
+                writeln!(err, "{warning}").ok();
+            }
         }
 
         let rows_to_display = if limit == 0 {
@@ -168,32 +187,8 @@ pub fn render_query_execution(
                 }
             }
 
-            OutputFormat::Json => {
-                let records: Vec<serde_json::Value> = statement
-                    .rows
-                    .iter()
-                    .take(rows_to_display)
-                    .map(|row| {
-                        let mut obj = serde_json::Map::new();
-                        for (col, val) in statement.columns.iter().zip(row.values.iter()) {
-                            obj.insert(col.name.clone(), serde_json::Value::String(val.clone()));
-                        }
-                        serde_json::Value::Object(obj)
-                    })
-                    .collect();
-
-                writeln!(
-                    out,
-                    "{}",
-                    serde_json::to_string_pretty(&records)
-                        .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
-                )
-                .ok();
-
-                if opts.timing {
-                    writeln!(out, "Time: {} ms", statement.duration_ms).ok();
-                }
-            }
+            // Collected into one array after the loop.
+            OutputFormat::Json => {}
 
             OutputFormat::Csv => {
                 if !opts.no_header && !statement.columns.is_empty() {
@@ -202,8 +197,10 @@ pub fn render_query_execution(
                     writeln!(out, "{}", csv_row(&headers)).ok();
                 }
                 for row in statement.rows.iter().take(rows_to_display) {
-                    let vals: Vec<&str> = row.values.iter().map(|v| v.as_str()).collect();
-                    writeln!(out, "{}", csv_row(&vals)).ok();
+                    let fields: Vec<String> = (0..statement.columns.len())
+                        .map(|index| csv_field(typed_cell(row, index).as_deref()))
+                        .collect();
+                    writeln!(out, "{}", fields.join(",")).ok();
                 }
                 if opts.timing {
                     // Prefix with `#` so downstream tools can treat it as a comment
@@ -213,12 +210,18 @@ pub fn render_query_execution(
 
             OutputFormat::Tsv => {
                 if !opts.no_header && !statement.columns.is_empty() {
-                    let headers: Vec<&str> =
-                        statement.columns.iter().map(|c| c.name.as_str()).collect();
+                    let headers: Vec<String> = statement
+                        .columns
+                        .iter()
+                        .map(|c| tsv_field(Some(&c.name)))
+                        .collect();
                     writeln!(out, "{}", headers.join("\t")).ok();
                 }
                 for row in statement.rows.iter().take(rows_to_display) {
-                    writeln!(out, "{}", row.values.join("\t")).ok();
+                    let fields: Vec<String> = (0..statement.columns.len())
+                        .map(|index| tsv_field(typed_cell(row, index).as_deref()))
+                        .collect();
+                    writeln!(out, "{}", fields.join("\t")).ok();
                 }
                 if opts.timing {
                     writeln!(out, "# Time: {} ms", statement.duration_ms).ok();
@@ -227,7 +230,110 @@ pub fn render_query_execution(
         }
     }
 
-    out
+    if is_json {
+        let statements: Vec<serde_json::Value> = execution
+            .statements
+            .iter()
+            .map(|statement| statement_json(statement, limit))
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            serde_json::to_string_pretty(&statements)
+                .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+        )
+        .ok();
+    }
+
+    Rendered {
+        stdout: out,
+        stderr: err,
+    }
+}
+
+fn write_failure(out: &mut String, statement: &StatementResult) {
+    if let Some(error) = &statement.error {
+        writeln!(out, "Error: {error}").ok();
+        writeln!(out, "  SQL: {}", statement.sql).ok();
+    } else if statement.skipped {
+        writeln!(out, "Skipped: {}", sql_one_line(&statement.sql, 80)).ok();
+    }
+}
+
+/// One statement as a JSON object. `rows` are column-keyed records whose
+/// values are the typed cells (SQL NULL is `null`, never the text "NULL").
+fn statement_json(statement: &StatementResult, limit: usize) -> serde_json::Value {
+    let shown = if limit == 0 {
+        statement.rows.len()
+    } else {
+        statement.rows.len().min(limit)
+    };
+    let rows: Vec<serde_json::Value> = statement
+        .rows
+        .iter()
+        .take(shown)
+        .map(|row| {
+            let mut record = serde_json::Map::new();
+            for (index, column) in statement.columns.iter().enumerate() {
+                let cell = match row.cells.get(index) {
+                    Some(cell) => cell.clone(),
+                    None => row.values.get(index).map_or(serde_json::Value::Null, |v| {
+                        serde_json::Value::from(v.clone())
+                    }),
+                };
+                record.insert(column.name.clone(), cell);
+            }
+            serde_json::Value::Object(record)
+        })
+        .collect();
+
+    serde_json::json!({
+        "sql": statement.sql,
+        "columns": statement
+            .columns
+            .iter()
+            .map(|c| serde_json::json!({ "name": c.name, "data_type": c.data_type }))
+            .collect::<Vec<_>>(),
+        "rows": rows,
+        "row_count": statement.rows.len(),
+        "affected_rows": statement.affected_rows,
+        "duration_ms": statement.duration_ms,
+        "warnings": statement.warnings,
+        "error": statement.error,
+        "skipped": statement.skipped,
+    })
+}
+
+/// Cell text for CSV/TSV; `None` is SQL NULL. Servers that predate typed
+/// cells only send display text, so there NULL cannot be told from "NULL".
+fn typed_cell(row: &Row, index: usize) -> Option<String> {
+    match row.cells.get(index) {
+        Some(serde_json::Value::Null) => None,
+        Some(cell) => Some(cell_text(cell)),
+        None => row.values.get(index).cloned(),
+    }
+}
+
+/// CSV field with the usual NULL convention: SQL NULL is an empty unquoted
+/// field, so the empty string has to be quoted to stay distinct from it.
+fn csv_field(field: Option<&str>) -> String {
+    match field {
+        None => String::new(),
+        Some("") => "\"\"".to_string(),
+        Some(text) => csv_row(&[text]),
+    }
+}
+
+/// TSV field in PostgreSQL COPY text form: NULL is `\N`, and backslash, tab and
+/// line breaks are escaped so a value can never split a row or column.
+fn tsv_field(field: Option<&str>) -> String {
+    let Some(text) = field else {
+        return "\\N".to_string();
+    };
+    text.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 // ---------------------------------------------------------------------------
@@ -550,4 +656,152 @@ fn csv_row(fields: &[&str]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::ColumnMeta;
+    use serde_json::json;
+
+    fn statement(rows: Vec<Vec<serde_json::Value>>) -> StatementResult {
+        StatementResult {
+            sql: "SELECT a, b".into(),
+            duration_ms: 1,
+            columns: ["a", "b"]
+                .iter()
+                .map(|name| ColumnMeta {
+                    name: name.to_string(),
+                    data_type: "text".into(),
+                })
+                .collect(),
+            rows: rows
+                .into_iter()
+                .map(|cells| {
+                    let mut row = Row {
+                        values: Vec::new(),
+                        cells,
+                    };
+                    row.normalize();
+                    row
+                })
+                .collect(),
+            affected_rows: 0,
+            error: None,
+            warnings: Vec::new(),
+            skipped: false,
+        }
+    }
+
+    fn execution(statements: Vec<StatementResult>) -> QueryExecution {
+        QueryExecution {
+            sql: String::new(),
+            duration_ms: 0,
+            statements,
+        }
+    }
+
+    fn render(execution: &QueryExecution, format: OutputFormat) -> Rendered {
+        render_query_execution(execution, &format, 0, &OutputOptions::default())
+    }
+
+    fn null_vs_text() -> QueryExecution {
+        execution(vec![statement(vec![
+            vec![json!(null), json!("NULL")],
+            vec![json!(""), json!(7)],
+        ])])
+    }
+
+    #[test]
+    fn json_keeps_sql_null_distinct_from_the_text_null() {
+        let rendered = render(&null_vs_text(), OutputFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered.stdout).unwrap();
+        assert_eq!(parsed[0]["rows"][0], json!({"a": null, "b": "NULL"}));
+        assert_eq!(parsed[0]["rows"][1], json!({"a": "", "b": 7}));
+        assert_eq!(parsed[0]["skipped"], json!(false));
+    }
+
+    #[test]
+    fn csv_and_tsv_keep_sql_null_distinct_from_the_text_null_and_empty() {
+        let csv = render(&null_vs_text(), OutputFormat::Csv).stdout;
+        assert_eq!(csv, "a,b\n,NULL\n\"\",7\n");
+
+        let tsv = render(&null_vs_text(), OutputFormat::Tsv).stdout;
+        assert_eq!(tsv, "a\tb\n\\N\tNULL\n\t7\n");
+    }
+
+    #[test]
+    fn tsv_escapes_values_that_would_split_rows_or_columns() {
+        let execution = execution(vec![statement(vec![vec![
+            json!("x\ty"),
+            json!("l1\nl2\\"),
+        ]])]);
+        let tsv = render(&execution, OutputFormat::Tsv).stdout;
+        assert_eq!(tsv, "a\tb\nx\\ty\tl1\\nl2\\\\\n");
+    }
+
+    #[test]
+    fn old_servers_without_typed_cells_still_render() {
+        let mut old = statement(Vec::new());
+        old.rows.push(Row {
+            values: vec!["1".into(), "NULL".into()],
+            cells: Vec::new(),
+        });
+        let csv = render(&execution(vec![old]), OutputFormat::Csv).stdout;
+        assert_eq!(csv, "a,b\n1,NULL\n");
+    }
+
+    #[test]
+    fn notices_go_to_stderr_in_table_and_csv_but_into_json() {
+        let mut noisy = statement(vec![vec![json!(1), json!(2)]]);
+        noisy.warnings = vec!["NOTICE: hi".into()];
+        let run = execution(vec![noisy]);
+
+        for format in [OutputFormat::Table, OutputFormat::Csv, OutputFormat::Tsv] {
+            let rendered = render(&run, format);
+            assert_eq!(rendered.stderr, "NOTICE: hi\n");
+            assert!(!rendered.stdout.contains("NOTICE"));
+        }
+
+        let rendered = render(&run, OutputFormat::Json);
+        assert!(rendered.stderr.is_empty());
+        let parsed: serde_json::Value = serde_json::from_str(&rendered.stdout).unwrap();
+        assert_eq!(parsed[0]["warnings"], json!(["NOTICE: hi"]));
+    }
+
+    fn failed_then_skipped() -> QueryExecution {
+        let mut failed = statement(Vec::new());
+        failed.sql = "SELECT boom".into();
+        failed.error = Some("boom".into());
+        let mut skipped = statement(Vec::new());
+        skipped.sql = "SELECT 2".into();
+        skipped.skipped = true;
+        execution(vec![failed, skipped])
+    }
+
+    #[test]
+    fn table_mode_shows_errors_and_skipped_statements_in_order() {
+        let rendered = render(&failed_then_skipped(), OutputFormat::Table);
+        assert_eq!(
+            rendered.stdout,
+            "Error: boom\n  SQL: SELECT boom\nSkipped: SELECT 2\n"
+        );
+    }
+
+    #[test]
+    fn json_marks_skipped_and_failed_statements_and_csv_keeps_stdout_clean() {
+        let rendered = render(&failed_then_skipped(), OutputFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered.stdout).unwrap();
+        assert_eq!(parsed[0]["error"], json!("boom"));
+        assert_eq!(parsed[0]["skipped"], json!(false));
+        assert_eq!(parsed[1]["skipped"], json!(true));
+        assert_eq!(parsed[1]["error"], json!(null));
+
+        let rendered = render(&failed_then_skipped(), OutputFormat::Csv);
+        assert!(rendered.stdout.is_empty());
+        assert!(
+            rendered.stderr.contains("Error: boom")
+                && rendered.stderr.contains("Skipped: SELECT 2")
+        );
+    }
 }

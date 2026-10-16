@@ -394,7 +394,7 @@ pub(super) fn route_command_palette_event(
         }
         CommandPaletteEvent::OpenTable {
             connection_id,
-            table_name,
+            table,
         } => {
             if main_view
                 .sidebar_connection_feature_set(*connection_id, cx)
@@ -402,18 +402,11 @@ pub(super) fn route_command_palette_event(
             {
                 return;
             }
-            main_view.open_table_viewer(
-                *connection_id,
-                table_name.clone(),
-                None,
-                false,
-                window,
-                cx,
-            );
+            main_view.open_table_viewer(*connection_id, table.clone(), window, cx);
         }
         CommandPaletteEvent::OpenView {
             connection_id,
-            view_name,
+            view,
         } => {
             if main_view
                 .sidebar_connection_feature_set(*connection_id, cx)
@@ -421,7 +414,7 @@ pub(super) fn route_command_palette_event(
             {
                 return;
             }
-            main_view.open_table_viewer(*connection_id, view_name.clone(), None, true, window, cx);
+            main_view.open_table_viewer(*connection_id, view.clone(), window, cx);
         }
         CommandPaletteEvent::GoToDocumentSymbol { line, column } => {
             if let Some(editor) = main_view.active_query_editor(cx) {

@@ -1,5 +1,8 @@
 use std::{ops::Range, rc::Rc, time::Duration};
 
+#[cfg(test)]
+mod render_tests;
+
 use crate::widgets::{
     ActiveTheme,
     ElementExt,
@@ -20,8 +23,9 @@ use gpui::{
     AppContext, Axis, Bounds, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
     ListSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Render, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled, Task, UniformListScrollHandle, Window, div, prelude::FluentBuilder, px, uniform_list,
+    Pixels, Point, Render, Role, ScrollStrategy, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
+    prelude::FluentBuilder, px, uniform_list,
 };
 
 use super::*;
@@ -1585,6 +1589,7 @@ where
                     "cell".into(),
                     (row_ix * 10000 + col_ix) as u64,
                 ))
+                .debug_selector(|| format!("cell:{row_ix}:{col_ix}"))
                 .size_full()
                 .relative()
                 // Selection styling (without event handlers)
@@ -1787,6 +1792,8 @@ where
             .child(
                 self.render_cell(col_ix, window, cx)
                     .id(("col-header", col_ix))
+                    .role(Role::ColumnHeader)
+                    .aria_column_index(col_ix + 1)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
                     }))
@@ -2023,6 +2030,9 @@ where
             let style = tr.style().clone();
 
             tr.h_flex()
+                .role(Role::Row)
+                .aria_row_index(row_ix + 1)
+                .aria_selected(is_selected)
                 .w_full()
                 .h(row_height)
                 .when(need_render_border, |this| {
@@ -2459,7 +2469,7 @@ where
                     this.children(empty_view)
                 } else {
                     this.child(
-                        h_flex().id("table-body").flex_grow().size_full().child(
+                        h_flex().id("table-body").flex_grow_1().size_full().child(
                             uniform_list(
                                 "table-uniform-list",
                                 render_rows_count,
@@ -2533,7 +2543,7 @@ where
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .with_sizing_behavior(ListSizingBehavior::Auto)
                             .track_scroll(&self.vertical_scroll_handle)

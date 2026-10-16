@@ -46,7 +46,7 @@ impl SidebarMenu {
         mut self,
         children: impl IntoIterator<Item = impl Into<SidebarMenuItem>>,
     ) -> Self {
-        self.items = children.into_iter().map(Into::into).collect();
+        self.items.extend(children.into_iter().map(Into::into));
         self
     }
 }
@@ -187,7 +187,7 @@ impl SidebarMenuItem {
     }
 
     pub fn children(mut self, children: impl IntoIterator<Item = impl Into<Self>>) -> Self {
-        self.children = children.into_iter().map(Into::into).collect();
+        self.children.extend(children.into_iter().map(Into::into));
         self
     }
 
@@ -287,12 +287,7 @@ impl SidebarItem for SidebarMenuItem {
                             .text_color(cx.theme().sidebar_accent_foreground)
                     })
                     .when_some(self.icon.clone(), |this, icon| this.child(icon))
-                    .when(is_collapsed, |this| {
-                        this.justify_center().when(is_active, |this| {
-                            this.bg(cx.theme().sidebar_accent)
-                                .text_color(cx.theme().sidebar_accent_foreground)
-                        })
-                    })
+                    .when(is_collapsed, |this| this.justify_center())
                     .when(!is_collapsed, |this| {
                         this.h_7()
                             .child(
@@ -343,17 +338,15 @@ impl SidebarItem for SidebarMenuItem {
                         this.on_click({
                             let open_state = open_state.clone();
                             move |ev, window, cx| {
-                                if click_to_open {
-                                    if let Some(ref s) = open_state {
-                                        s.update(cx, |is_open: &mut bool, cx| {
-                                            *is_open = true;
+                                if let Some(open_state) = &open_state
+                                    && (click_to_open || click_to_toggle)
+                                {
+                                    open_state.update(cx, |is_open: &mut bool, cx| {
+                                        let next_open = click_to_open || !*is_open;
+                                        if *is_open != next_open {
+                                            *is_open = next_open;
                                             cx.notify();
-                                        });
-                                    }
-                                } else if click_to_toggle && let Some(ref s) = open_state {
-                                    s.update(cx, |is_open: &mut bool, cx| {
-                                        *is_open = !*is_open;
-                                        cx.notify();
+                                        }
                                     });
                                 }
                                 handler(ev, window, cx)

@@ -211,9 +211,9 @@ mod dialect_tests {
     }
 
     #[test]
-    fn test_redis_dialect_no_comments() {
+    fn test_redis_dialect_uses_hash_line_comments() {
         let dialect = redis_dialect();
-        assert!(dialect.comment_styles.line_comment.is_none());
+        assert_eq!(dialect.comment_styles.line_comment.as_deref(), Some("#"));
         assert!(dialect.comment_styles.block_comment_start.is_none());
         assert!(dialect.comment_styles.block_comment_end.is_none());
     }

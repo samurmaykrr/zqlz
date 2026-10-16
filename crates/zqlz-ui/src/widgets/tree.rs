@@ -2,9 +2,9 @@ use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
     App, Context, ElementId, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    ListSizingBehavior, MouseButton, ParentElement, Render, RenderOnce, SharedString,
-    StyleRefinement, Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _,
-    uniform_list,
+    ListSizingBehavior, MouseButton, ParentElement, Render, RenderOnce, Role, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, UniformListScrollHandle, Window, div,
+    prelude::FluentBuilder as _, uniform_list,
 };
 
 use crate::widgets::{
@@ -357,8 +357,18 @@ impl Render for TreeState {
                         let selected = Some(ix) == state.selected_ix;
                         let item = (render_item)(ix, entry, selected, window, cx);
 
+                        let total_entries = state.entries.len();
                         let el = div()
                             .id(ix)
+                            .role(Role::TreeItem)
+                            // aria levels are 1-based; TreeEntry depth is 0-based.
+                            .aria_level(entry.depth() + 1)
+                            .aria_selected(selected)
+                            .aria_position_in_set(ix + 1)
+                            .aria_size_of_set(total_entries)
+                            .when(entry.is_folder(), |this| {
+                                this.aria_expanded(entry.is_expanded())
+                            })
                             .child(item.disabled(entry.item().is_disabled()).selected(selected))
                             .when(!entry.item().is_disabled(), |this| {
                                 this.on_mouse_down(
@@ -377,7 +387,7 @@ impl Render for TreeState {
                     items
                 })
             })
-            .flex_grow()
+            .flex_grow_1()
             .size_full()
             .track_scroll(&self.scroll_handle)
             .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -427,6 +437,7 @@ impl RenderOnce for Tree {
 
         div()
             .id(self.id)
+            .role(Role::Tree)
             .key_context(CONTEXT)
             .track_focus(&focus_handle)
             .on_action(window.listener_for(&self.state, TreeState::on_action_confirm))

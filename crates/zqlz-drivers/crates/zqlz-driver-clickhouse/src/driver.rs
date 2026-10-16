@@ -14,12 +14,30 @@ use zqlz_core::{
     ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo, DatabaseDriver,
     DialectBundle, DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions,
     DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory,
-    KeywordInfo, QueryResult, ResolvedConnectionScope, Result, Row, SqlFunctionInfo, SqlObjectName,
+    KeywordInfo, ObjectKindSupport, QueryResult, ResolvedConnectionScope, Result, Row,
+    SqlFunctionInfo, SqlObjectName,
     StatementResult, TableOptionDef, TableOptionType, Transaction, Value, ZqlzError,
     dialect_bundle_from_legacy_info,
 };
 
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+/// Object kinds ClickHouse actually lists: tables, views (materialized views
+/// only surface inside `list_views` today), and data types. Trigger, function,
+/// and procedure listings are stubs.
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    materialized_views: false,
+    functions: false,
+    procedures: false,
+    triggers: false,
+    sequences: false,
+    types: true,
+    events: false,
+    domains: false,
+    extensions: false,
+};
 
 fn get_dialect_bundle() -> &'static DialectBundle {
     static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
@@ -135,7 +153,9 @@ impl DatabaseDriver for ClickHouseDriver {
             supports_json: true,
             supports_full_text_search: true, // Full-text search functions
             supports_stored_procedures: false, // No stored procedures
-            supports_schemas: true,          // Databases act as schemas
+            // A database *is* the namespace, so there is no schema level inside
+            // one (NamespaceModel::DatabasesOnly).
+            supports_schemas: false,
             supports_multiple_databases: true,
             supports_streaming: true, // Streaming inserts
             supports_cancellation: true,
@@ -147,6 +167,14 @@ impl DatabaseDriver for ClickHouseDriver {
             max_identifier_length: Some(255),
             max_parameters: None,
         }
+    }
+
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        None
     }
 
     #[tracing::instrument(skip(self, config), fields(host = config.get_string("host").as_deref()))]
@@ -179,11 +207,20 @@ impl DatabaseDriver for ClickHouseDriver {
             .with_url(&url)
             .with_user(&username)
             .with_password(&password)
-            .with_database(&database);
+            .with_database(&database)
+            // The crate's default LZ4 framing fails on connect against ClickHouse
+            // 26.9 ("decompression error: incorrect magic number").
+            .with_compression(clickhouse::Compression::None)
+            // The server quotes UInt64 values in JSON output by default, which
+            // turns row counts and byte sizes into strings.
+            .with_option("output_format_json_quote_64bit_integers", "0");
 
         // Test the connection
-        let test_result: std::result::Result<u8, clickhouse::error::Error> =
-            client.query("SELECT 1").fetch_one().await;
+        let test_client = client.clone();
+        let test_result = run_on_clickhouse_runtime(async move {
+            Ok(test_client.query("SELECT 1").fetch_one::<u8>().await)
+        })
+        .await?;
 
         if let Err(e) = test_result {
             return Err(ZqlzError::Driver(format!(
@@ -343,6 +380,19 @@ impl Connection for ClickHouseConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("clickhouse")
+    }
+
+    fn connected_database(&self) -> Option<String> {
+        Some(self.database.clone())
+    }
+
+    fn table_sql_name(&self, table: &zqlz_core::TableRef) -> zqlz_core::SqlObjectName {
+        // The database is the namespace; a ref from a database node carries it
+        // as `database` alone.
+        zqlz_core::SqlObjectName {
+            namespace: table.schema.clone().or_else(|| table.database.clone()),
+            name: table.name.clone(),
+        }
     }
 
     // `execute` reports a hardcoded zero because the HTTP interface returns no
@@ -586,15 +636,21 @@ impl Connection for ClickHouseConnection {
         self.ensure_not_closed()?;
         let start = std::time::Instant::now();
 
-        let mut query = self.client.query(sql);
-        for param in params {
-            query = query.bind(value_to_clickhouse_param(param));
-        }
+        let client = self.client.clone();
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        run_on_clickhouse_runtime(async move {
+            let mut query = client.query(&sql);
+            for param in &params {
+                query = query.bind(value_to_clickhouse_param(param));
+            }
 
-        query
-            .execute()
-            .await
-            .map_err(|e| ZqlzError::Driver(format!("Execute failed: {}", e)))?;
+            query
+                .execute()
+                .await
+                .map_err(|e| ZqlzError::Driver(format!("Execute failed: {}", e)))
+        })
+        .await?;
 
         tracing::debug!(
             duration_ms = start.elapsed().as_millis() as u64,
@@ -639,6 +695,42 @@ impl Connection for ClickHouseConnection {
 /// Execute a query against a shared ClickHouse client and collect the result.
 /// Shared by `ClickHouseConnection` and the schema-introspection adapter.
 pub(crate) async fn run_clickhouse_query(
+    client: &clickhouse::Client,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let client = client.clone();
+    let sql = sql.to_string();
+    let params = params.to_vec();
+    run_on_clickhouse_runtime(async move { fetch_clickhouse_query(&client, &sql, &params).await })
+        .await
+}
+
+/// The clickhouse crate drives hyper on Tokio, but the app polls drivers on
+/// its own executor, so every network call runs on this runtime instead.
+fn get_clickhouse_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("zqlz-clickhouse-runtime")
+            .build()
+            .expect("Failed to create Tokio runtime for ClickHouse driver")
+    })
+}
+
+async fn run_on_clickhouse_runtime<T, F>(future: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    get_clickhouse_runtime().spawn(future).await.map_err(|error| {
+        ZqlzError::Connection(format!("ClickHouse runtime task failed: {}", error))
+    })?
+}
+
+async fn fetch_clickhouse_query(
     client: &clickhouse::Client,
     sql: &str,
     params: &[Value],
@@ -777,7 +869,7 @@ pub fn clickhouse_dialect() -> DialectInfo {
 fn clickhouse_explain_config() -> ExplainConfig {
     ExplainConfig {
         explain_format: Cow::Borrowed("EXPLAIN {sql}"),
-        query_plan_format: Some(Cow::Borrowed("EXPLAIN PLAN {sql}")),
+        query_plan_format: Some(Cow::Borrowed("EXPLAIN json = 1, indexes = 1 {sql}")),
         analyze_format: Some(Cow::Borrowed("EXPLAIN ANALYZE {sql}")),
         explain_description: Cow::Borrowed("Shows query execution plan"),
         query_plan_description: Some(Cow::Borrowed("Shows detailed execution plan")),

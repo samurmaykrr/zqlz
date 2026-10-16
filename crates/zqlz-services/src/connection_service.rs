@@ -11,6 +11,7 @@ use zqlz_connection::{
 use zqlz_core::{
     Connection, ConnectionFeatureSet, ConnectionScope, DriverCategory, ObjectFormDdlRequest,
     ObjectFormSpec, ObjectFormSpecRequest, ObjectsPanelData, ObjectsPanelManifest, TableInfo,
+    TableRef,
 };
 
 use crate::error::{ServiceError, ServiceResult};
@@ -128,8 +129,8 @@ pub struct SidebarSectionLoadResult {
 pub struct PaletteSchemaCommandsData {
     pub connection_name: String,
     pub object_capabilities: SidebarObjectCapabilities,
-    pub tables: Vec<String>,
-    pub views: Vec<String>,
+    pub tables: Vec<TableRef>,
+    pub views: Vec<TableRef>,
     /// True when the schema cache was stale or empty and a background refresh
     /// was started. Callers can await `refresh_palette_schema_commands_data`
     /// (off the UI thread) to render the fresh list when it arrives.
@@ -889,15 +890,18 @@ impl ConnectionService {
             .unwrap_or_else(|| "Unknown".to_string());
         // Serve whatever is known immediately, even past the cache TTL, so an
         // idle app never opens the palette with a silently empty table list.
-        let tables: Vec<String> = schema_service
+        let tables: Vec<TableRef> = schema_service
             .get_cached_tables_allow_stale(connection_id)
             .unwrap_or_default()
             .into_iter()
-            .map(|table| table.name)
+            .map(|table| TableRef::from_listing(None, table.schema, &table.name))
             .collect();
-        let views: Vec<String> = schema_service
-            .get_cached_view_names_allow_stale(connection_id)
-            .unwrap_or_default();
+        let views: Vec<TableRef> = schema_service
+            .get_cached_views_allow_stale(connection_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|view| TableRef::from_listing(None, view.schema, &view.name).view())
+            .collect();
 
         let needs_refresh = tables.is_empty() || schema_service.is_schema_cache_stale(connection_id);
         let is_refreshing = needs_refresh && self.spawn_palette_schema_refresh(connection_id);
@@ -973,8 +977,14 @@ impl ConnectionService {
         Ok(PaletteSchemaCommandsData {
             connection_name,
             object_capabilities,
-            tables: tables.into_iter().map(|table| table.name).collect(),
-            views,
+            tables: tables
+                .into_iter()
+                .map(|table| TableRef::from_listing(None, table.schema, &table.name))
+                .collect(),
+            views: views
+                .into_iter()
+                .map(|view| TableRef::from_listing(None, view.schema, &view.name).view())
+                .collect(),
             is_refreshing: false,
         })
     }

@@ -19,6 +19,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-postgres.workspace = true
+futures.workspace = true
 postgres-types.workspace = true
 chrono.workspace = true
 uuid.workspace = true

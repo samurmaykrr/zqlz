@@ -14,7 +14,7 @@ mod validation;
 
 pub use check_constraint_design::CheckConstraintDesign;
 pub use column_design::ColumnDesign;
-pub use data_types::{DataTypeCategory, DataTypeInfo, get_data_types};
+pub use data_types::{DataTypeCategory, DataTypeInfo, get_data_types, type_select_options};
 pub use foreign_key_design::ForeignKeyDesign;
 pub use index_design::IndexDesign;
 pub use table_design::TableDesign;

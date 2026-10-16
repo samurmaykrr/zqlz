@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, ElementId, Empty, Hsla, InteractiveElement, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px, rems,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    div, prelude::FluentBuilder as _, px, rems,
 };
 
 use crate::widgets::{
@@ -191,6 +191,7 @@ impl RenderOnce for Alert {
 
         h_flex()
             .id(self.id)
+            .role(Role::Alert)
             .w_full()
             .text_color(fg)
             .bg(bg)

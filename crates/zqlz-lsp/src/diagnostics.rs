@@ -127,7 +127,11 @@ impl SqlDiagnostics {
         // false positives for valid dialect-specific syntax that sqlparser already accepted.
         // Example: SQLite allows bracketed identifiers (`[name]`), while the SQL grammar
         // behind tree-sitter can flag them as ERROR nodes.
+        // MySQL is excluded: its sqlparser pass already knows which statements it can't
+        // judge, and tree-sitter's generic grammar flags valid MySQL (routine bodies,
+        // `DELIMITER`, `LOCK IN SHARE MODE`) next to the real error.
         let should_run_tree_sitter = !is_compound_routine_statement
+            && !crate::mysql_syntax::is_mysql(sqlparser_dialect.as_ref())
             && !skip_sql
             && !skip_tree_sitter
             && !is_incomplete_at_cursor

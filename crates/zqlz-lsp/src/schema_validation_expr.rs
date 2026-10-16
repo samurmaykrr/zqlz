@@ -6,6 +6,7 @@ use crate::{
     SchemaCache,
     schema_validation_issue::{ValidationIssue, ValidationSeverity, ValidationSymbolRole},
     schema_validation_lookup,
+    schema_validation_lookup::CteScope,
 };
 
 pub(crate) fn validate_expression<F>(
@@ -13,35 +14,76 @@ pub(crate) fn validate_expression<F>(
     available_tables: &HashMap<String, String>,
     select_aliases: &HashSet<String>,
     schema: &SchemaCache,
-    cte_names: &HashSet<String>,
+    cte_names: &CteScope,
     issues: &mut Vec<ValidationIssue>,
     validate_query: &mut F,
 ) where
-    F: FnMut(&Query, &SchemaCache, &HashSet<String>, &mut Vec<ValidationIssue>),
+    F: FnMut(&Query, &SchemaCache, &CteScope, &mut Vec<ValidationIssue>),
 {
     match expr {
         Expr::Identifier(ident) => {
             let column_name = ident.value.to_lowercase();
 
-            if select_aliases.contains(&column_name) {
+            // `@user_var` / `@@system_var` are variables, not columns.
+            if select_aliases.contains(&column_name)
+                || (ident.quote_style.is_none() && ident.value.starts_with('@'))
+            {
                 return;
             }
 
+            // A real table's columns can still be mid-flight through the
+            // async lazy-load that populates `schema.columns_by_table` (e.g.
+            // driven by sidebar table-tree expansion), even though the table
+            // itself is already known via `schema.tables`. Only treat a
+            // referenced table as evidence against the column when either its
+            // columns have loaded, or the table doesn't actually exist (so
+            // there is nothing left to wait on).
             let mut found = false;
+            let mut any_table_usable = false;
             for actual_table_name in available_tables.values() {
+                if let Some(relation_columns) =
+                    cte_names.get(&actual_table_name.to_ascii_lowercase())
+                {
+                    match relation_columns {
+                        Some(columns) => {
+                            any_table_usable = true;
+                            if columns.contains(&column_name) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        // A `SELECT *` relation's columns aren't known here,
+                        // so it can't disprove the reference.
+                        None => {
+                            found = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(columns) = schema_validation_lookup::schema_columns_for_table_name(
                     actual_table_name,
                     schema,
-                ) && columns
-                    .iter()
-                    .any(|column| column.name.eq_ignore_ascii_case(&column_name))
-                {
+                ) {
+                    any_table_usable = true;
+                    if columns
+                        .iter()
+                        .any(|column| column.name.eq_ignore_ascii_case(&column_name))
+                    {
+                        found = true;
+                        break;
+                    }
+                } else if !schema_validation_lookup::is_known_table(actual_table_name, schema) {
+                    any_table_usable = true;
+                } else {
+                    // A known relation whose columns aren't loaded (or can't be, like
+                    // `information_schema.tables`) may well own the column.
                     found = true;
                     break;
                 }
             }
 
-            if !found && !available_tables.is_empty() {
+            if !found && any_table_usable {
                 issues.push(ValidationIssue {
                     severity: ValidationSeverity::Warning,
                     message: format!("Column '{}' may not exist in available tables", ident.value),
@@ -56,6 +98,15 @@ pub(crate) fn validate_expression<F>(
         Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
             let table_or_alias = parts[0].value.to_lowercase();
             let column_name = parts[1].value.to_lowercase();
+
+            // `@@session.sql_mode` is a system variable; an alias from an enclosing
+            // query (correlated subquery) or a CTE can't be checked from here.
+            if (parts[0].quote_style.is_none() && parts[0].value.starts_with('@'))
+                || (!available_tables.contains_key(&table_or_alias)
+                    && cte_names.contains_key(&table_or_alias))
+            {
+                return;
+            }
 
             if let Some(actual_table_name) = available_tables.get(&table_or_alias) {
                 if let Some(columns) = schema_validation_lookup::schema_columns_for_table_name(
@@ -344,9 +395,58 @@ pub(crate) fn validate_expression<F>(
                 );
             }
         }
-        Expr::Subquery(query) => {
-            validate_query(query, schema, cte_names, issues);
+        Expr::Subquery(query)
+        | Expr::Exists {
+            subquery: query, ..
+        } => {
+            validate_subquery(
+                query,
+                available_tables,
+                schema,
+                cte_names,
+                issues,
+                validate_query,
+            );
+        }
+        Expr::InSubquery { expr, subquery, .. } => {
+            validate_expression(
+                expr,
+                available_tables,
+                select_aliases,
+                schema,
+                cte_names,
+                issues,
+                validate_query,
+            );
+            validate_subquery(
+                subquery,
+                available_tables,
+                schema,
+                cte_names,
+                issues,
+                validate_query,
+            );
         }
         _ => {}
     }
+}
+
+/// A subquery may reference the enclosing query's relations (correlated subquery).
+/// Their aliases enter its scope with unknown columns, so such references are not
+/// mistaken for unknown aliases.
+fn validate_subquery<F>(
+    query: &Query,
+    available_tables: &HashMap<String, String>,
+    schema: &SchemaCache,
+    cte_names: &CteScope,
+    issues: &mut Vec<ValidationIssue>,
+    validate_query: &mut F,
+) where
+    F: FnMut(&Query, &SchemaCache, &CteScope, &mut Vec<ValidationIssue>),
+{
+    let mut scope = cte_names.clone();
+    for alias in available_tables.keys() {
+        scope.entry(alias.clone()).or_insert(None);
+    }
+    validate_query(query, schema, &scope, issues);
 }

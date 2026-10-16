@@ -305,6 +305,32 @@ pub trait DatabaseDriver: Send + Sync {
     /// Supported features/capabilities
     fn capabilities(&self) -> DriverCapabilities;
 
+    /// Which object kinds this driver can actually enumerate for browsing.
+    ///
+    /// A kind must only be `true` when the driver has a real listing
+    /// implementation behind it — advertising a kind the driver cannot list
+    /// renders permanently empty UI sections. The default derives the answer
+    /// from [`DriverCapabilities`]; drivers with richer catalogs override it
+    /// with a curated constant.
+    fn object_kinds(&self) -> crate::ObjectKindSupport {
+        let capabilities = self.capabilities();
+        crate::ObjectKindSupport {
+            tables: true,
+            views: capabilities.supports_views,
+            triggers: capabilities.supports_triggers,
+            procedures: capabilities.supports_stored_procedures,
+            ..crate::ObjectKindSupport::NONE
+        }
+    }
+
+    /// Schema name to assume when objects carry no schema qualifier
+    /// (e.g. `public` for PostgreSQL, `dbo` for MSSQL, `main` for SQLite).
+    ///
+    /// `None` for drivers where the database itself is the namespace.
+    fn default_schema_name(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Default connection port (None for file-based databases like SQLite)
     fn default_port(&self) -> Option<u16> {
         None

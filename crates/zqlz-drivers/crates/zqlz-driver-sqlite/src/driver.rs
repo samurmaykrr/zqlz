@@ -5,13 +5,30 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, ObjectKindSupport, Result, ZqlzError,
     dialect_bundle_from_legacy_info,
 };
 
 use crate::{SqliteConnection, SqliteOpenMode, SqliteOpenOptions};
 
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+/// Object kinds SQLite actually lists via `sqlite_master`: tables, views, and
+/// triggers. SQLite has no stored functions, procedures, sequences, or custom
+/// types to enumerate.
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    materialized_views: false,
+    functions: false,
+    procedures: false,
+    triggers: true,
+    sequences: false,
+    types: false,
+    events: false,
+    domains: false,
+    extensions: false,
+};
 
 fn get_dialect_bundle() -> &'static DialectBundle {
     static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
@@ -80,6 +97,14 @@ impl DatabaseDriver for SqliteDriver {
 
     fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
         Some(get_dialect_bundle())
+    }
+
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        Some("main")
     }
 
     #[tracing::instrument(skip(self, config), fields(path = config.get_string("path").or_else(|| config.get_string("database")).as_deref()))]

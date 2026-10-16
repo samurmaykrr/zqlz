@@ -2382,7 +2382,7 @@ impl KeyValueEditorPanel {
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                             .track_scroll(&self.list_scroll_handle)
@@ -2544,7 +2544,7 @@ impl KeyValueEditorPanel {
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                             .track_scroll(&self.hash_scroll_handle)
@@ -2692,7 +2692,7 @@ impl KeyValueEditorPanel {
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                             .track_scroll(&self.zset_scroll_handle)
@@ -2848,7 +2848,7 @@ impl KeyValueEditorPanel {
                                     },
                                 ),
                             )
-                            .flex_grow()
+                            .flex_grow_1()
                             .size_full()
                             .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                             .track_scroll(&self.stream_scroll_handle)

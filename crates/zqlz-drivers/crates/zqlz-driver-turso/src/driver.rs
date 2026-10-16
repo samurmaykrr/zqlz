@@ -5,10 +5,24 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, ObjectKindSupport, Result, ZqlzError,
 };
 
 use crate::TursoConnection;
+
+pub(crate) const OBJECT_KINDS: ObjectKindSupport = ObjectKindSupport {
+    tables: true,
+    views: true,
+    materialized_views: false,
+    functions: false,
+    procedures: false,
+    triggers: true,
+    sequences: false,
+    types: false,
+    events: false,
+    domains: false,
+    extensions: false,
+};
 
 /// Turso remote database driver.
 pub struct TursoDriver;
@@ -72,6 +86,14 @@ impl DatabaseDriver for TursoDriver {
         }
     }
 
+    fn object_kinds(&self) -> ObjectKindSupport {
+        OBJECT_KINDS
+    }
+
+    fn default_schema_name(&self) -> Option<&'static str> {
+        Some("main")
+    }
+
     fn dialect_info(&self) -> DialectInfo {
         zqlz_driver_sqlite::sqlite_dialect()
     }
@@ -89,8 +111,17 @@ impl DatabaseDriver for TursoDriver {
         let auth_token = config
             .get_string("auth_token")
             .or_else(|| config.get_string("password"))
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| ZqlzError::Configuration("Turso requires an auth token".into()))?;
+            .filter(|value| !value.trim().is_empty());
+        let auth_token = match auth_token {
+            Some(token) => token,
+            // A local `sqld` / `turso dev` server has no auth; hosted ones always do.
+            None if is_loopback_url(&url) => String::new(),
+            None => {
+                return Err(ZqlzError::Configuration(
+                    "Turso requires an auth token".into(),
+                ));
+            }
+        };
 
         let connection = TursoConnection::connect(url, auth_token).await?;
         Ok(Arc::new(connection))
@@ -119,9 +150,9 @@ impl DatabaseDriver for TursoDriver {
                     .placeholder("libsql://database-org.turso.io")
                     .required()
                     .help_text("Use the Turso/libSQL remote URL"),
-                ConnectionField::password("auth_token", "Auth Token")
-                    .required()
-                    .help_text("Create with `turso db tokens create <database>`"),
+                ConnectionField::password("auth_token", "Auth Token").help_text(
+                    "Create with `turso db tokens create <database>`. Not needed for a local sqld server",
+                ),
                 ConnectionField::boolean("load_schema_on_connect", "Load Schema on Connect")
                     .default_value("true")
                     .help_text("Fetch tables and objects immediately after connecting")
@@ -129,6 +160,18 @@ impl DatabaseDriver for TursoDriver {
             ],
         }
     }
+}
+
+/// `http://127.0.0.1:8080`, `libsql://localhost`, `http://[::1]:8080`: a server on this machine.
+fn is_loopback_url(url: &str) -> bool {
+    let host = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = host.split(['/', '?']).next().unwrap_or_default();
+    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = match host.strip_prefix('[') {
+        Some(ipv6) => ipv6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 #[cfg(test)]
@@ -141,11 +184,44 @@ mod tests {
         let field = |id: &str| schema.fields.iter().find(|field| field.id == id).unwrap();
 
         assert!(field("url").required);
-        assert!(field("auth_token").required);
+        assert!(!field("auth_token").required);
         assert!(matches!(
             field("auth_token").field_type,
             zqlz_core::ConnectionFieldType::Password
         ));
+    }
+
+    #[test]
+    fn only_local_servers_may_skip_the_auth_token() {
+        for url in [
+            "http://127.0.0.1:8081",
+            "libsql://localhost",
+            "http://[::1]:8080/",
+            "http://u@localhost:1",
+        ] {
+            assert!(is_loopback_url(url), "{url}");
+        }
+        for url in [
+            "libsql://db-org.turso.io",
+            "https://localhost.evil.test",
+            "http://10.0.0.5:8080",
+        ] {
+            assert!(!is_loopback_url(url), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_urls_still_require_an_auth_token() {
+        let mut config = ConnectionConfig::new("turso", "t");
+        config
+            .params
+            .insert("url".into(), "libsql://db-org.turso.io".into());
+        let error = TursoDriver::new()
+            .connect(&config)
+            .await
+            .err()
+            .expect("must fail");
+        assert!(error.to_string().contains("auth token"));
     }
 
     #[test]

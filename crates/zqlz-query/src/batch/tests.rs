@@ -330,6 +330,34 @@ mod batch_executor_tests {
 
 mod split_statements_tests {
     use super::*;
+    use crate::batch::split_statements_for_dialect;
+
+    #[test]
+    fn test_split_for_mysql_honours_delimiter_and_hash_comments() {
+        let sql = "# setup\nDELIMITER //\nDROP PROCEDURE IF EXISTS p5//\nCREATE PROCEDURE p5() BEGIN SELECT 55 AS z; END//\nDELIMITER ;\nCALL p5()";
+        let expected = [
+            "DROP PROCEDURE IF EXISTS p5",
+            "CREATE PROCEDURE p5() BEGIN SELECT 55 AS z; END",
+            "CALL p5()",
+        ];
+        assert_eq!(split_statements_for_dialect(sql, Some("mysql")), expected);
+        assert_eq!(split_statements_for_dialect(sql, Some("mariadb")), expected);
+        // Without a MySQL dialect `#` is not a comment, but the directive still works.
+        assert_eq!(split_statements_for_dialect(sql, Some("postgres")).len(), 3);
+    }
+
+    #[test]
+    fn test_split_for_postgres_keeps_dollar_quotes_but_mysql_does_not() {
+        let sql = "SELECT $$a;b$$; SELECT 2";
+        assert_eq!(
+            split_statements_for_dialect(sql, Some("postgres")),
+            ["SELECT $$a;b$$", "SELECT 2"]
+        );
+        assert_eq!(
+            split_statements_for_dialect(sql, Some("mysql")),
+            ["SELECT $$a", "b$$", "SELECT 2"]
+        );
+    }
 
     #[test]
     fn test_split_simple_statements() {

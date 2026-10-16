@@ -8,6 +8,7 @@
 //! - Structured logging with spans for async operations
 //! - Performance tracing
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use tracing_subscriber::{
     EnvFilter, Layer,
@@ -15,6 +16,11 @@ use tracing_subscriber::{
     layer::SubscriberExt,
     util::SubscriberInitExt,
 };
+
+/// EnvFilter directives match by target string prefix (not whole crate name), so `zqlz=info`
+/// covers every workspace crate (`zqlz_driver_postgres`, `zqlz_editor`, `zqlz_services`, ...),
+/// including future ones; the more specific `zqlz_ui=warn` overrides it, `warn` mutes the rest.
+const PRODUCTION_FILTER: &str = "warn,zqlz=info,zqlz_ui=warn";
 
 /// Logging configuration
 #[derive(Debug, Clone)]
@@ -64,7 +70,7 @@ impl LoggingConfig {
             enable_console_logs: false,
             include_location: false,
             enable_spans: false,
-            default_filter: "warn,zqlz_app=info,zqlz_ui=warn,zqlz_core=info,zqlz_drivers=info,zqlz_connection=info,zqlz_query=info,zqlz_schema=info".to_string(),
+            default_filter: PRODUCTION_FILTER.to_string(),
         }
     }
 
@@ -169,13 +175,41 @@ pub fn init(config: LoggingConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Attach to the parent process's console.
+///
+/// The GUI is linked as a Windows-subsystem binary, so it starts with no console
+/// of its own. `zqlz --foreground` wants a real terminal session, which needs the
+/// console *device* (Ctrl+C, console mode) and not just the inherited handles.
+#[cfg(target_os = "windows")]
+pub fn attach_parent_console(requested: bool) {
+    if !requested {
+        return;
+    }
+
+    // Failing here just means there is no parent console — the normal case when
+    // launched from Explorer, a shortcut, or a file association.
+    unsafe {
+        let _ = windows_sys::Win32::System::Console::AttachConsole(
+            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn attach_parent_console(_requested: bool) {}
+
 /// Initialize logging with default configuration
 pub fn init_default() -> anyhow::Result<()> {
-    let config = if cfg!(debug_assertions) {
+    let mut config = if cfg!(debug_assertions) {
         LoggingConfig::development()
     } else {
         LoggingConfig::production()
     };
+
+    // `debug_assertions` picks the verbosity; the presence of a terminal picks
+    // the sink. A Windows-subsystem build launched from Explorer has no stdout,
+    // and the CLI nulls stdio when it launches the GUI in the background.
+    config.enable_console_logs = std::io::stdout().is_terminal();
 
     init(config)
 }
@@ -281,5 +315,49 @@ mod tests {
         let config = LoggingConfig::development();
         assert!(config.enable_console_logs);
         assert!(config.enable_json_logs);
+    }
+
+    #[test]
+    fn production_filter_covers_workspace_crates() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tracing_subscriber::Registry;
+
+        struct Count(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> Layer<S> for Count {
+            fn on_event(
+                &self,
+                _: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let dispatch = tracing::Dispatch::new(
+            Registry::default()
+                .with(Count(seen.clone()).with_filter(EnvFilter::new(PRODUCTION_FILTER))),
+        );
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info!(target: "zqlz_driver_postgres::connection", "x");
+            tracing::info!(target: "zqlz_services::schema_service", "x");
+            tracing::info!(target: "zqlz_editor::main_view", "x");
+            tracing::info!(target: "zqlz_query::engine", "x");
+            tracing::info!(target: "zqlz_lsp::hover", "x");
+        });
+        assert_eq!(seen.load(Ordering::SeqCst), 5);
+
+        seen.store(0, Ordering::SeqCst);
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info!(target: "gpui_macos::text_system", "x");
+            tracing::info!(target: "zqlz_ui::fonts", "x");
+            tracing::info!(target: "tokio_postgres::query", "x");
+            tracing::warn!(target: "gpui_macos::text_system", "x");
+        });
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 }

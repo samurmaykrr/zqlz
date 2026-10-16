@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod render_tests;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::HashMap;
@@ -5,7 +8,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 use uuid::Uuid;
-use zqlz_connection::SidebarObjectCapabilities;
+use zqlz_connection::{SidebarObjectCapabilities, SidebarSection};
+use zqlz_core::TableRef;
 use zqlz_fuzzy::{FuzzyMatcher, MatchQuality};
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, IndexPath, Sizable, ZqlzIcon,
@@ -173,11 +177,11 @@ pub enum CommandType {
     Static,
     Table {
         connection_id: Uuid,
-        table_name: String,
+        table: TableRef,
     },
     View {
         connection_id: Uuid,
-        view_name: String,
+        view: TableRef,
     },
     Connection {
         connection_id: Uuid,
@@ -253,22 +257,23 @@ impl Command {
         .with_search_fields()
     }
 
-    pub fn new_table(connection_id: Uuid, connection_name: &str, table_name: String) -> Self {
+    pub fn new_table(connection_id: Uuid, connection_name: &str, table: TableRef) -> Self {
         let category = CommandCategory::Table(connection_name.to_string());
+        let label = table.display_name();
         Self {
-            id: format!("table-{}-{}", connection_id, table_name),
-            label: table_name.clone(),
+            id: format!("table-{}-{}", connection_id, label),
+            label,
             category,
             command_type: CommandType::Table {
                 connection_id,
-                table_name: table_name.clone(),
+                table: table.clone(),
             },
             score: 0.0,
             last_used: None,
             action: None,
             palette_event: Some(CommandPaletteEvent::OpenTable {
                 connection_id,
-                table_name,
+                table,
             }),
             label_lower: String::new(),
             combined_search: String::new(),
@@ -276,22 +281,23 @@ impl Command {
         .with_search_fields()
     }
 
-    pub fn new_view(connection_id: Uuid, connection_name: &str, view_name: String) -> Self {
+    pub fn new_view(connection_id: Uuid, connection_name: &str, view: TableRef) -> Self {
         let category = CommandCategory::View(connection_name.to_string());
+        let label = view.display_name();
         Self {
-            id: format!("view-{}-{}", connection_id, view_name),
-            label: view_name.clone(),
+            id: format!("view-{}-{}", connection_id, label),
+            label,
             category,
             command_type: CommandType::View {
                 connection_id,
-                view_name: view_name.clone(),
+                view: view.clone(),
             },
             score: 0.0,
             last_used: None,
             action: None,
             palette_event: Some(CommandPaletteEvent::OpenView {
                 connection_id,
-                view_name,
+                view,
             }),
             label_lower: String::new(),
             combined_search: String::new(),
@@ -345,11 +351,11 @@ pub enum CommandPaletteEvent {
     ConnectToConnection(Uuid),
     OpenTable {
         connection_id: Uuid,
-        table_name: String,
+        table: TableRef,
     },
     OpenView {
         connection_id: Uuid,
-        view_name: String,
+        view: TableRef,
     },
     GoToDocumentSymbol {
         line: usize,
@@ -605,8 +611,8 @@ impl CommandPaletteDelegate {
         &mut self,
         connection_id: Uuid,
         connection_name: &str,
-        tables: &[String],
-        views: &[String],
+        tables: &[TableRef],
+        views: &[TableRef],
         object_capabilities: SidebarObjectCapabilities,
     ) {
         // An empty payload means the schema is still loading (or failed to
@@ -625,20 +631,20 @@ impl CommandPaletteDelegate {
             )
         });
 
-        for table_name in tables {
+        for table in tables {
             self.commands.push(Command::new_table(
                 connection_id,
                 connection_name,
-                table_name.clone(),
+                table.clone(),
             ));
         }
 
-        if object_capabilities.supports_views {
-            for view_name in views {
+        if object_capabilities.supports_section(SidebarSection::Views) {
+            for view in views {
                 self.commands.push(Command::new_view(
                     connection_id,
                     connection_name,
-                    view_name.clone(),
+                    view.clone(),
                 ));
             }
         }
@@ -1145,8 +1151,8 @@ impl CommandPalette {
         &mut self,
         connection_id: Uuid,
         connection_name: &str,
-        tables: &[String],
-        views: &[String],
+        tables: &[TableRef],
+        views: &[TableRef],
         object_capabilities: SidebarObjectCapabilities,
         cx: &mut Context<Self>,
     ) {
@@ -1245,3 +1251,99 @@ impl Focusable for CommandPalette {
 }
 
 impl EventEmitter<CommandPaletteEvent> for CommandPalette {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    actions!(
+        command_palette_delegate_tests,
+        [TestApplicationAction, TestEditorAction]
+    );
+
+    /// Records every usage entry it is asked to persist, so the test can
+    /// confirm the delegate actually routes through the attached backend
+    /// rather than just updating its in-memory frecency map.
+    #[derive(Default)]
+    struct RecordingPersistence {
+        entries: Mutex<Vec<CommandUsageEntry>>,
+    }
+
+    impl RecordingPersistence {
+        fn recorded_ids(&self) -> Vec<String> {
+            self.entries
+                .lock()
+                .map(|entries| entries.iter().map(|entry| entry.command_id.clone()).collect())
+                .unwrap_or_default()
+        }
+    }
+
+    impl CommandUsagePersistence for RecordingPersistence {
+        fn persist_usage(&self, entry: &CommandUsageEntry) {
+            if let Ok(mut entries) = self.entries.lock() {
+                entries.push(entry.clone());
+            }
+        }
+
+        fn load_all(&self) -> Vec<CommandUsageEntry> {
+            Vec::new()
+        }
+
+        fn clear_all(&self) {
+            if let Ok(mut entries) = self.entries.lock() {
+                entries.clear();
+            }
+        }
+    }
+
+    // `use super::*` pulls in gpui's glob re-export, which shadows the
+    // built-in `test` attribute with `gpui::test` (for GPUI-context tests).
+    // This test needs no window, so it must stay a plain test — the
+    // fully-qualified path bypasses that shadowing.
+    #[::core::prelude::v1::test]
+    fn command_palette_delegate_builder_tracks_commands_sections_and_persisted_usage() {
+        let persistence = Arc::new(RecordingPersistence::default());
+
+        let mut delegate = CommandPaletteDelegate::new();
+        delegate.set_persistence(persistence.clone());
+        delegate.set_action_context(None);
+        delegate.set_commands(vec![
+            Command::new_static(
+                "app-one",
+                "App One",
+                CommandCategory::Application,
+                TestApplicationAction,
+            ),
+            Command::new_static(
+                "editor-one",
+                "Editor One",
+                CommandCategory::Editor,
+                TestEditorAction,
+            ),
+        ]);
+
+        assert_eq!(delegate.total_commands_count(), 2);
+        assert_eq!(delegate.visible_commands_count(), 2);
+        assert!(!delegate.is_searching());
+        assert_eq!(
+            delegate
+                .sections
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Application", "Editor"],
+            "sections should be built in category priority order"
+        );
+
+        delegate
+            .usage_stats
+            .record_usage("app-one", delegate.persistence.as_deref());
+        assert_eq!(
+            persistence.recorded_ids(),
+            vec!["app-one".to_string()],
+            "recording usage should route through the attached persistence backend, not just \
+             update the in-memory frecency map"
+        );
+    }
+}

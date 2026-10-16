@@ -9,6 +9,7 @@
 
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::TableRef;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
 
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
@@ -36,9 +37,7 @@ impl ConnectionSidebar {
     pub(in crate::widgets) fn show_view_context_menu(
         &mut self,
         conn_id: Uuid,
-        view_name: String,
-        object_schema: Option<String>,
-        database_name: Option<String>,
+        view: TableRef,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -53,6 +52,9 @@ impl ConnectionSidebar {
             self.view_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
+        let view_name = view.name.clone();
+        let object_schema = view.schema.clone();
+        let database_name = view.database.clone();
         let sidebar_weak = cx.entity().downgrade();
         let view_for_menu = view_name.clone();
         let action_context = self.focus_handle.clone();
@@ -86,14 +88,12 @@ impl ConnectionSidebar {
                         .max_h(px(400.0))
                         .item(PopupMenuItem::new("Open View").on_click({
                             let sidebar = sidebar_weak.clone();
-                            let view = view_for_menu.clone();
-                            let db_name = database_name.clone();
+                            let view = view.clone().view();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::OpenView {
                                         connection_id: conn_id,
-                                        view_name: view.clone(),
-                                        database_name: db_name.clone(),
+                                        view: view.clone(),
                                     });
                                 });
                             }

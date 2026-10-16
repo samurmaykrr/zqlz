@@ -136,3 +136,49 @@ async fn duckdb_satisfies_schema_contract_in_memory() {
     assert!(!fk.referenced_table.is_empty());
     assert_eq!(fk.on_delete, ForeignKeyAction::NoAction);
 }
+
+#[tokio::test]
+async fn duckdb_unscoped_listing_covers_every_user_schema() {
+    use super::driver::DuckDbConnection;
+    use zqlz_core::Connection;
+
+    let raw = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+    raw.execute_batch(
+        "CREATE TABLE orders (id BIGINT);
+         CREATE SCHEMA lab;
+         CREATE TABLE lab.customers (id BIGINT);
+         CREATE VIEW lab.active_customers AS SELECT * FROM lab.customers;",
+    )
+    .expect("seed duckdb schemas");
+    let connection = DuckDbConnection::new(raw, ":memory:".to_string());
+    let introspection = connection.as_schema_introspection().expect("introspection");
+
+    let tables: Vec<String> = introspection
+        .list_tables(None)
+        .await
+        .expect("list tables")
+        .into_iter()
+        .map(|table| table.name)
+        .collect();
+    assert_eq!(tables, vec!["orders", "lab.customers"]);
+
+    // Only user views: DuckDB's own catalog views (duckdb_columns, sqlite_master, ...) stay out.
+    let views: Vec<String> = introspection
+        .list_views(None)
+        .await
+        .expect("list views")
+        .into_iter()
+        .map(|view| view.name)
+        .collect();
+    assert_eq!(views, vec!["lab.active_customers"]);
+
+    // A scoped listing keeps bare names.
+    let scoped: Vec<String> = introspection
+        .list_tables(Some("lab"))
+        .await
+        .expect("list lab tables")
+        .into_iter()
+        .map(|table| table.name)
+        .collect();
+    assert_eq!(scoped, vec!["customers"]);
+}

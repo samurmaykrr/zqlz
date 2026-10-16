@@ -23,27 +23,22 @@ use crate::workspace_state::{
 };
 
 use super::super::standalone_events::{
-    ApplyFiltersRequest, BecameActiveRequest, SaveNewRowRequest, handle_add_row_event,
-    handle_apply_filters_event, handle_became_active_event, handle_became_inactive_event,
-    handle_commit_changes_event, handle_delete_rows_event, handle_edit_cell_event,
-    handle_generate_sql_event, handle_last_page_requested_event, handle_limit_changed_event,
-    handle_limit_enabled_changed_event, handle_load_distinct_values_event,
-    handle_load_fk_values_event, handle_load_more_event, handle_page_changed_event,
-    handle_refresh_table_event, handle_save_cell_event, handle_save_new_row_event,
-    handle_sort_column_event,
+    BecameActiveRequest, SaveNewRowRequest, handle_add_row_event, handle_became_active_event,
+    handle_became_inactive_event, handle_commit_changes_event, handle_delete_rows_event,
+    handle_edit_cell_event, handle_generate_sql_event, handle_load_distinct_values_event,
+    handle_load_fk_values_event, handle_refresh_table_event, handle_save_cell_event,
+    handle_save_new_row_event, handle_sort_column_event,
 };
 
 pub(in crate::main_view) struct TableViewerSessionOpenRequest {
     pub connection_id: Uuid,
-    pub table_name: String,
-    pub database_name: Option<String>,
-    pub is_view: bool,
+    pub table: TableRef,
     pub session_state: Option<WorkspaceSessionTableViewerState>,
 }
 
+use zqlz_core::TableRef;
 use zqlz_services::{
-    OpenTableViewerCountDecisionRequest, OpenViewerInitialLoadRequest,
-    build_open_viewer_schema_viewer_metadata, decide_open_viewer_count_workflow,
+    FetchMode, FetchOutcome, TableService, build_open_viewer_schema_viewer_metadata,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -291,38 +286,6 @@ fn log_open_viewer_dropped_schema_details_panel_update(
     );
 }
 
-fn log_open_viewer_task_cleanup_guard_skip(
-    request_context: OpenViewerAsyncRequestContext,
-    current_task_generation: u64,
-    message: &'static str,
-) {
-    tracing::debug!(
-        connection_id = %request_context.connection_id,
-        table_name = request_context.table_name,
-        database_name = request_context.database_name,
-        request_generation = request_context.request_generation,
-        task_generation = request_context.task_generation,
-        current_task_generation,
-        "{}",
-        message
-    );
-}
-
-fn log_open_viewer_background_count_failure(
-    request_context: OpenViewerAsyncRequestContext,
-    error: &dyn std::fmt::Display,
-) {
-    tracing::warn!(
-        error = %error,
-        connection_id = %request_context.connection_id,
-        table_name = request_context.table_name,
-        database_name = request_context.database_name,
-        request_generation = request_context.request_generation,
-        task_generation = request_context.task_generation,
-        "Background row count failed during open-viewer load"
-    );
-}
-
 fn capture_open_viewer_request_ownership_if_current(
     viewer: &TableViewerPanel,
     request_context: OpenViewerAsyncRequestContext,
@@ -330,7 +293,11 @@ fn capture_open_viewer_request_ownership_if_current(
 ) -> Option<OpenViewerRequestOwnershipSnapshot> {
     let ownership_snapshot = OpenViewerRequestOwnershipSnapshot::from_viewer(viewer);
 
-    if ownership_snapshot.current_request_generation != request_context.request_generation {
+    // A later reload owns the rows and the spinner, but the open's schema metadata
+    // still describes this table and must land regardless.
+    if update_kind.is_row_update()
+        && ownership_snapshot.current_request_generation != request_context.request_generation
+    {
         log_open_viewer_request_guard_skip(
             request_context,
             &ownership_snapshot,
@@ -375,8 +342,7 @@ fn read_open_viewer_request_ownership_if_current(
 #[derive(Clone, Copy, Debug)]
 enum OpenViewerAsyncUpdateKind {
     Viewer,
-    ViewerWindow,
-    BackgroundCount,
+    Metadata,
     SchemaDetails,
     SchemaDetailsPreApply,
 }
@@ -446,11 +412,14 @@ fn log_open_viewer_schema_details_loading_reset_outcome(
 }
 
 impl OpenViewerAsyncUpdateKind {
+    fn is_row_update(self) -> bool {
+        matches!(self, Self::Viewer)
+    }
+
     fn stale_debug_message(self) -> &'static str {
         match self {
             Self::Viewer => "Skipped stale open-viewer async update",
-            Self::ViewerWindow => "Skipped stale open-viewer async window update",
-            Self::BackgroundCount => "Skipped stale open-viewer background-count async update",
+            Self::Metadata => "Skipped stale open-viewer metadata update",
             Self::SchemaDetails => "Skipped stale schema-details async update",
             Self::SchemaDetailsPreApply => "Skipped stale schema-details pre-apply revalidation",
         }
@@ -459,11 +428,8 @@ impl OpenViewerAsyncUpdateKind {
     fn ownership_changed_debug_message(self) -> &'static str {
         match self {
             Self::Viewer => "Skipped open-viewer async update because viewer ownership changed",
-            Self::ViewerWindow => {
-                "Skipped open-viewer async window update because viewer ownership changed"
-            }
-            Self::BackgroundCount => {
-                "Skipped open-viewer background-count update because viewer ownership changed"
+            Self::Metadata => {
+                "Skipped open-viewer metadata update because viewer ownership changed"
             }
             Self::SchemaDetails => "Skipped schema-details update because viewer ownership changed",
             Self::SchemaDetailsPreApply => {
@@ -475,10 +441,7 @@ impl OpenViewerAsyncUpdateKind {
     fn dropped_debug_message(self) -> &'static str {
         match self {
             Self::Viewer => "Skipped open-viewer async update after viewer dropped",
-            Self::ViewerWindow => "Skipped open-viewer async window update after viewer dropped",
-            Self::BackgroundCount => {
-                "Skipped open-viewer background-count update after viewer dropped"
-            }
+            Self::Metadata => "Skipped open-viewer metadata update after viewer dropped",
             Self::SchemaDetails => "Skipped schema-details update after viewer dropped",
             Self::SchemaDetailsPreApply => {
                 "Skipped schema-details pre-apply revalidation after viewer dropped"
@@ -489,10 +452,7 @@ impl OpenViewerAsyncUpdateKind {
     fn dropped_panel_debug_message(self) -> &'static str {
         match self {
             Self::Viewer => "Skipped open-viewer async update after panel dropped",
-            Self::ViewerWindow => "Skipped open-viewer async window update after panel dropped",
-            Self::BackgroundCount => {
-                "Skipped open-viewer background-count update after panel dropped"
-            }
+            Self::Metadata => "Skipped open-viewer metadata update after panel dropped",
             Self::SchemaDetails => {
                 "Skipped schema-details update after schema details panel dropped"
             }
@@ -719,25 +679,16 @@ impl MainView {
     fn handle_open_viewer_navigate_to_fk_table_event(
         &mut self,
         connection_id: Uuid,
-        referenced_table: &str,
-        database_name: Option<String>,
+        table: zqlz_core::TableRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::info!(
             connection_id = %connection_id,
-            referenced_table = %referenced_table,
-            database_name = ?database_name,
+            table = ?table,
             "Navigating to foreign-key referenced table"
         );
-        self.open_table_viewer(
-            connection_id,
-            referenced_table.to_owned(),
-            database_name,
-            false,
-            window,
-            cx,
-        );
+        self.open_table_viewer(connection_id, table, window, cx);
     }
 
     fn handle_open_viewer_refresh_table_event(
@@ -765,43 +716,19 @@ impl MainView {
         );
     }
 
-    fn handle_open_viewer_apply_filters_event(
-        &mut self,
-        request: ApplyFiltersRequest,
-        viewer_entity_for_events: &Entity<TableViewerPanel>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Filter application can reorder/remap visible rows, so clear active
-        // cell edits first to avoid retaining stale row-index references.
-        self.cell_editor_panel.update(cx, |editor, cx| {
-            editor.clear(cx);
-        });
-
-        handle_apply_filters_event(request, viewer_entity_for_events.clone(), window, cx);
-    }
-
     fn persist_open_viewer_state_snapshot(
         &mut self,
         viewer_entity: &Entity<TableViewerPanel>,
-        connection_id: Uuid,
-        table_name: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some((_, _, database_name, viewer_state)) =
+        let Some((connection_id, table, viewer_state)) =
             viewer_entity.read_with(cx, |panel, cx| panel.session_state_snapshot(cx))
         else {
             return;
         };
 
         self.workspace_state.update(cx, |state, cx| {
-            state.update_table_viewer_state(
-                connection_id,
-                table_name,
-                database_name.as_deref(),
-                viewer_state,
-                cx,
-            );
+            state.update_table_viewer_state(connection_id, &table, viewer_state, cx);
         });
     }
 
@@ -825,16 +752,7 @@ impl MainView {
                 viewer_entity_for_events.update(cx, |panel, cx| {
                     panel.hide_column(column_name, cx);
                 });
-                if let Some((connection_id, table_name, _, _)) = viewer_entity_for_events
-                    .read_with(cx, |panel, cx| panel.session_state_snapshot(cx))
-                {
-                    self.persist_open_viewer_state_snapshot(
-                        viewer_entity_for_events,
-                        connection_id,
-                        &table_name,
-                        cx,
-                    );
-                }
+                self.persist_open_viewer_state_snapshot(viewer_entity_for_events, cx);
             }
             TableViewerEvent::FreezeColumn { col_ix } => {
                 viewer_entity_for_events.update(cx, |panel, cx| {
@@ -874,16 +792,7 @@ impl MainView {
             // Column-visibility data updates are panel-owned and intentionally
             // ignored in the app event layer.
             TableViewerEvent::ColumnVisibilityChanged { .. } => {
-                if let Some((connection_id, table_name, _, _)) = viewer_entity_for_events
-                    .read_with(cx, |panel, cx| panel.session_state_snapshot(cx))
-                {
-                    self.persist_open_viewer_state_snapshot(
-                        viewer_entity_for_events,
-                        connection_id,
-                        &table_name,
-                        cx,
-                    );
-                }
+                self.persist_open_viewer_state_snapshot(viewer_entity_for_events, cx);
             }
             // Discard handling is panel-owned and immediately reverts delegate state.
             TableViewerEvent::DiscardChanges => {}
@@ -914,18 +823,14 @@ impl MainView {
     pub(in crate::main_view) fn open_table_viewer(
         &mut self,
         connection_id: Uuid,
-        table_name: String,
-        database_name: Option<String>,
-        is_view: bool,
+        table: TableRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.open_table_viewer_with_session_state(
             TableViewerSessionOpenRequest {
                 connection_id,
-                table_name,
-                database_name,
-                is_view,
+                table,
                 session_state: None,
             },
             window,
@@ -941,11 +846,12 @@ impl MainView {
     ) {
         let TableViewerSessionOpenRequest {
             connection_id,
-            table_name,
-            database_name,
-            is_view,
+            table,
             session_state,
         } = request;
+        let table_name = table.display_name();
+        let database_name = table.database.clone();
+        let is_view = table.is_view;
 
         // Verify prerequisites before creating viewer entities/subscriptions so
         // invalid connection entry points fail fast without wiring orphaned UI work.
@@ -959,7 +865,11 @@ impl MainView {
             return;
         };
 
-        let Some(conn) = app_state.connection_service.get_connection(connection_id) else {
+        if app_state
+            .connection_service
+            .get_connection(connection_id)
+            .is_none()
+        {
             tracing::error!(
                 connection_id = %connection_id,
                 table_name = %table_name,
@@ -967,7 +877,7 @@ impl MainView {
                 "Cannot open table viewer because connection was not found"
             );
             return;
-        };
+        }
 
         let table_service = app_state.table_service.clone();
         let schema_service = app_state.schema_service.clone();
@@ -1001,9 +911,8 @@ impl MainView {
             panel.begin_loading_table(connection_id, table_name.clone(), database_name.clone(), cx)
         });
 
-        self.active_table_load_task_generation =
-            self.active_table_load_task_generation.saturating_add(1);
-        let active_task_generation = self.active_table_load_task_generation;
+        self.open_viewer_request_counter = self.open_viewer_request_counter.saturating_add(1);
+        let active_task_generation = self.open_viewer_request_counter;
 
         // Clone entities needed by the event subscription closure
         let viewer_entity_for_events = viewer_entity.clone();
@@ -1016,7 +925,27 @@ impl MainView {
         let inspector_panel = self.inspector_panel.clone();
 
         let table_viewer_subscription = cx.subscribe_in(&viewer_entity, window, {
-            move |_this, _viewer, event: &TableViewerEvent, window, cx| {
+            move |_this, viewer, event: &TableViewerEvent, window, cx| {
+                let (connection_id, table_name, database_name, driver_category) =
+                    viewer.read_with(cx, |viewer, _cx| {
+                        (
+                            viewer.connection_id().unwrap_or_default(),
+                            viewer.table_name().unwrap_or_default(),
+                            viewer.database_name(),
+                            viewer.driver_category,
+                        )
+                    });
+                let (connection_id, table_name, database_name, driver_category) = (
+                    &connection_id,
+                    &table_name,
+                    &database_name,
+                    &driver_category,
+                );
+                // Relational viewers know their resolved table; key-value and
+                // document viewers are named by key or collection.
+                let viewer_table_ref = viewer.read(cx).table().unwrap_or_else(|| {
+                    zqlz_core::TableRef::new(database_name.clone(), None, table_name.clone())
+                });
                 match event {
                     TableViewerEvent::HideColumn { .. }
                     | TableViewerEvent::FreezeColumn { .. }
@@ -1038,8 +967,6 @@ impl MainView {
                         );
                     }
                     TableViewerEvent::EditRow {
-                        connection_id,
-                        table_name,
                         row_index,
                         row_values,
                         column_meta,
@@ -1063,8 +990,6 @@ impl MainView {
                         );
                     }
                     TableViewerEvent::AddRowForm {
-                        connection_id,
-                        table_name,
                         column_meta,
                         row_values,
                         row_index,
@@ -1081,8 +1006,6 @@ impl MainView {
                         );
                     }
                     TableViewerEvent::RowSelected {
-                        connection_id,
-                        table_name,
                         row_index,
                         row_values,
                         column_meta,
@@ -1107,8 +1030,6 @@ impl MainView {
                         );
                     }
                     TableViewerEvent::CellSelected {
-                        connection_id,
-                        table_name,
                         row_index,
                         col_index,
                         row_values,
@@ -1132,12 +1053,7 @@ impl MainView {
                             cx,
                         );
                     }
-                    TableViewerEvent::RefreshTable {
-                        connection_id,
-                        table_name,
-                        driver_category,
-                        ..
-                    } => {
+                    TableViewerEvent::RefreshTable => {
                         _this.handle_open_viewer_refresh_table_event(
                             *connection_id,
                             table_name,
@@ -1147,11 +1063,7 @@ impl MainView {
                             cx,
                         );
                     }
-                    TableViewerEvent::AddRow {
-                        connection_id,
-                        table_name,
-                        all_column_names,
-                    } => handle_add_row_event(
+                    TableViewerEvent::AddRow { all_column_names } => handle_add_row_event(
                         *connection_id,
                         table_name,
                         all_column_names,
@@ -1159,64 +1071,15 @@ impl MainView {
                         window,
                         cx,
                     ),
-                    TableViewerEvent::LoadDistinctValues {
-                        connection_id,
-                        table_name,
-                        column_name,
-                    } => handle_load_distinct_values_event(
-                        *connection_id,
-                        table_name,
-                        column_name,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    ),
-                    TableViewerEvent::PageChanged {
-                        connection_id,
-                        table_name,
-                        page,
-                        limit,
-                    } => handle_page_changed_event(
-                        *connection_id,
-                        table_name,
-                        *page,
-                        *limit,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    ),
-                    TableViewerEvent::LimitChanged {
-                        connection_id,
-                        table_name,
-                        limit,
-                    } => handle_limit_changed_event(
-                        *connection_id,
-                        table_name,
-                        *limit,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    ),
-                    TableViewerEvent::LimitEnabledChanged {
-                        connection_id,
-                        table_name,
-                        enabled,
-                    } => handle_limit_enabled_changed_event(
-                        *connection_id,
-                        table_name,
-                        *enabled,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    ),
-                    TableViewerEvent::LoadMore { current_offset } => handle_load_more_event(
-                        *current_offset,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    ),
+                    TableViewerEvent::LoadDistinctValues { column_name } => {
+                        handle_load_distinct_values_event(
+                            column_name,
+                            viewer_entity_for_events.clone(),
+                            window,
+                            cx,
+                        )
+                    }
                     TableViewerEvent::LoadFkValues {
-                        connection_id,
                         referenced_table,
                         referenced_schema,
                         cache_key,
@@ -1225,7 +1088,6 @@ impl MainView {
                         limit,
                         request_id,
                     } => handle_load_fk_values_event(
-                        *connection_id,
                         referenced_table,
                         referenced_schema.as_deref(),
                         cache_key,
@@ -1237,19 +1099,7 @@ impl MainView {
                         window,
                         cx,
                     ),
-                    TableViewerEvent::LastPageRequested {
-                        connection_id,
-                        table_name,
-                    } => handle_last_page_requested_event(
-                        *connection_id,
-                        table_name,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    ),
                     TableViewerEvent::SaveCell {
-                        table_name,
-                        connection_id,
                         row,
                         col,
                         column_name,
@@ -1299,8 +1149,6 @@ impl MainView {
                         });
                     }
                     TableViewerEvent::EditCell {
-                        table_name,
-                        connection_id,
                         row,
                         col,
                         column_meta,
@@ -1337,15 +1185,10 @@ impl MainView {
                             cx,
                         );
                     }
-                    TableViewerEvent::BecameActive {
-                        connection_id,
-                        table_name,
-                        database_name,
-                    } => handle_became_active_event(
+                    TableViewerEvent::BecameActive => handle_became_active_event(
                         BecameActiveRequest {
                             connection_id: *connection_id,
-                            table_name: table_name.clone(),
-                            database_name: database_name.clone(),
+                            table: viewer_table_ref.clone(),
                         },
                         schema_details_panel.clone(),
                         results_panel.clone(),
@@ -1354,16 +1197,13 @@ impl MainView {
                         window,
                         cx,
                     ),
-                    TableViewerEvent::BecameInactive {
-                        connection_id,
-                        table_name,
-                    } => handle_became_inactive_event(
+                    TableViewerEvent::BecameInactive => handle_became_inactive_event(
                         *connection_id,
-                        table_name,
+                        &viewer_table_ref,
                         &schema_details_panel,
                         cx,
                     ),
-                    TableViewerEvent::AddRedisKey { connection_id } => {
+                    TableViewerEvent::AddRedisKey => {
                         _this.handle_open_viewer_add_redis_key_event(
                             *connection_id,
                             &viewer_entity_for_events,
@@ -1371,29 +1211,21 @@ impl MainView {
                             cx,
                         );
                     }
-                    TableViewerEvent::NavigateToFkTable {
-                        connection_id,
-                        referenced_table,
-                        database_name,
-                    } => {
+                    TableViewerEvent::NavigateToFkTable { table } => {
                         _this.handle_open_viewer_navigate_to_fk_table_event(
                             *connection_id,
-                            referenced_table,
-                            database_name.clone(),
+                            table.clone(),
                             window,
                             cx,
                         );
                     }
                     TableViewerEvent::SaveNewRow {
-                        table_name,
-                        connection_id,
                         new_row_index,
                         row_data,
                         column_names,
                     } => {
                         handle_save_new_row_event(
                             SaveNewRowRequest {
-                                connection_id: *connection_id,
                                 table_name: table_name.clone(),
                                 new_row_index: *new_row_index,
                                 row_data: row_data.clone(),
@@ -1404,39 +1236,15 @@ impl MainView {
                             cx,
                         );
                     }
-                    TableViewerEvent::ApplyFilters {
-                        connection_id,
-                        table_name,
-                        filters,
-                        sorts,
-                        visible_columns,
-                        search_text,
-                        search_columns,
-                    } => {
-                        _this.persist_open_viewer_state_snapshot(
-                            &viewer_entity_for_events,
-                            *connection_id,
-                            table_name,
-                            cx,
-                        );
-                        _this.handle_open_viewer_apply_filters_event(
-                            ApplyFiltersRequest {
-                                connection_id: *connection_id,
-                                table_name: table_name.clone(),
-                                filters: filters.clone(),
-                                sorts: sorts.clone(),
-                                visible_columns: visible_columns.clone(),
-                                search_text: search_text.clone(),
-                                search_columns: search_columns.clone(),
-                            },
-                            &viewer_entity_for_events,
-                            window,
-                            cx,
-                        );
+                    TableViewerEvent::FiltersApplied => {
+                        // The reload can remap rows, so drop any edit that points at
+                        // a row index.
+                        _this.cell_editor_panel.update(cx, |editor, cx| {
+                            editor.clear(cx);
+                        });
+                        _this.persist_open_viewer_state_snapshot(&viewer_entity_for_events, cx);
                     }
                     TableViewerEvent::DeleteRows {
-                        connection_id,
-                        table_name,
                         all_column_names,
                         rows_to_delete,
                     } => {
@@ -1463,8 +1271,6 @@ impl MainView {
                         );
                     }
                     TableViewerEvent::CommitChanges {
-                        connection_id,
-                        table_name,
                         modified_cells,
                         deleted_rows,
                         new_rows,
@@ -1493,7 +1299,6 @@ impl MainView {
                         );
                     }
                     TableViewerEvent::GenerateChangesSql {
-                        table_name,
                         modified_cells,
                         deleted_rows,
                         new_rows,
@@ -1501,45 +1306,39 @@ impl MainView {
                         all_rows,
                         ..
                     } => handle_generate_sql_event(
-                        table_name.clone(),
                         modified_cells.clone(),
                         deleted_rows.clone(),
                         new_rows.clone(),
                         column_meta.clone(),
                         all_rows.clone(),
+                        &viewer_entity_for_events,
+                        window,
                         cx,
                     ),
                     TableViewerEvent::SortColumn {
-                        connection_id,
-                        table_name,
                         column_name,
                         direction,
                     } => {
-                        let (database_name, mut viewer_state) =
-                            viewer_entity_for_events.read_with(cx, |panel, cx| {
-                                panel
-                                    .session_state_snapshot(cx)
-                                    .map(|(_, _, database_name, viewer_state)| {
-                                        (database_name, viewer_state)
-                                    })
-                                    .unwrap_or_default()
-                            });
-                        if viewer_state.sorts.is_empty() {
-                            viewer_state.sorts.push(WorkspaceSessionSortCriterion {
-                                id: 1,
-                                column: column_name.clone(),
-                                direction: format!("{:?}", direction),
+                        if let Some((connection_id, table, mut viewer_state)) =
+                            viewer_entity_for_events
+                                .read_with(cx, |panel, cx| panel.session_state_snapshot(cx))
+                        {
+                            if viewer_state.sorts.is_empty() {
+                                viewer_state.sorts.push(WorkspaceSessionSortCriterion {
+                                    id: 1,
+                                    column: column_name.clone(),
+                                    direction: format!("{:?}", direction),
+                                });
+                            }
+                            _this.workspace_state.update(cx, |state, cx| {
+                                state.update_table_viewer_state(
+                                    connection_id,
+                                    &table,
+                                    viewer_state,
+                                    cx,
+                                );
                             });
                         }
-                        _this.workspace_state.update(cx, |state, cx| {
-                            state.update_table_viewer_state(
-                                *connection_id,
-                                table_name,
-                                database_name.as_deref(),
-                                viewer_state,
-                                cx,
-                            );
-                        });
                         handle_sort_column_event(
                             *connection_id,
                             table_name,
@@ -1549,27 +1348,6 @@ impl MainView {
                             window,
                             cx,
                         );
-                    }
-                    TableViewerEvent::CountCompleted {
-                        connection_id,
-                        table_name,
-                        database_name,
-                        total_rows,
-                        is_estimated,
-                        request_generation,
-                        ..
-                    } => {
-                        viewer_entity_for_events.update(cx, |panel, cx| {
-                            panel.update_total_rows(
-                                *connection_id,
-                                *total_rows,
-                                *is_estimated,
-                                table_name,
-                                database_name.as_deref(),
-                                *request_generation,
-                                cx,
-                            );
-                        });
                     }
                 }
             }
@@ -1584,12 +1362,9 @@ impl MainView {
             state.record_open_viewer_tab(
                 WorkspaceSessionViewerTab {
                     connection_id,
-                    kind: WorkspaceSessionViewerKind::Table {
-                        table_name: table_name.clone(),
-                        database_name: database_name.clone(),
-                        is_view,
-                        viewer_state: None,
-                    },
+                    // Recorded with the state it opens with, so a restore that
+                    // records the same tab replaces this entry instead of adding one.
+                    kind: WorkspaceSessionViewerKind::table(&table, session_state.clone()),
                 },
                 cx,
             );
@@ -1600,23 +1375,27 @@ impl MainView {
         let schema_details_panel_weak = self.schema_details_panel.downgrade();
         let table_name_for_spawn = table_name.clone();
         let database_name_for_spawn = database_name;
-        let schema_qualifier = zqlz_core::resolve_schema_qualifier_for_connection(
-            conn.as_ref(),
-            database_name_for_spawn.as_deref(),
-        );
 
         // Only show a loading spinner in the schema panel when the details are not
         // already warm in the cache — avoids a flicker for repeat opens.
-        let details_already_cached = schema_service
-            .peek_table_details_cache(connection_id, &table_name, schema_qualifier.as_deref())
+        let details_already_cached = connection_service
+            .get_connection_for_database_cached(connection_id, table.database.as_deref())
+            .and_then(|connection| {
+                schema_service.peek_table_details_cache(
+                    connection.as_ref(),
+                    connection_id,
+                    &table.name,
+                    table.schema.as_deref(),
+                )
+            })
             .is_some();
         if !details_already_cached {
             self.schema_details_panel.update(cx, |panel, cx| {
-                panel.set_loading_for_table(connection_id, &table_name, cx);
+                panel.set_loading_for_table(connection_id, &table, cx);
             });
         }
 
-        let task = cx.spawn_in(window, async move |this, cx| {
+        let task = cx.spawn_in(window, async move |main_view, cx| {
             tracing::info!(
                 connection_id = %connection_id,
                 table_name = %table_name_for_spawn,
@@ -1667,20 +1446,12 @@ impl MainView {
                         cx,
                     );
 
-                    Self::clear_active_table_load_task_if_current_generation(
-                        &this,
-                        request_context,
-                        cx,
-                        "Table load task cleanup skipped after connection resolution failure because main view dropped",
-                    );
-
                     return anyhow::Ok(());
                 }
             };
             let conn = resolved_connection.connection;
             let effective_database_name_for_spawn = resolved_connection.effective_database_name;
             let driver_category = resolved_connection.driver_category;
-            let is_key_value = driver_category == zqlz_core::DriverCategory::KeyValue;
             let request_context = OpenViewerAsyncRequestContext::new(
                 connection_id,
                 &table_name_for_spawn,
@@ -1689,94 +1460,116 @@ impl MainView {
                 active_task_generation,
             );
 
-            let load_outcome = table_service
-                .load_open_viewer_initial_data(
-                    schema_service.clone(),
-                    OpenViewerInitialLoadRequest {
-                        connection: conn.clone(),
-                        connection_id,
-                        table_name: table_name_for_spawn.clone(),
-                        database_name: database_name_for_spawn.clone(),
-                        is_view,
-                        limit: Some(1000),
-                    },
-                )
+            // Resolve once; the viewer keeps the result for every later page, and
+            // the session remembers it so a restore needs no lookup.
+            let requested_table = table;
+            let table = table_service
+                .resolve_table(conn.clone(), requested_table.clone())
+                .await;
+            if table != requested_table
+                && let Err(error) = main_view.update(cx, |main_view, cx| {
+                    main_view.workspace_state.update(cx, |state, cx| {
+                        state.replace_table_viewer_tab(
+                            connection_id,
+                            &requested_table,
+                            &table,
+                            cx,
+                        );
+                    });
+                })
+            {
+                tracing::debug!(%error, "Workspace closed before the open resolved");
+            }
+
+            // Schema metadata decorates the viewer; it does not gate it. Start it now
+            // and let it land on its own, so the grid is never held behind a DDL or
+            // constraint query the user did not ask for.
+            let schema_task = cx.background_spawn({
+                let table_service = table_service.clone();
+                let schema_service = schema_service.clone();
+                let connection = conn.clone();
+                let table = table.clone();
+                async move {
+                    table_service
+                        .load_open_viewer_schema(
+                            schema_service,
+                            connection,
+                            connection_id,
+                            &table,
+                            is_view,
+                        )
+                        .await
+                }
+            });
+
+            // Every page sorts by the key, so the first one needs it before the
+            // schema load that otherwise supplies it.
+            let primary_key_columns = table_service
+                .primary_key_columns(conn.clone(), &table)
                 .await;
 
-            let browse_result = load_outcome.browse_result;
-            let schema_result = load_outcome.schema_result;
-            let used_schema_only_fallback = load_outcome.used_schema_only_fallback;
-            let schema_qualifier = load_outcome.schema_qualifier;
-            // Deliver browse data first so row content appears quickly, then schema metadata.
-            let needs_background_count = match browse_result {
-                Ok(query_result) => {
-                    let needs_background_count = decide_open_viewer_count_workflow(
-                        OpenTableViewerCountDecisionRequest {
-                            total_rows: query_result.total_rows,
-                            is_key_value,
-                            supports_fast_exact_count: conn.supports_fast_exact_count(),
-                        },
-                    )
-                    .needs_background_count;
-
-                    let table_name_for_initial_load = table_name_for_spawn.clone();
-                    let database_name_for_initial_load =
-                        effective_database_name_for_spawn.clone();
-
-                    Self::update_open_viewer_in_if_current_request_with_kind(
-                        &viewer_weak,
-                        request_context,
-                        OpenViewerAsyncUpdateKind::ViewerWindow,
-                        cx,
-                        move |viewer, window, cx| {
-                            viewer.load_table(
-                                connection_id,
-                                connection_name.to_string(),
-                                table_name_for_initial_load.clone(),
-                                database_name_for_initial_load.clone(),
-                                is_view,
-                                query_result,
-                                driver_category,
-                                window,
-                                cx,
-                            );
-                        },
+            let resolved_table = table.clone();
+            // The first page goes through the same fetch path as every later one.
+            let Some(pending_fetch) = Self::update_open_viewer_if_current_request_with_kind(
+                &viewer_weak,
+                request_context,
+                OpenViewerAsyncUpdateKind::Viewer,
+                cx,
+                |viewer, cx| {
+                    viewer.set_resolved_table(
+                        table,
+                        effective_database_name_for_spawn.clone(),
+                        connection_name.clone(),
+                        is_view,
+                        driver_category,
+                        primary_key_columns,
                     );
+                    viewer.start_fetch(FetchMode::Page(1), conn.clone(), cx)
+                },
+            )
+            .flatten() else {
+                return anyhow::Ok(());
+            };
+            let generation = pending_fetch.generation;
+            let apply_fetch = |outcome, cx: &mut AsyncWindowContext| {
+                if let Err(error) = viewer_weak.update_in(cx, |viewer, window, cx| {
+                    viewer.apply_fetch(generation, outcome, window, cx);
+                }) {
+                    tracing::debug!(%error, "First page arrived after the viewer closed");
+                }
+            };
 
-                    if used_schema_only_fallback {
-                        tracing::warn!(
-                            connection_id = %connection_id,
-                            table_name = %table_name_for_spawn,
-                            request_generation = initial_request_generation,
-                            task_generation = active_task_generation,
-                            database_name = ?effective_database_name_for_spawn,
-                            "Opened table viewer in schema-only mode after browse failure"
-                        );
-                    }
-
-                    needs_background_count
+            let schema_result = match pending_fetch.rows.await {
+                Ok(outcome) => {
+                    apply_fetch(Ok(outcome), cx);
+                    schema_task.await
                 }
                 Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        connection_id = %request_context.connection_id,
-                        table_name = request_context.table_name,
-                        database_name = request_context.database_name,
-                        request_generation = request_context.request_generation,
-                        task_generation = request_context.task_generation,
-                        "Failed initial table browse load during open-viewer flow"
-                    );
-
-                    Self::update_open_viewer_if_current_request_with_kind(
-                        &viewer_weak,
-                        request_context,
-                        OpenViewerAsyncUpdateKind::Viewer,
-                        cx,
-                        |viewer, cx| {
-                            viewer.set_loading(false, cx);
-                        },
-                    );
-                    false
+                    // Some relations refuse a plain SELECT but still describe their
+                    // columns, and only the schema load can tell us.
+                    let schema_result = schema_task.await;
+                    let fallback_rows = schema_result.as_ref().ok().and_then(|schema_load| {
+                        TableService::schema_only_browse_fallback(conn.as_ref(), &error, schema_load)
+                    });
+                    let outcome = match fallback_rows {
+                        Some(result) => {
+                            tracing::warn!(
+                                error = %error,
+                                connection_id = %connection_id,
+                                table_name = %table_name_for_spawn,
+                                database_name = ?effective_database_name_for_spawn,
+                                "Opened table viewer in schema-only mode after browse failure"
+                            );
+                            Ok(FetchOutcome {
+                                result,
+                                total: None,
+                                plan: pending_fetch.plan,
+                            })
+                        }
+                        None => Err(error),
+                    };
+                    apply_fetch(outcome, cx);
+                    schema_result
                 }
             };
 
@@ -1800,7 +1593,7 @@ impl MainView {
                         Self::update_open_viewer_if_current_request_with_kind(
                             &viewer_weak,
                             request_context,
-                            OpenViewerAsyncUpdateKind::Viewer,
+                            OpenViewerAsyncUpdateKind::Metadata,
                             cx,
                             |viewer, cx| {
                                 viewer.set_foreign_keys(fk_info_for_viewer, cx);
@@ -1814,7 +1607,7 @@ impl MainView {
                     Self::update_open_viewer_if_current_request_with_kind(
                         &viewer_weak,
                         request_context,
-                        OpenViewerAsyncUpdateKind::Viewer,
+                        OpenViewerAsyncUpdateKind::Metadata,
                         cx,
                         |viewer, cx| {
                             viewer.update_column_types_from_schema(&schema_columns, cx);
@@ -1825,7 +1618,7 @@ impl MainView {
 
                     let details = convert_to_schema_details(
                         connection_id,
-                        &table_name_for_spawn,
+                        &resolved_table,
                         table_details,
                         create_statement,
                     );
@@ -1895,166 +1688,32 @@ impl MainView {
                 }
             }
 
-            // For slow-count drivers, fetch the estimated row count now that
-            // both the data and schema have been delivered to the UI.
-            if needs_background_count
-                && read_open_viewer_request_ownership_if_current(
-                    &viewer_weak,
-                    request_context,
-                    OpenViewerAsyncUpdateKind::BackgroundCount,
-                    cx,
-                )
-                .is_some()
-            {
-                let table_service = table_service.clone();
-                let connection = conn.clone();
-                let table_name_for_count = table_name_for_spawn.clone();
-                let schema_qualifier = schema_qualifier.clone();
-                let count_result = cx
-                    .background_spawn(async move {
-                        table_service
-                            .estimate_row_count(
-                                connection,
-                                &table_name_for_count,
-                                schema_qualifier.as_deref(),
-                            )
-                            .await
-                    })
-                    .await;
-
-                match count_result {
-                    Ok(Some((total_rows, is_estimated))) => {
-                        Self::update_open_viewer_if_current_request_with_kind(
-                            &viewer_weak,
-                            request_context,
-                            OpenViewerAsyncUpdateKind::BackgroundCount,
-                            cx,
-                            move |_viewer, cx| {
-                                cx.emit(TableViewerEvent::CountCompleted {
-                                    connection_id: request_context.connection_id,
-                                    table_name: request_context.table_name.to_owned(),
-                                    database_name: request_context
-                                        .database_name
-                                        .map(ToOwned::to_owned),
-                                    request_generation: request_context.request_generation,
-                                    total_rows,
-                                    is_estimated,
-                                });
-                            },
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        log_open_viewer_background_count_failure(request_context, &error);
-                    }
-                }
-            }
-
-            // Clear the stored task reference now that work is done so the
-            // Task is dropped and its memory is freed.
-            Self::clear_active_table_load_task_if_current_generation(
-                &this,
-                request_context,
-                cx,
-                "Table load task finished after main view dropped",
-            );
-
             anyhow::Ok(())
         });
 
-        // Store the task — this automatically cancels any previous stale load.
-        self.active_table_load_task = Some(task);
+        viewer_entity.update(cx, |viewer, _cx| viewer.open_task = Some(task));
     }
 
-    fn update_open_viewer_if_current_request_with_kind(
+    fn update_open_viewer_if_current_request_with_kind<R>(
         viewer_weak: &WeakEntity<TableViewerPanel>,
         request_context: OpenViewerAsyncRequestContext,
         update_kind: OpenViewerAsyncUpdateKind,
         cx: &mut AsyncWindowContext,
-        update: impl FnOnce(&mut TableViewerPanel, &mut Context<TableViewerPanel>),
-    ) {
-        let mut update = Some(update);
-        if let Err(error) = viewer_weak.update(cx, |viewer, cx| {
-            if capture_open_viewer_request_ownership_if_current(
-                viewer,
-                request_context,
-                update_kind,
-            )
-            .is_none()
-            {
-                return;
-            }
-
-            if let Some(update) = update.take() {
-                update(viewer, cx);
-            }
+        update: impl FnOnce(&mut TableViewerPanel, &mut Context<TableViewerPanel>) -> R,
+    ) -> Option<R> {
+        match viewer_weak.update(cx, |viewer, cx| {
+            capture_open_viewer_request_ownership_if_current(viewer, request_context, update_kind)
+                .map(|_| update(viewer, cx))
         }) {
-            log_open_viewer_dropped_request_update(
-                &error,
-                request_context,
-                update_kind.dropped_debug_message(),
-            );
-        }
-    }
-
-    /// Applies open-viewer updates that require a Window only when the async
-    /// response still owns the active request and viewer identity.
-    fn update_open_viewer_in_if_current_request_with_kind(
-        viewer_weak: &WeakEntity<TableViewerPanel>,
-        request_context: OpenViewerAsyncRequestContext,
-        update_kind: OpenViewerAsyncUpdateKind,
-        cx: &mut AsyncWindowContext,
-        update: impl FnOnce(&mut TableViewerPanel, &mut Window, &mut Context<TableViewerPanel>),
-    ) {
-        let mut update = Some(update);
-        if let Err(error) = viewer_weak.update_in(cx, |viewer, window, cx| {
-            if capture_open_viewer_request_ownership_if_current(
-                viewer,
-                request_context,
-                update_kind,
-            )
-            .is_none()
-            {
-                return;
-            }
-
-            if let Some(update) = update.take() {
-                update(viewer, window, cx);
-            }
-        }) {
-            log_open_viewer_dropped_request_update(
-                &error,
-                request_context,
-                update_kind.dropped_debug_message(),
-            );
-        }
-    }
-
-    /// Clears the tracked open-viewer task only when the generation still owns
-    /// the slot so superseded task completions cannot cancel newer loads.
-    fn clear_active_table_load_task_if_current_generation(
-        main_view_weak: &WeakEntity<MainView>,
-        request_context: OpenViewerAsyncRequestContext,
-        cx: &mut AsyncWindowContext,
-        dropped_main_view_debug_message: &'static str,
-    ) {
-        if let Err(error) = main_view_weak.update(cx, |main_view, _cx| {
-            let task_generation = request_context.task_generation;
-            if main_view.active_table_load_task_generation == task_generation {
-                main_view.active_table_load_task = None;
-            } else {
-                log_open_viewer_task_cleanup_guard_skip(
+            Ok(result) => result,
+            Err(error) => {
+                log_open_viewer_dropped_request_update(
+                    &error,
                     request_context,
-                    main_view.active_table_load_task_generation,
-                    "Skipped open-viewer task cleanup because task generation no longer owns active load slot",
+                    update_kind.dropped_debug_message(),
                 );
+                None
             }
-        }) {
-            log_open_viewer_dropped_request_update(
-                &error,
-                request_context,
-                dropped_main_view_debug_message,
-            );
         }
     }
 

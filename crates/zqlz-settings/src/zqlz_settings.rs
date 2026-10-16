@@ -90,6 +90,12 @@ impl ZqlzSettings {
         cx.global_mut::<Self>()
     }
 
+    /// The "Continue on error" choice for multi-statement runs (default off).
+    pub fn continue_on_error(cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .is_some_and(|settings| settings.connections.continue_on_error)
+    }
+
     pub fn default_from_json() -> Self {
         Self::default()
     }
@@ -541,6 +547,9 @@ pub struct ConnectionSettings {
     pub available_page_sizes: Vec<usize>,
     /// Whether to show total row count (requires additional COUNT query)
     pub show_total_row_count: bool,
+    /// Keep running the remaining statements of a multi-statement run after one
+    /// fails. Off by default: the run stops at the first failure.
+    pub continue_on_error: bool,
 }
 
 impl Default for ConnectionSettings {
@@ -553,6 +562,7 @@ impl Default for ConnectionSettings {
             pagination_mode: PaginationMode::PageBased,
             available_page_sizes: vec![100, 500, 1000, 5000, 10000],
             show_total_row_count: true,
+            continue_on_error: false,
         }
     }
 }
@@ -781,5 +791,23 @@ impl EditorConfig {
     /// Returns a reference to the underlying EditorSettings.
     pub fn as_settings(&self) -> &EditorSettings {
         &self.editor
+    }
+}
+
+#[cfg(test)]
+mod continue_on_error_tests {
+    use super::ZqlzSettings;
+
+    #[test]
+    fn continue_on_error_is_off_by_default_and_for_settings_files_without_it() {
+        assert!(!ZqlzSettings::default().connections.continue_on_error);
+
+        let old: ZqlzSettings =
+            serde_json::from_str(r#"{"connections":{"auto_commit":false}}"#).unwrap();
+        assert!(!old.connections.continue_on_error);
+
+        let on: ZqlzSettings =
+            serde_json::from_str(r#"{"connections":{"continue_on_error":true}}"#).unwrap();
+        assert!(on.connections.continue_on_error);
     }
 }

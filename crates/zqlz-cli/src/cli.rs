@@ -5,12 +5,14 @@
 //! stack (standalone path).
 
 mod ipc;
+mod mcp;
 mod output;
 mod standalone;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use tokio::process::Command as ProcessCommand;
 use uuid::Uuid;
 
@@ -46,6 +48,11 @@ struct Cli {
     #[arg(long, global = true)]
     new: bool,
 
+    /// Run the GUI attached to this terminal and block until it exits
+    #[cfg(target_os = "windows")]
+    #[arg(long, global = true, hide = true)]
+    foreground: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -73,6 +80,10 @@ enum Command {
 
     /// Show whether the ZQLZ GUI is running and responsive
     Status,
+
+    /// Serve the Model Context Protocol over stdio so AI agents can drive the
+    /// running GUI (e.g. `claude mcp add zqlz -- zqlz mcp`)
+    Mcp,
 }
 
 // --- connections ------------------------------------------------------------
@@ -260,6 +271,11 @@ struct QueryArgs {
     #[arg(long)]
     quiet: bool,
 
+    /// Keep running the remaining statements after one fails. By default the
+    /// first error stops the run and later statements are reported as skipped.
+    #[arg(long)]
+    continue_on_error: bool,
+
     /// Wrap all statements in a single BEGIN / COMMIT transaction (standalone
     /// mode only; ignored when running via IPC)
     #[arg(long)]
@@ -293,6 +309,10 @@ enum SchemaAction {
         /// Database name (uses connection default when omitted)
         #[arg(long, short = 'd')]
         database: Option<String>,
+
+        /// Also list views; prints `name<TAB>kind` (table, view, materialized view)
+        #[arg(long)]
+        views: bool,
     },
 
     /// Show columns for a table
@@ -434,6 +454,11 @@ enum OutputFormat {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, so `zqlz ... | head` would panic in println!; restore the default.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let zqlz_warn_directive = "zqlz=warn"
         .parse()
         .context("parsing default zqlz tracing directive")?;
@@ -446,6 +471,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    #[cfg(target_os = "windows")]
+    let foreground = cli.foreground;
+    #[cfg(not(target_os = "windows"))]
+    let foreground = false;
+
     // Determine whether to attempt IPC
     let socket_path = cli
         .socket
@@ -457,6 +487,10 @@ async fn main() -> Result<()> {
         bail!("--new is only supported when opening GUI targets (no subcommand)");
     }
 
+    if foreground && cli.command.is_some() {
+        bail!("--foreground is only supported when opening GUI targets (no subcommand)");
+    }
+
     match cli.command {
         Some(Command::Connections(args)) => handle_connections(args, use_ipc, &socket_path).await,
         Some(Command::Connect(args)) => handle_connect(args, use_ipc, &socket_path).await,
@@ -464,7 +498,10 @@ async fn main() -> Result<()> {
         Some(Command::Schema(args)) => handle_schema(args, use_ipc, &socket_path).await,
         Some(Command::History(args)) => handle_history(args, use_ipc, &socket_path).await,
         Some(Command::Status) => handle_status(&socket_path).await,
-        None => handle_open_targets(cli.open_targets, use_ipc, cli.new, &socket_path).await,
+        Some(Command::Mcp) => mcp::run(&socket_path).await,
+        None => {
+            handle_open_targets(cli.open_targets, use_ipc, cli.new, foreground, &socket_path).await
+        }
     }
 }
 
@@ -619,7 +656,11 @@ async fn handle_connect(args: ConnectArgs, use_ipc: bool, socket_path: &Path) ->
 
     let connections = standalone::load_connections()?;
     let saved = find_connection(&connections, &args.name_or_id)?.clone();
-    standalone::test_connection(&saved).await?;
+    // Same wording as the GUI path: the driver's own message, no wrapper context.
+    if let Err(error) = standalone::test_connection(&saved).await {
+        eprintln!("Connection failed: {}", error.root_cause());
+        std::process::exit(1);
+    }
     println!("Connection '{}' OK", saved.name);
     Ok(())
 }
@@ -653,19 +694,19 @@ async fn handle_query(args: QueryArgs, use_ipc: bool, socket_path: &Path) -> Res
                 connection: args.connection.clone(),
                 database: args.database.clone(),
                 sql: sql.clone(),
+                continue_on_error: args.continue_on_error.then_some(true),
             },
         )
         .await;
         match response {
             Ok(ipc::Response::QueryResult(execution)) => {
-                emit_query_output(
+                return finish_query(
                     &execution,
                     &args.format,
                     args.limit,
                     &opts,
                     args.output.as_deref(),
-                )?;
-                return Ok(());
+                );
             }
             Ok(ipc::Response::Error(msg)) => {
                 eprintln!("Query error: {}", msg);
@@ -685,16 +726,16 @@ async fn handle_query(args: QueryArgs, use_ipc: bool, socket_path: &Path) -> Res
         args.database.as_deref(),
         &sql,
         args.single_transaction,
+        args.continue_on_error,
     )
     .await?;
-    emit_query_output(
+    finish_query(
         &execution,
         &args.format,
         args.limit,
         &opts,
         args.output.as_deref(),
-    )?;
-    Ok(())
+    )
 }
 
 async fn handle_schema(args: SchemaArgs, use_ipc: bool, socket_path: &Path) -> Result<()> {
@@ -723,7 +764,10 @@ async fn handle_schema(args: SchemaArgs, use_ipc: bool, socket_path: &Path) -> R
                         eprintln!("Error: {}", msg);
                         std::process::exit(1);
                     }
-                    _ => {}
+                    Ok(other) => bail!("unexpected IPC response: {:?}", other),
+                    Err(e) => {
+                        eprintln!("IPC unavailable ({}), falling back to standalone", e);
+                    }
                 }
             }
             let databases = standalone::list_databases(&saved).await?;
@@ -732,33 +776,51 @@ async fn handle_schema(args: SchemaArgs, use_ipc: bool, socket_path: &Path) -> R
             }
         }
 
-        SchemaAction::Tables { database } => {
+        SchemaAction::Tables { database, views } => {
             if use_ipc {
                 let response = ipc::send_request(
                     socket_path,
                     ipc::Request::ListTables {
                         connection: args.connection.clone(),
                         database: database.clone(),
+                        include_views: views,
                     },
                 )
                 .await;
                 match response {
                     Ok(ipc::Response::StringList(items)) => {
+                        // An older GUI answers with table names only.
                         for item in items {
-                            println!("{}", item);
+                            if views {
+                                println!("{item}\ttable");
+                            } else {
+                                println!("{item}");
+                            }
                         }
+                        return Ok(());
+                    }
+                    Ok(ipc::Response::Relations(relations)) => {
+                        print_relations(&relations);
                         return Ok(());
                     }
                     Ok(ipc::Response::Error(msg)) => {
                         eprintln!("Error: {}", msg);
                         std::process::exit(1);
                     }
-                    _ => {}
+                    Ok(other) => bail!("unexpected IPC response: {:?}", other),
+                    Err(e) => {
+                        eprintln!("IPC unavailable ({}), falling back to standalone", e);
+                    }
                 }
             }
-            let tables = standalone::list_tables(&saved, database.as_deref()).await?;
-            for table in tables {
-                println!("{}", table);
+            if views {
+                let relations = standalone::list_relations(&saved, database.as_deref()).await?;
+                print_relations(&relations);
+            } else {
+                let tables = standalone::list_tables(&saved, database.as_deref()).await?;
+                for table in tables {
+                    println!("{}", table);
+                }
             }
         }
 
@@ -782,7 +844,10 @@ async fn handle_schema(args: SchemaArgs, use_ipc: bool, socket_path: &Path) -> R
                         eprintln!("Error: {}", msg);
                         std::process::exit(1);
                     }
-                    _ => {}
+                    Ok(other) => bail!("unexpected IPC response: {:?}", other),
+                    Err(e) => {
+                        eprintln!("IPC unavailable ({}), falling back to standalone", e);
+                    }
                 }
             }
             let columns = standalone::list_columns(&saved, database.as_deref(), &table).await?;
@@ -830,6 +895,12 @@ async fn handle_schema(args: SchemaArgs, use_ipc: bool, socket_path: &Path) -> R
         }
     }
     Ok(())
+}
+
+fn print_relations(relations: &[ipc::RelationEntry]) {
+    for relation in relations {
+        println!("{}\t{}", relation.name, relation.kind);
+    }
 }
 
 async fn handle_history(args: HistoryArgs, use_ipc: bool, socket_path: &Path) -> Result<()> {
@@ -979,8 +1050,25 @@ fn resolve_sql(parts: Vec<String>, file: Option<PathBuf>) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// Print the results, then exit non-zero when any statement failed so scripts
+/// and CI notice.
+fn finish_query(
+    execution: &ipc::QueryExecution,
+    format: &OutputFormat,
+    limit: usize,
+    opts: &OutputOptions,
+    output_path: Option<&std::path::Path>,
+) -> Result<()> {
+    emit_query_output(execution, format, limit, opts, output_path)?;
+    if execution.statements.iter().any(|s| s.error.is_some()) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Render query results and write them to the given file path, or print to
-/// stdout when no output path is specified.
+/// stdout when no output path is specified. Notices and, outside table mode,
+/// errors go to stderr.
 fn emit_query_output(
     execution: &ipc::QueryExecution,
     format: &OutputFormat,
@@ -990,11 +1078,12 @@ fn emit_query_output(
 ) -> Result<()> {
     let rendered = output::render_query_execution(execution, format, limit, opts);
     if let Some(path) = output_path {
-        std::fs::write(path, &rendered)
+        std::fs::write(path, &rendered.stdout)
             .with_context(|| format!("writing output to '{}'", path.display()))?;
     } else {
-        print!("{rendered}");
+        print!("{}", rendered.stdout);
     }
+    eprint!("{}", rendered.stderr);
     Ok(())
 }
 
@@ -1116,9 +1205,12 @@ async fn handle_open_targets(
     targets: Vec<String>,
     use_ipc: bool,
     force_new_window: bool,
+    foreground: bool,
     socket_path: &Path,
 ) -> Result<()> {
-    if use_ipc && !force_new_window {
+    // Forwarding to an existing instance cannot block this terminal, so
+    // `--foreground` always needs a process of its own.
+    if use_ipc && !force_new_window && !foreground {
         let request = ipc::Request::OpenTargets {
             targets: targets.clone(),
         };
@@ -1143,7 +1235,11 @@ async fn handle_open_targets(
     }
 
     let gui_executable = locate_gui_executable()?;
-    launch_gui_process(&gui_executable, &targets)
+    if foreground {
+        run_gui_foreground(&gui_executable, &targets).await
+    } else {
+        launch_gui_process(&gui_executable, &targets)
+    }
 }
 
 /// Locate the bundled GUI executable relative to the CLI binary.
@@ -1151,7 +1247,7 @@ async fn handle_open_targets(
 /// We keep this deterministic so packaging scripts can define a stable layout:
 /// - macOS app bundle: `Contents/MacOS/zqlz` (CLI) + `Contents/MacOS/zqlz-editor` (GUI)
 /// - Linux tarball: `bin/zqlz` (CLI) + `libexec/zqlz-editor` (GUI)
-/// - Windows installer: `zqlz.exe` (CLI) + `ZQLZ.exe` (GUI)
+/// - Windows installer: `bin\zqlz.exe` (CLI) + `ZQLZ.exe` (GUI, one level up)
 fn locate_gui_executable() -> Result<PathBuf> {
     if let Ok(override_path) = std::env::var("ZQLZ_EDITOR_PATH") {
         let override_path = PathBuf::from(override_path);
@@ -1173,15 +1269,22 @@ fn locate_gui_executable() -> Result<PathBuf> {
         executable_directory.join("zqlz-editor"),
         executable_directory.join("zqlz-editor.exe"),
         executable_directory.join("ZQLZ.exe"),
+        executable_directory.join("../ZQLZ.exe"),
+        executable_directory.join("../zqlz-editor.exe"),
         executable_directory.join("../libexec/zqlz-editor"),
         executable_directory.join("../libexec/zqlz-editor.exe"),
     ];
 
-    if let Some(found) = candidates
-        .iter()
-        .find(|candidate| candidate.exists() && **candidate != cli_executable)
-    {
-        return Ok(found.clone());
+    // Canonicalize before comparing: it resolves the `..` segments above and,
+    // on Windows, normalizes case so `ZQLZ.exe` cannot match this very binary
+    // and send us into a spawn loop.
+    if let Some(found) = candidates.iter().find_map(|candidate| {
+        candidate
+            .canonicalize()
+            .ok()
+            .filter(|candidate| *candidate != cli_executable)
+    }) {
+        return Ok(found);
     }
 
     bail!(
@@ -1193,9 +1296,36 @@ fn locate_gui_executable() -> Result<PathBuf> {
 fn launch_gui_process(gui_executable: &Path, targets: &[String]) -> Result<()> {
     let mut process = ProcessCommand::new(gui_executable);
     process.args(targets);
+    // The GUI outlives this process. Leaving stdio inherited would let it write
+    // into a terminal that has already returned to the prompt.
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     process
         .spawn()
         .with_context(|| format!("launching GUI executable '{}'", gui_executable.display()))?;
+    Ok(())
+}
+
+/// Launch the GUI attached to this terminal and block until it exits.
+///
+/// Stdio stays inherited so the GUI's log output lands in this terminal, and the
+/// `--foreground` flag tells it to attach to our console on Windows.
+async fn run_gui_foreground(gui_executable: &Path, targets: &[String]) -> Result<()> {
+    let status = ProcessCommand::new(gui_executable)
+        .args(targets)
+        .arg("--foreground")
+        .spawn()
+        .with_context(|| format!("launching GUI executable '{}'", gui_executable.display()))?
+        .wait()
+        .await
+        .with_context(|| format!("waiting for GUI executable '{}'", gui_executable.display()))?;
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
     Ok(())
 }
 

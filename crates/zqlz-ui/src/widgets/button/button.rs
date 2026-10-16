@@ -6,8 +6,8 @@ use crate::widgets::{
 };
 use gpui::{
     Action, AnyElement, App, ClickEvent, Corners, Div, Edges, ElementId, Hsla, InteractiveElement,
-    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, Role, SharedString,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Toggled, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
 
@@ -199,6 +199,9 @@ pub struct Button {
     style: StyleRefinement,
     icon: Option<Icon>,
     label: Option<SharedString>,
+    /// Overrides the visible label for assistive technology. Required for
+    /// icon-only buttons, which have no label to fall back on.
+    aria_label: Option<SharedString>,
     children: Vec<AnyElement>,
     disabled: bool,
     pub(crate) selected: bool,
@@ -238,6 +241,7 @@ impl Button {
             style: StyleRefinement::default(),
             icon: None,
             label: None,
+            aria_label: None,
             disabled: false,
             selected: false,
             variant: ButtonVariant::default(),
@@ -291,6 +295,14 @@ impl Button {
     /// Set label to the Button, if no label is set, the button will be in Icon Button mode.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Set the label announced by assistive technology, overriding the visible
+    /// label. Icon-only buttons have no visible label, so they need this to be
+    /// announced as anything other than "button".
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
         self
     }
 
@@ -462,6 +474,16 @@ impl RenderOnce for Button {
         let light_border = cx.theme().border.opacity(0.25);
 
         self.base
+            .role(if self.variant.is_link() {
+                Role::Link
+            } else {
+                Role::Button
+            })
+            .when_some(
+                self.aria_label.clone().or_else(|| self.label.clone()),
+                |this, label| this.aria_label(label),
+            )
+            .when(self.selected, |this| this.aria_toggled(Toggled::True))
             .when(!self.disabled, |this| {
                 this.track_focus(
                     &focus_handle

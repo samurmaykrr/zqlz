@@ -9,6 +9,3 @@ description = "Typed table workflow planning for non-UI table operations"
 path = "src/zqlz_table_workflows.rs"
 
 [dependencies]
-thiserror.workspace = true
-serde.workspace = true
-uuid.workspace = true

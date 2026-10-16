@@ -32,3 +32,14 @@ pub enum TableDesignerEvent {
         design: TableDesign,
     },
 }
+
+/// Tab lifecycle notifications for an existing table's designer.
+///
+/// Kept separate from [`TableDesignerEvent`] so the host can follow the designed
+/// table (e.g. in the schema inspector) without every `TableDesignerEvent` match
+/// having to know about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableDesignerActivity {
+    BecameActive,
+    BecameInactive,
+}

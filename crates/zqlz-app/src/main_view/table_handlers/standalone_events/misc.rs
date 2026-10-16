@@ -2,8 +2,7 @@
 
 use gpui::*;
 use std::collections::{HashMap, HashSet};
-use uuid::Uuid;
-use zqlz_core::{ColumnMeta, Value};
+use zqlz_core::{ColumnMeta, TableRef, Value};
 use zqlz_services::{
     GenerateTableChangesSqlRequest, LoadDistinctValuesRequest, LoadForeignKeyValuesRequest,
     ModifiedCellSqlChange,
@@ -12,19 +11,32 @@ use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
 use crate::components::{PendingCellChange, TableViewerPanel};
+use crate::main_view::table_handlers_utils::conversion::viewer_table;
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::main_view) fn handle_generate_sql_event(
-    table_name: String,
     modified_cells: HashMap<(usize, usize), PendingCellChange>,
     deleted_rows: HashSet<usize>,
     new_rows: Vec<Vec<Value>>,
     column_meta: Vec<ColumnMeta>,
     all_rows: Vec<Vec<Value>>,
+    viewer_entity: &Entity<TableViewerPanel>,
+    window: &mut Window,
     cx: &mut App,
 ) {
     let Some(app_state) = cx.try_global::<AppState>() else {
         tracing::error!("GenerateChangesSql: No AppState available");
         return;
+    };
+    let (table, connection) = match viewer_table(viewer_entity.read(cx), cx) {
+        Ok(target) => target,
+        Err(error) => {
+            window.push_notification(
+                Notification::error(format!("Cannot generate SQL: {error}")),
+                cx,
+            );
+            return;
+        }
     };
 
     let column_names: Vec<String> = column_meta
@@ -43,10 +55,10 @@ pub(in crate::main_view) fn handle_generate_sql_event(
         .collect();
 
     let deleted_row_indices = deleted_rows.into_iter().collect();
-    let sql = app_state
-        .table_service
-        .generate_table_changes_sql(GenerateTableChangesSqlRequest {
-            table_name,
+    let sql = app_state.table_service.generate_table_changes_sql(
+        connection.as_ref(),
+        GenerateTableChangesSqlRequest {
+            table,
             column_names,
             modified_cells: modified_cell_changes,
             deleted_row_indices,
@@ -65,7 +77,6 @@ pub(in crate::main_view) fn handle_generate_sql_event(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::main_view) fn handle_load_fk_values_event(
-    connection_id: Uuid,
     referenced_table: &str,
     referenced_schema: Option<&str>,
     cache_key: &str,
@@ -93,23 +104,23 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
         return;
     };
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(
-            connection_id,
-            viewer_entity.read(cx).database_name().as_deref(),
-        )
-    else {
-        tracing::error!("LoadFkValues: Connection not found: {}", connection_id);
-        return;
+    let (current_table, connection) = match viewer_table(viewer_entity.read(cx), cx) {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::error!(%error, "LoadFkValues: no table to load from");
+            return;
+        }
     };
-
-    let connection = connection.clone();
-    let referenced_table = referenced_table.to_string();
-    let referenced_schema = referenced_schema
-        .map(str::trim)
-        .filter(|schema| !schema.is_empty())
-        .map(ToString::to_string);
+    // The key's own schema wins; otherwise it points into this table's schema.
+    let referenced_table = TableRef::new(
+        current_table.database,
+        referenced_schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(ToString::to_string)
+            .or(current_table.schema),
+        referenced_table,
+    );
     let table_service = app_state.table_service.clone();
     let cache_key = cache_key.to_string();
     let referenced_columns = referenced_columns.to_vec();
@@ -120,7 +131,6 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
         .spawn(cx, async move |cx| {
             let request = LoadForeignKeyValuesRequest {
                 referenced_table: referenced_table.clone(),
-                referenced_schema,
                 referenced_columns,
                 query: query.clone(),
                 limit: effective_limit,
@@ -143,7 +153,7 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
                     tracing::info!(
                         "LoadFkValues: Loaded {} values from {} (query={:?}, request_id={})",
                         values.len(),
-                        referenced_table,
+                        referenced_table.display_name(),
                         query,
                         request_id
                     );
@@ -160,7 +170,11 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
                     });
                 }
                 Err(e) => {
-                    tracing::error!("LoadFkValues: Failed to query {}: {}", referenced_table, e);
+                    tracing::error!(
+                        "LoadFkValues: Failed to query {}: {}",
+                        referenced_table.display_name(),
+                        e
+                    );
                 }
             }
 
@@ -170,8 +184,6 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
 }
 
 pub(in crate::main_view) fn handle_load_distinct_values_event(
-    connection_id: Uuid,
-    table_name: &str,
     column_name: &str,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
@@ -184,22 +196,16 @@ pub(in crate::main_view) fn handle_load_distinct_values_event(
         return;
     };
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(
-            connection_id,
-            viewer_entity.read(cx).database_name().as_deref(),
-        )
-    else {
-        tracing::error!(
-            "LoadDistinctValues: Connection not found: {}",
-            connection_id
-        );
-        return;
+    let (table, connection) = match viewer_table(viewer_entity.read(cx), cx) {
+        Ok(target) => target,
+        Err(error) => {
+            window.push_notification(
+                Notification::error(format!("Cannot load distinct values: {error}")),
+                cx,
+            );
+            return;
+        }
     };
-
-    let connection = connection.clone();
-    let table_name = table_name.to_string();
     let column_name = column_name.to_string();
     let table_service = app_state.table_service.clone();
 
@@ -209,7 +215,7 @@ pub(in crate::main_view) fn handle_load_distinct_values_event(
                 .load_distinct_values(
                     connection,
                     LoadDistinctValuesRequest {
-                        table_name: table_name.clone(),
+                        table: table.clone(),
                         column_name: column_name.clone(),
                         limit: 500,
                     },
@@ -252,7 +258,7 @@ pub(in crate::main_view) fn handle_load_distinct_values_event(
                 Err(error) => {
                     tracing::error!(
                         "LoadDistinctValues: failed for {}.{}: {}",
-                        table_name,
+                        table.display_name(),
                         column_name,
                         error
                     );

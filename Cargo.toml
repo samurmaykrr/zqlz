@@ -39,6 +39,7 @@ members = [
     "crates/zqlz-app",
     "crates/zqlz-cli",
     "crates/zqlz-internal-storage",
+    "crates/zqlz-test-support",
 ]
 default-members = ["crates/zqlz-app"]
 
@@ -149,9 +150,9 @@ tree-sitter-md = { git = "https://github.com/tree-sitter-grammars/tree-sitter-ma
 lsp-types = { version = "0.97.0", features = ["proposed"] }
 
 # GUI - GPUI. Keep Zed crates pinned to the same revision for compatibility.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "832c17e8192e2e1d472f0751e7cef2af84ded622" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "832c17e8192e2e1d472f0751e7cef2af84ded622", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "832c17e8192e2e1d472f0751e7cef2af84ded622" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1" }
 sum_tree = { version = "0.2.0", package = "zed-sum-tree" }
 
 # Linkify URLs
@@ -310,6 +311,7 @@ zqlz-driver-redis = { path = "crates/zqlz-drivers/crates/zqlz-driver-redis" }
 zqlz-driver-mongodb = { path = "crates/zqlz-drivers/crates/zqlz-driver-mongodb" }
 zqlz-driver-clickhouse = { path = "crates/zqlz-drivers/crates/zqlz-driver-clickhouse" }
 zqlz-connection = { path = "crates/zqlz-connection" }
+zqlz-test-support = { path = "crates/zqlz-test-support" }
 zqlz-query = { path = "crates/zqlz-query" }
 zqlz-explain-visual = { path = "crates/zqlz-explain-visual" }
 zqlz-objects = { path = "crates/zqlz-objects" }

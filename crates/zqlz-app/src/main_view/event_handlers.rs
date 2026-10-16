@@ -116,6 +116,8 @@ impl MainView {
                         result: None,
                         error: Some("Query cancelled by user".to_string()),
                         affected_rows: 0,
+                        warnings: Vec::new(),
+                        skipped: false,
                     }],
                 };
 
@@ -256,6 +258,9 @@ impl MainView {
             ConnectionSidebarEvent::Disconnect(connection_id) => {
                 self.disconnect_from_database(connection_id, cx);
             }
+            ConnectionSidebarEvent::SetAgentAccess(connection_id, access) => {
+                self.set_agent_access(connection_id, access, window, cx);
+            }
             ConnectionSidebarEvent::Selected(connection_id) => {
                 let is_connected = self.workspace_state.read(cx).is_connected(connection_id);
 
@@ -372,10 +377,9 @@ impl MainView {
             }
             ConnectionSidebarEvent::OpenTable {
                 connection_id,
-                table_name,
-                database_name,
+                table,
             } => {
-                self.open_table_viewer(connection_id, table_name, database_name, false, window, cx);
+                self.open_table_viewer(connection_id, table, window, cx);
             }
             ConnectionSidebarEvent::LoadTableDetails {
                 connection_id,
@@ -394,43 +398,42 @@ impl MainView {
             }
             ConnectionSidebarEvent::OpenView {
                 connection_id,
-                view_name,
-                database_name,
+                view,
             } => {
-                self.open_table_viewer(connection_id, view_name, database_name, true, window, cx);
+                self.open_table_viewer(connection_id, view, window, cx);
             }
             ConnectionSidebarEvent::DesignTable {
                 connection_id,
-                table_name,
+                table,
             } => {
-                self.design_table(connection_id, table_name, window, cx);
+                self.design_table(connection_id, table, window, cx);
             }
             ConnectionSidebarEvent::NewTable { connection_id } => {
                 self.new_table(connection_id, window, cx);
             }
             ConnectionSidebarEvent::DeleteTable {
                 connection_id,
-                table_name,
+                table,
             } => {
-                self.delete_table(connection_id, table_name, window, cx);
+                self.delete_tables(connection_id, vec![table], window, cx);
             }
             ConnectionSidebarEvent::EmptyTable {
                 connection_id,
-                table_name,
+                table,
             } => {
-                self.empty_table(connection_id, table_name, window, cx);
+                self.empty_tables(connection_id, vec![table], window, cx);
             }
             ConnectionSidebarEvent::DuplicateTable {
                 connection_id,
-                table_name,
+                table,
             } => {
-                self.duplicate_table(connection_id, table_name, window, cx);
+                self.duplicate_tables(connection_id, vec![table], window, cx);
             }
             ConnectionSidebarEvent::RenameTable {
                 connection_id,
-                table_name,
+                table,
             } => {
-                self.rename_table(connection_id, table_name, window, cx);
+                self.rename_table(connection_id, table, window, cx);
             }
             ConnectionSidebarEvent::ImportData {
                 connection_id,
@@ -1881,6 +1884,38 @@ impl MainView {
         cx: &mut Context<Self>,
     ) {
         self.workspace_controller.read(cx).zoom_window(window);
+    }
+
+    /// Copy the window's most recent accessibility tree to the clipboard.
+    ///
+    /// gpui only builds the tree while assistive technology is attached, so
+    /// this reports that state rather than silently copying nothing.
+    pub(super) fn handle_copy_accessibility_tree(
+        &mut self,
+        _action: &crate::actions::CopyAccessibilityTree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match window.debug_a11y_tree_json() {
+            Some(tree) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(tree));
+                window.push_notification(
+                    zqlz_ui::widgets::notification::Notification::success(
+                        "Accessibility tree copied to clipboard",
+                    ),
+                    cx,
+                );
+            }
+            None => {
+                window.push_notification(
+                    zqlz_ui::widgets::notification::Notification::warning(
+                        "No accessibility tree yet. gpui only builds one while a \
+                         screen reader is active for this window.",
+                    ),
+                    cx,
+                );
+            }
+        }
     }
 
     fn open_close_saved_query_unsaved_dialog(

@@ -15,10 +15,11 @@ use crate::keys::{
 use async_trait::async_trait;
 use zqlz_core::{
     ColumnInfo, Connection, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, KeyValueInfo, ObjectsPanelColumn, ObjectsPanelData,
-    ObjectsPanelManifest, ObjectsPanelObjectRef, ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo,
-    Result, SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType,
-    TriggerInfo, TypeInfo, ViewInfo, ZqlzError, parse_redis_database_index,
+    ForeignKeyInfo, FunctionInfo, IndexInfo, KeyValueInfo, ObjectKindSupport, ObjectsPanelColumn,
+    ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelObjectRef, ObjectsPanelRow,
+    PrimaryKeyInfo, ProcedureInfo, Result, SchemaInfo, SchemaIntrospection, SequenceInfo,
+    TableDetails, TableInfo, TableType, TriggerInfo, TypeInfo, ViewInfo, ZqlzError,
+    parse_redis_database_index,
 };
 
 /// Default number of Redis databases (can be configured in redis.conf)
@@ -26,6 +27,14 @@ const DEFAULT_DATABASE_COUNT: u16 = 16;
 
 #[async_trait]
 impl SchemaIntrospection for RedisConnection {
+    fn object_kind_support(&self) -> Option<ObjectKindSupport> {
+        Some(crate::driver::OBJECT_KINDS)
+    }
+
+    fn default_schema_name(&self) -> Option<String> {
+        None
+    }
+
     /// List Redis databases (0-N by default)
     ///
     /// Redis databases are numbered from 0 to N-1 (default N=16, but configurable).

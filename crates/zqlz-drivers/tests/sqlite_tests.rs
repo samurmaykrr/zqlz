@@ -5,6 +5,16 @@ use std::path::PathBuf;
 use zqlz_core::{Connection, DatabaseDriver, SchemaIntrospection, TableType, Value};
 use zqlz_drivers::sqlite::{ExecuteMultiResult, SqliteConnection, SqliteDriver};
 
+/// Reach the driver's schema introspection.
+///
+/// SQLite serves introspection from the shared `SchemaEngine` rather than inherent
+/// methods on `SqliteConnection`, so tests go through the `Connection` trait.
+fn introspection(connection: &SqliteConnection) -> &dyn SchemaIntrospection {
+    connection
+        .as_schema_introspection()
+        .expect("SQLite connection should expose schema introspection")
+}
+
 /// Helper to create a test database with sample data
 async fn setup_test_database() -> (PathBuf, SqliteConnection) {
     let temp_dir = std::env::temp_dir();
@@ -374,7 +384,10 @@ async fn test_query_execution_time() {
 async fn test_schema_introspection_tables() {
     let (db_path, conn) = setup_test_database().await;
 
-    let tables = conn.list_tables(None).await.expect("Failed to list tables");
+    let tables = introspection(&conn)
+        .list_tables(None)
+        .await
+        .expect("Failed to list tables");
 
     assert_eq!(tables.len(), 3, "Should have 3 tables");
 
@@ -390,7 +403,10 @@ async fn test_schema_introspection_tables() {
 async fn test_schema_introspection_views() {
     let (db_path, conn) = setup_test_database().await;
 
-    let views = conn.list_views(None).await.expect("Failed to list views");
+    let views = introspection(&conn)
+        .list_views(None)
+        .await
+        .expect("Failed to list views");
 
     assert_eq!(views.len(), 1, "Should have 1 view");
     assert_eq!(views[0].name, "order_summary");
@@ -403,7 +419,7 @@ async fn test_schema_introspection_views() {
 async fn test_schema_introspection_columns() {
     let (db_path, conn) = setup_test_database().await;
 
-    let columns = conn
+    let columns = introspection(&conn)
         .get_columns(None, "users")
         .await
         .expect("Failed to get columns");
@@ -431,7 +447,7 @@ async fn test_schema_introspection_columns() {
 async fn test_schema_introspection_indexes() {
     let (db_path, conn) = setup_test_database().await;
 
-    let indexes = conn
+    let indexes = introspection(&conn)
         .get_indexes(None, "users")
         .await
         .expect("Failed to get indexes");
@@ -453,7 +469,7 @@ async fn test_schema_introspection_indexes() {
 async fn test_schema_introspection_foreign_keys() {
     let (db_path, conn) = setup_test_database().await;
 
-    let fks = conn
+    let fks = introspection(&conn)
         .get_foreign_keys(None, "orders")
         .await
         .expect("Failed to get foreign keys");
@@ -474,7 +490,7 @@ async fn test_schema_introspection_foreign_keys() {
 async fn test_schema_introspection_table_details() {
     let (db_path, conn) = setup_test_database().await;
 
-    let details = conn
+    let details = introspection(&conn)
         .get_table(None, "orders")
         .await
         .expect("Failed to get table details");
@@ -495,7 +511,10 @@ async fn test_schema_introspection_table_details() {
 async fn test_schema_introspection_marks_virtual_tables() {
     let (db_path, conn) = setup_virtual_table_database().await;
 
-    let tables = conn.list_tables(None).await.expect("Failed to list tables");
+    let tables = introspection(&conn)
+        .list_tables(None)
+        .await
+        .expect("Failed to list tables");
     let virtual_table = tables
         .iter()
         .find(|table| table.name == "items_fts")
@@ -510,7 +529,7 @@ async fn test_schema_introspection_marks_virtual_tables() {
 async fn test_schema_introspection_loads_virtual_table_columns() {
     let (db_path, conn) = setup_virtual_table_database().await;
 
-    let columns = conn
+    let columns = introspection(&conn)
         .get_columns(None, "items_fts")
         .await
         .expect("Failed to get virtual table columns");

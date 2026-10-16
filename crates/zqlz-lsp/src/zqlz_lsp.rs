@@ -3,7 +3,6 @@
 //! Provides IntelliSense, completions, linting, and error diagnostics for SQL queries.
 //! Uses sqlparser-rs for accurate SQL parsing and validation.
 
-use anyhow::Result;
 use lsp_types::{
     CodeAction, Diagnostic, GotoDefinitionResponse, Hover, Location, SignatureHelp, WorkspaceEdit,
 };
@@ -38,6 +37,7 @@ mod hover;
 mod hover_render;
 mod keyword_completions;
 mod lsp_lifecycle;
+mod mysql_syntax;
 mod navigation;
 mod operator_completions;
 mod parser_pool;
@@ -164,29 +164,49 @@ impl SqlLsp {
             .unwrap_or("SQL")
     }
 
-    /// Fetch stored procedures (driver-specific)
-    async fn fetch_procedures(&self, conn: &dyn Connection) -> Result<Vec<ProcedureInfo>> {
-        schema_fetch::fetch_procedures(conn).await
-    }
-
-    /// Fetch functions (driver-specific)
-    async fn fetch_functions(&self, conn: &dyn Connection) -> Result<Vec<FunctionInfo>> {
-        schema_fetch::fetch_functions(conn).await
-    }
-
-    /// Fetch triggers (driver-specific)
-    async fn fetch_triggers(&self, conn: &dyn Connection) -> Result<Vec<TriggerInfo>> {
-        schema_fetch::fetch_triggers(conn).await
-    }
-
-    /// Fetch indexes
-    async fn fetch_indexes(&self, conn: &dyn Connection) -> Result<Vec<IndexInfo>> {
-        schema_fetch::fetch_indexes(conn).await
-    }
-
     /// Get hover information for a position
     pub fn get_hover(&self, text: &Rope, offset: usize) -> Option<Hover> {
         hover::get_hover(self, text, offset)
+    }
+
+    /// Hover for a known table, rendered from whatever the cache holds for it.
+    pub fn table_hover(&self, table_name: &str) -> Option<Hover> {
+        hover::table_hover(self, table_name)
+    }
+
+    /// Hover for a table in another schema, rendered from `details` loaded for it.
+    pub fn table_details_hover(
+        &self,
+        schema: &str,
+        details: &zqlz_services::TableDetails,
+    ) -> Option<Hover> {
+        hover::table_details_hover(schema, details)
+    }
+
+    /// Whether `table_name` is cached as a table of `schema`. A table carrying
+    /// no schema belongs to the cache's (active) schema.
+    pub fn has_table_in_schema(&self, table_name: &str, schema: &str) -> bool {
+        self.table_info(table_name).is_some_and(|table| {
+            table
+                .schema
+                .as_deref()
+                .or(self.schema_cache.schema_name.as_deref())
+                .or(self.active_schema.as_deref())
+                .is_none_or(|table_schema| table_schema.eq_ignore_ascii_case(schema))
+        })
+    }
+
+    /// The `(table, schema)` to fetch when `table_name` is a known table whose
+    /// columns aren't cached yet, so hover can load them on demand.
+    pub fn table_awaiting_columns(&self, table_name: &str) -> Option<(String, Option<String>)> {
+        let table = self.table_info(table_name)?;
+        if self.columns_for_table(&table.name).is_some() {
+            return None;
+        }
+        Some((
+            table.name.clone(),
+            table.schema.clone().or_else(|| self.active_schema.clone()),
+        ))
     }
 
     /// Get definition location for the symbol at the given position

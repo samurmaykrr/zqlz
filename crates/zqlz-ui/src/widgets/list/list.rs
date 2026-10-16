@@ -19,7 +19,8 @@ use gpui::{
 };
 use gpui::{
     AppContext, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    Length, MouseButton, ParentElement, Render, Styled, Task, Window, div, prelude::FluentBuilder,
+    Length, MouseButton, ParentElement, Render, Role, Styled, Task, Window, div,
+    prelude::FluentBuilder,
 };
 use rust_i18n::t;
 use smol::Timer;
@@ -455,9 +456,15 @@ where
             .map(|s| s.eq_row(ix))
             .unwrap_or(false);
         let id = SharedString::from(format!("list-item-{}", ix));
+        let total_items = self.rows_cache.items_count();
 
         div()
             .id(id)
+            .debug_selector(move || format!("list-item:{}", ix.row))
+            .role(Role::ListItem)
+            .aria_position_in_set(ix.row + 1)
+            .aria_size_of_set(total_items)
+            .aria_selected(selected)
             .w_full()
             .relative()
             .overflow_hidden()
@@ -498,7 +505,7 @@ where
         let scroll_handle = self.scroll_handle.clone();
 
         v_flex()
-            .flex_grow()
+            .flex_grow_1()
             .relative()
             .size_full()
             .when_some(self.options.max_height, |this, h| this.max_h(h))
@@ -747,8 +754,185 @@ where
 
         div()
             .id("list")
+            .role(Role::List)
             .size_full()
             .refine_style(&self.style)
             .child(self.state.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, size};
+
+    use super::*;
+
+    /// Tall enough that a handful of fixed-height rows all paint without the
+    /// virtual list scrolling any of them out of view.
+    const WINDOW_SIZE: (f32, f32) = (240., 320.);
+    const ITEM_HEIGHT: gpui::Pixels = px(28.);
+
+    #[derive(IntoElement)]
+    struct TestItem {
+        row: usize,
+        label: SharedString,
+        selected: bool,
+    }
+
+    impl Selectable for TestItem {
+        fn selected(mut self, selected: bool) -> Self {
+            self.selected = selected;
+            self
+        }
+
+        fn is_selected(&self) -> bool {
+            self.selected
+        }
+    }
+
+    impl RenderOnce for TestItem {
+        fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+            div()
+                .id(self.row)
+                .h(ITEM_HEIGHT)
+                .w_full()
+                .child(self.label.clone())
+        }
+    }
+
+    struct TestDelegate {
+        items: Vec<SharedString>,
+        selected_index: Option<IndexPath>,
+    }
+
+    impl ListDelegate for TestDelegate {
+        type Item = TestItem;
+
+        fn items_count(&self, _section: usize, _cx: &App) -> usize {
+            self.items.len()
+        }
+
+        fn render_item(
+            &mut self,
+            ix: IndexPath,
+            _window: &mut Window,
+            _cx: &mut Context<ListState<Self>>,
+        ) -> Option<Self::Item> {
+            let label = self.items.get(ix.row)?.clone();
+            Some(TestItem {
+                row: ix.row,
+                label,
+                selected: false,
+            })
+        }
+
+        fn set_selected_index(
+            &mut self,
+            ix: Option<IndexPath>,
+            _window: &mut Window,
+            cx: &mut Context<ListState<Self>>,
+        ) {
+            self.selected_index = ix;
+            cx.notify();
+        }
+    }
+
+    fn test_delegate(labels: &[&str]) -> TestDelegate {
+        TestDelegate {
+            items: labels
+                .iter()
+                .map(|label| SharedString::from(label.to_string()))
+                .collect(),
+            selected_index: None,
+        }
+    }
+
+    #[gpui::test]
+    fn test_list_builder(cx: &mut TestAppContext) {
+        cx.update(crate::widgets::init);
+
+        let window = cx.add_window(|window, cx| {
+            ListState::new(test_delegate(&["alpha", "beta"]), window, cx)
+                .searchable(true)
+                .selectable(false)
+                .reset_on_cancel(false)
+        });
+        let state = window
+            .root(cx)
+            .expect("list state should be the window root");
+
+        state.read_with(cx, |state, _| {
+            assert!(
+                state.searchable,
+                "searchable should carry through the builder"
+            );
+            assert!(
+                !state.selectable,
+                "selectable should carry through the builder"
+            );
+            assert!(
+                !state.reset_on_cancel,
+                "reset_on_cancel should carry through the builder"
+            );
+        });
+
+        let list_element = List::new(&state)
+            .scrollbar_visible(false)
+            .search_placeholder("Search widgets")
+            .with_size(Size::Large);
+
+        assert!(!list_element.options.scrollbar_visible);
+        assert_eq!(
+            list_element.options.search_placeholder,
+            Some(SharedString::from("Search widgets"))
+        );
+        assert_eq!(list_element.options.size, Size::Large);
+    }
+
+    /// Open a window showing `delegate` inside a `ListState` and paint it.
+    fn open_list(
+        cx: &mut TestAppContext,
+        delegate: TestDelegate,
+    ) -> (Entity<ListState<TestDelegate>>, VisualTestContext) {
+        cx.update(crate::widgets::init);
+
+        let window = cx.add_window(|window, cx| ListState::new(delegate, window, cx));
+        let entity = window
+            .root(cx)
+            .expect("list state should be the window root");
+        let visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.simulate_resize(size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)));
+        visual_cx.run_until_parked();
+        (entity, visual_cx)
+    }
+
+    #[gpui::test]
+    fn clicking_a_list_item_selects_it(cx: &mut TestAppContext) {
+        let (list, mut cx) = open_list(cx, test_delegate(&["alpha", "beta", "gamma"]));
+
+        assert_eq!(
+            list.read_with(&cx, |list, _| list.selected_index()),
+            None,
+            "nothing should be selected before any interaction"
+        );
+
+        let bounds = cx
+            .debug_bounds("list-item:1")
+            .expect("the beta row should be painted");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            list.read_with(&cx, |list, _| list.selected_index()),
+            Some(IndexPath::new(1)),
+            "clicking the beta row should select it"
+        );
+        list.read_with(&cx, |list, _| {
+            assert_eq!(
+                list.delegate().selected_index,
+                Some(IndexPath::new(1)),
+                "the delegate should observe the same selection the list confirmed"
+            );
+        });
     }
 }

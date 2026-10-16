@@ -3,7 +3,12 @@
 //! The sidebar uses a single virtualized list, so every visible tree node is
 //! represented as a normalized row variant.
 
+use std::collections::BTreeMap;
+
 use uuid::Uuid;
+use zqlz_core::TableRef;
+
+use crate::widgets::sidebar::types::SidebarSection;
 
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 24.0;
 
@@ -46,14 +51,17 @@ pub(super) enum SidebarSectionAction {
     },
     SchemaGroup {
         conn_id: Uuid,
-        database_name: Option<String>,
+        database_name: String,
         schema_name: String,
     },
     SchemaGroupSection {
         conn_id: Uuid,
-        database_name: Option<String>,
+        database_name: String,
         schema_name: String,
         section: &'static str,
+    },
+    Queries {
+        conn_id: Uuid,
     },
 }
 
@@ -61,23 +69,15 @@ pub(super) enum SidebarSectionAction {
 pub(super) enum SidebarLeafKind {
     Table {
         conn_id: Uuid,
-        open_table_name: String,
-        menu_table_name: String,
-        object_schema: Option<String>,
-        database_name: Option<String>,
+        table: TableRef,
     },
     View {
         conn_id: Uuid,
-        open_view_name: String,
-        menu_view_name: String,
-        object_schema: Option<String>,
-        database_name: Option<String>,
+        view: TableRef,
     },
     MaterializedView {
         conn_id: Uuid,
-        open_view_name: String,
-        menu_view_name: String,
-        database_name: Option<String>,
+        view: TableRef,
     },
     Trigger {
         conn_id: Uuid,
@@ -150,7 +150,6 @@ pub(super) struct SchemaNodeRow {
     pub(super) database_name: String,
     pub(super) schema_name: String,
     pub(super) is_expanded: bool,
-    pub(super) has_database_schema: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -198,17 +197,21 @@ pub(super) enum SidebarVirtualRow {
     NoResults(NoResultsRow),
 }
 
+/// Objects of one schema, keyed by section. Sections with no objects may be
+/// absent; iteration follows [`SidebarSection`]'s render order.
 #[derive(Default)]
-pub(super) struct SchemaSectionGroup {
-    pub(super) tables: Vec<String>,
-    pub(super) views: Vec<String>,
-    pub(super) materialized_views: Vec<String>,
-    pub(super) triggers: Vec<String>,
-    pub(super) functions: Vec<String>,
-    pub(super) procedures: Vec<String>,
-    pub(super) events: Vec<String>,
-    pub(super) sequences: Vec<String>,
-    pub(super) domains: Vec<String>,
-    pub(super) types: Vec<String>,
-    pub(super) extensions: Vec<String>,
+pub(super) struct SchemaSectionGroup(pub(super) BTreeMap<SidebarSection, Vec<String>>);
+
+impl SchemaSectionGroup {
+    pub(super) fn objects(&self, section: SidebarSection) -> &[String] {
+        self.0.get(&section).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(super) fn push(&mut self, section: SidebarSection, object_name: String) {
+        self.0.entry(section).or_default().push(object_name);
+    }
+
+    pub(super) fn total_count(&self) -> usize {
+        self.0.values().map(Vec::len).sum()
+    }
 }

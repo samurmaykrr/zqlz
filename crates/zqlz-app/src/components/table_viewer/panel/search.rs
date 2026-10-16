@@ -58,10 +58,10 @@ impl TableViewerPanel {
                 cx.subscribe_in(
                     &input,
                     window,
-                    |this, input, event: &InputEvent, _window, cx| match event {
+                    |this, input, event: &InputEvent, window, cx| match event {
                         InputEvent::Change => {
                             let text = input.read(cx).text().to_string();
-                            this.on_search_changed(text, cx);
+                            this.on_search_changed(text, window, cx);
                         }
                         InputEvent::PressEnter { .. } => {}
                         _ => {}
@@ -90,10 +90,8 @@ impl TableViewerPanel {
             if had_search {
                 if self.uses_client_side_search() {
                     self.clear_client_side_search(cx);
-                } else if let (Some(connection_id), Some(table_name)) =
-                    (self.connection_id, self.table_name.clone())
-                {
-                    self.apply_filters(connection_id, table_name, cx);
+                } else if self.connection_id.is_some() && self.table_name.is_some() {
+                    self.apply_filters(window, cx);
                 }
             }
         }
@@ -101,7 +99,7 @@ impl TableViewerPanel {
         cx.notify();
     }
 
-    pub fn close_search(&mut self, cx: &mut Context<Self>) {
+    pub fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_visible = false;
         let had_search = !self.search_text.is_empty();
         self.search_text.clear();
@@ -113,10 +111,8 @@ impl TableViewerPanel {
         if had_search {
             if self.uses_client_side_search() {
                 self.clear_client_side_search(cx);
-            } else if let (Some(connection_id), Some(table_name)) =
-                (self.connection_id, self.table_name.clone())
-            {
-                self.apply_filters(connection_id, table_name, cx);
+            } else if self.connection_id.is_some() && self.table_name.is_some() {
+                self.apply_filters(window, cx);
             }
         }
 
@@ -142,7 +138,7 @@ impl TableViewerPanel {
         cx.notify();
     }
 
-    pub fn on_search_changed(&mut self, text: String, cx: &mut Context<Self>) {
+    pub fn on_search_changed(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.search_text = text;
         self._search_debounce_task = None;
 
@@ -160,18 +156,15 @@ impl TableViewerPanel {
                 }
             }));
         } else {
-            let connection_id = self.connection_id;
-            let table_name = self.table_name.clone();
-
-            self._search_debounce_task = Some(cx.spawn(async move |this, cx| {
+            self._search_debounce_task = Some(cx.spawn_in(window, async move |this, cx| {
                 cx.background_spawn(async {
                     smol::Timer::after(std::time::Duration::from_millis(300)).await;
                 })
                 .await;
 
-                if let Err(e) = this.update(cx, |this, cx| {
-                    if let (Some(connection_id), Some(table_name)) = (connection_id, table_name) {
-                        this.apply_filters(connection_id, table_name, cx);
+                if let Err(e) = this.update_in(cx, |this, window, cx| {
+                    if this.connection_id.is_some() && this.table_name.is_some() {
+                        this.apply_filters(window, cx);
                     }
                 }) {
                     tracing::error!("Failed to apply server-side search filters: {:?}", e);
@@ -420,8 +413,8 @@ impl TableViewerPanel {
                             .ghost()
                             .xsmall()
                             .tooltip("Close Search")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_search(cx);
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_search(window, cx);
                             })),
                     ),
             )

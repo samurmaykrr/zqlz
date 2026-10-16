@@ -229,7 +229,11 @@ impl MainView {
                                     databases.as_deref(),
                                 );
 
-                                sidebar.set_schema(connection_id, schema_objects.clone(), cx);
+                                sidebar.set_object_capabilities(
+                                    connection_id,
+                                    object_capabilities,
+                                    cx,
+                                );
                                 if let Some(objects_panel_manifest) =
                                     schema.objects_panel_manifest.clone()
                                 {
@@ -239,13 +243,18 @@ impl MainView {
                                         cx,
                                     );
                                 }
-                                if let Some(database_name) = resolved_database_name.as_deref() {
-                                    sidebar.apply_database_schema(
+                                // Without a database to attach it to (single-file
+                                // drivers), the schema stays at connection scope.
+                                match resolved_database_name.as_deref() {
+                                    Some(database_name) => sidebar.apply_database_schema(
                                         connection_id,
                                         database_name,
                                         schema_objects.clone(),
                                         cx,
-                                    );
+                                    ),
+                                    None => {
+                                        sidebar.set_schema(connection_id, schema_objects.clone(), cx)
+                                    }
                                 }
 
                                 if let Some(databases) = &databases {

@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
-use zqlz_core::{ConnectionFeatureSet, QueryCancelHandle};
+use zqlz_core::{ConnectionFeatureSet, QueryCancelHandle, TableRef};
 use zqlz_text_editor::{DocumentContext, DocumentIdentity};
 
 /// Unique identifier for a query editor tab
@@ -101,7 +101,11 @@ pub struct WorkspaceSessionViewerTab {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceSessionViewerKind {
     Table {
+        /// The catalog name. Sessions written before `schema` existed hold the
+        /// schema joined on (`"audit.users"`); opening resolves those.
         table_name: String,
+        #[serde(default)]
+        schema: Option<String>,
         database_name: Option<String>,
         is_view: bool,
         #[serde(default)]
@@ -120,6 +124,35 @@ pub enum WorkspaceSessionViewerKind {
         database_index: u16,
         key_name: String,
     },
+}
+
+impl WorkspaceSessionViewerKind {
+    pub fn table(table: &TableRef, viewer_state: Option<WorkspaceSessionTableViewerState>) -> Self {
+        Self::Table {
+            table_name: table.name.clone(),
+            schema: table.schema.clone(),
+            database_name: table.database.clone(),
+            is_view: table.is_view,
+            viewer_state,
+        }
+    }
+
+    /// The table a `Table` tab names.
+    pub fn table_ref(&self) -> Option<TableRef> {
+        match self {
+            Self::Table {
+                table_name,
+                schema,
+                database_name,
+                is_view,
+                ..
+            } => Some(TableRef {
+                is_view: *is_view,
+                ..TableRef::new(database_name.clone(), schema.clone(), table_name.clone())
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -745,31 +778,53 @@ impl WorkspaceState {
     pub fn update_table_viewer_state(
         &mut self,
         connection_id: Uuid,
-        table_name: &str,
-        database_name: Option<&str>,
+        table: &TableRef,
         viewer_state: WorkspaceSessionTableViewerState,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.open_viewer_tabs.iter_mut().find(|tab| {
-            tab.connection_id == connection_id
-                && matches!(
-                    &tab.kind,
-                    WorkspaceSessionViewerKind::Table {
-                        table_name: existing_table_name,
-                        database_name: existing_database_name,
-                        ..
-                    } if existing_table_name == table_name
-                        && existing_database_name.as_deref() == database_name
-                )
-        }) && let WorkspaceSessionViewerKind::Table {
-            viewer_state: state,
-            ..
-        } = &mut tab.kind
+        if let Some(tab) = self.table_viewer_tab_mut(connection_id, table)
+            && let WorkspaceSessionViewerKind::Table {
+                viewer_state: state,
+                ..
+            } = &mut tab.kind
         {
             *state = Some(viewer_state);
             cx.emit(WorkspaceStateEvent::ViewerTabsChanged);
             cx.notify();
         }
+    }
+
+    /// Re-key a table tab once its open has resolved the table, keeping the
+    /// viewer state it already had.
+    pub fn replace_table_viewer_tab(
+        &mut self,
+        connection_id: Uuid,
+        requested: &TableRef,
+        resolved: &TableRef,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.table_viewer_tab_mut(connection_id, requested)
+            && let WorkspaceSessionViewerKind::Table { viewer_state, .. } = &tab.kind
+        {
+            tab.kind = WorkspaceSessionViewerKind::table(resolved, viewer_state.clone());
+            cx.emit(WorkspaceStateEvent::ViewerTabsChanged);
+            cx.notify();
+        }
+    }
+
+    fn table_viewer_tab_mut(
+        &mut self,
+        connection_id: Uuid,
+        table: &TableRef,
+    ) -> Option<&mut WorkspaceSessionViewerTab> {
+        self.open_viewer_tabs.iter_mut().find(|tab| {
+            tab.connection_id == connection_id
+                && tab.kind.table_ref().is_some_and(|tab_table| {
+                    tab_table.database == table.database
+                        && tab_table.schema == table.schema
+                        && tab_table.name == table.name
+                })
+        })
     }
 
     fn allocate_query_execution_id(&mut self) -> u64 {
@@ -1327,6 +1382,26 @@ mod tests {
     }
 
     #[test]
+    fn table_tabs_from_sessions_before_schema_existed_still_load() {
+        let tab: WorkspaceSessionViewerTab = serde_json::from_str(
+            r#"{"connection_id":"6f2c1d0e-4b9a-4a59-9a7e-3c2f1e0d9b8a","kind":"table",
+                "table_name":"audit.users","database_name":"app","is_view":false}"#,
+        )
+        .expect("old session tab");
+
+        let table = tab.kind.table_ref().expect("a table tab");
+        assert_eq!(
+            (
+                table.database.as_deref(),
+                table.schema.as_deref(),
+                table.name.as_str()
+            ),
+            (Some("app"), None, "audit.users"),
+            "the joined name is left for resolve_table to split against the catalog"
+        );
+    }
+
+    #[test]
     fn apply_document_metadata_uses_explicit_dirty_state() {
         let mut state = test_editor_state();
         let context = test_document_context(
@@ -1395,6 +1470,7 @@ mod tests {
                     connection_id,
                     kind: WorkspaceSessionViewerKind::Table {
                         table_name: "revenue".to_string(),
+                        schema: None,
                         database_name: Some("analytics".to_string()),
                         is_view: false,
                         viewer_state: Some(WorkspaceSessionTableViewerState {
@@ -1517,6 +1593,7 @@ mod tests {
             connection_id,
             kind: WorkspaceSessionViewerKind::Table {
                 table_name: "users".to_string(),
+                schema: None,
                 database_name: None,
                 is_view: false,
                 viewer_state: None,

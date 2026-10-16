@@ -1,0 +1,8 @@
+-> Limit: 5 row(s)  (cost=139270..139270 rows=5)
+    -> Table scan on <union temporary>  (cost=139270..147278 rows=640445)
+        -> Union materialize with deduplication  (cost=139270..139270 rows=640445)
+            -> Limit table size: 5 unique row(s)
+                -> Covering index scan on orders_orders using fk_order_currency  (cost=17517 rows=152189)
+            -> Limit table size: 5 unique row(s)
+                -> Covering index scan on orders_order_items using idx_order_item_order  (cost=57708 rows=488256)
+

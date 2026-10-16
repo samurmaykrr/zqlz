@@ -1933,7 +1933,7 @@ impl ImportWizard {
                                                     },
                                                 ),
                                             )
-                                            .flex_grow()
+                                            .flex_grow_1()
                                             .size_full()
                                             .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                             .track_scroll(&self.udif_table_scroll_handle)
@@ -2240,7 +2240,7 @@ impl ImportWizard {
                                             },
                                         ),
                                     )
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .size_full()
                                     .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                     .track_scroll(&self.source_scroll_handle)
@@ -2554,7 +2554,7 @@ impl ImportWizard {
                                             },
                                         ),
                                     )
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .size_full()
                                     .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                     .track_scroll(&self.target_table_scroll_handle)
@@ -2847,7 +2847,7 @@ impl ImportWizard {
                                             },
                                         ),
                                     )
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .size_full()
                                     .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                     .track_scroll(&self.field_mapping_scroll_handle)
@@ -3333,7 +3333,7 @@ impl ImportWizard {
                                             },
                                         ),
                                     )
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .size_full()
                                     .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                     .track_scroll(&self.log_scroll_handle)
@@ -3659,7 +3659,7 @@ impl ImportWizard {
                                                 },
                                             ),
                                         )
-                                        .flex_grow()
+                                        .flex_grow_1()
                                         .size_full()
                                         .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                         .track_scroll(&self.summary_scroll_handle)

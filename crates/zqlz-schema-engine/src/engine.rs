@@ -8,10 +8,10 @@ use zqlz_core::{
     AutoIncrementRules, CatalogCapabilities, CatalogDialect, CatalogSource, ColumnInfo,
     ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject, Dependency, DependencyType,
     ForeignKeyAction, ForeignKeyInfo, ForeignKeyRef, FunctionInfo, IndexInfo, NamespaceModel,
-    ObjectScope, ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelManifest,
-    ObjectFormDdlRequest, ObjectFormSpec, ObjectFormSpecRequest, ObjectKindSource,
-    PrimaryKeyInfo, ProcedureInfo, RawColumnRow, RawRelationRow, RawTriggerRow, RelationRef, Result,
-    SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType, TriggerEvent,
+    ObjectFormDdlRequest, ObjectFormSpec, ObjectFormSpecRequest, ObjectKindSource, ObjectScope,
+    ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelManifest, PrimaryKeyInfo,
+    ProcedureInfo, RawColumnRow, RawRelationRow, RawTriggerRow, RelationRef, Result, SchemaInfo,
+    SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType, TriggerEvent,
     TriggerForEach, TriggerInfo, TriggerTiming, TypeInfo, TypeKind, ViewInfo, ZqlzError,
 };
 
@@ -52,35 +52,31 @@ impl SchemaEngine {
     }
 
     /// Resolve a caller-supplied `(schema, name)` into an unambiguous
-    /// [`RelationRef`], splitting qualified `schema.table` names and applying
-    /// the namespace model's default schema.
+    /// [`RelationRef`] (see [`split_relation_name`]), applying the namespace
+    /// model's default schema.
     fn resolve_relation(&self, schema: Option<&str>, name: &str) -> RelationRef {
-        let (parsed_schema, bare) = match name.split_once('.') {
-            Some((schema_part, table_part)) if !table_part.is_empty() => {
-                (Some(schema_part.to_string()), table_part.to_string())
-            }
-            _ => (None, name.to_string()),
-        };
-
-        let schema = schema
-            .map(ToString::to_string)
-            .or(parsed_schema)
-            .or_else(|| self.caps().namespaces.default_schema().map(ToString::to_string));
+        let (schema, bare) = split_relation_name(schema, name);
+        let schema = schema.or_else(|| {
+            self.caps()
+                .namespaces
+                .default_schema()
+                .map(ToString::to_string)
+        });
 
         RelationRef::new(schema, bare)
     }
 
     /// Schema string the engine passes to listing fetches.
     fn scope_schema(&self, schema: Option<&str>) -> Option<String> {
-        schema
-            .map(ToString::to_string)
-            .or_else(|| self.caps().namespaces.default_schema().map(ToString::to_string))
+        schema.map(ToString::to_string).or_else(|| {
+            self.caps()
+                .namespaces
+                .default_schema()
+                .map(ToString::to_string)
+        })
     }
 
-    async fn fetch_table_info(
-        &self,
-        relation: &RelationRef,
-    ) -> Result<TableInfo> {
+    async fn fetch_table_info(&self, relation: &RelationRef) -> Result<TableInfo> {
         let relations = self
             .source
             .fetch_relations(relation.schema.as_deref())
@@ -111,7 +107,11 @@ impl SchemaEngine {
     async fn default_panel_data(&self, schema: Option<&str>) -> Result<ObjectsPanelData> {
         let scope_schema = self.scope_schema(schema);
         let relations = self.source.fetch_relations(scope_schema.as_deref()).await?;
-        let table_infos: Vec<TableInfo> = relations.iter().cloned().map(normalize_table_info).collect();
+        let table_infos: Vec<TableInfo> = relations
+            .iter()
+            .cloned()
+            .map(normalize_table_info)
+            .collect();
         let mut data = ObjectsPanelData::from_table_infos(table_infos);
 
         for extra in &self.caps().panel_extras {
@@ -310,7 +310,9 @@ impl SchemaIntrospection for SchemaEngine {
 
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
         let relation = self.resolve_relation(schema, table);
-        Ok(normalize_indexes(self.source.fetch_indexes(&relation).await?))
+        Ok(normalize_indexes(
+            self.source.fetch_indexes(&relation).await?,
+        ))
     }
 
     async fn get_foreign_keys(
@@ -465,7 +467,9 @@ impl SchemaIntrospection for SchemaEngine {
             object.object_type,
             ObjectType::Table | ObjectType::View | ObjectType::MaterializedView
         ) {
-            self.get_table(object.schema.as_deref(), &object.name).await.ok()
+            self.get_table(object.schema.as_deref(), &object.name)
+                .await
+                .ok()
         } else {
             None
         };
@@ -526,7 +530,11 @@ impl SchemaIntrospection for SchemaEngine {
         &self,
         request: &ObjectFormSpecRequest,
     ) -> Result<Option<ObjectFormSpec>> {
-        if let Some(kind) = self.kinds.iter().find(|k| k.descriptor().id == request.kind_id) {
+        if let Some(kind) = self
+            .kinds
+            .iter()
+            .find(|k| k.descriptor().id == request.kind_id)
+        {
             return kind.form_spec(request).await;
         }
         self.dialect.object_form_spec(request)
@@ -536,7 +544,11 @@ impl SchemaIntrospection for SchemaEngine {
         &self,
         request: &ObjectFormDdlRequest,
     ) -> Result<Vec<String>> {
-        if let Some(kind) = self.kinds.iter().find(|k| k.descriptor().id == request.kind_id) {
+        if let Some(kind) = self
+            .kinds
+            .iter()
+            .find(|k| k.descriptor().id == request.kind_id)
+        {
             return kind.form_ddl(request).await;
         }
         self.dialect.generate_object_form_ddl(request)
@@ -606,7 +618,11 @@ fn normalize_columns(rows: Vec<RawColumnRow>, rules: &AutoIncrementRules) -> Vec
         .collect()
 }
 
-fn compute_auto_increment(row: &RawColumnRow, rules: &AutoIncrementRules, is_primary_key: bool) -> bool {
+fn compute_auto_increment(
+    row: &RawColumnRow,
+    rules: &AutoIncrementRules,
+    is_primary_key: bool,
+) -> bool {
     use zqlz_core::RawIdentity;
     match row.identity {
         RawIdentity::Declared => true,
@@ -701,7 +717,14 @@ fn parse_constraint_type(kind: &str) -> ConstraintType {
 }
 
 fn normalize_trigger_info(row: RawTriggerRow) -> TriggerInfo {
-    let timing = match row.timing.as_deref().unwrap_or("").trim().to_uppercase().as_str() {
+    let timing = match row
+        .timing
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_uppercase()
+        .as_str()
+    {
         "BEFORE" => TriggerTiming::Before,
         "INSTEAD OF" | "INSTEAD_OF" => TriggerTiming::InsteadOf,
         _ => TriggerTiming::After,
@@ -719,7 +742,14 @@ fn normalize_trigger_info(row: RawTriggerRow) -> TriggerInfo {
     if events.is_empty() {
         events.push(TriggerEvent::Insert);
     }
-    let for_each = match row.for_each.as_deref().unwrap_or("").trim().to_uppercase().as_str() {
+    let for_each = match row
+        .for_each
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_uppercase()
+        .as_str()
+    {
         "STATEMENT" => TriggerForEach::Statement,
         _ => TriggerForEach::Row,
     };
@@ -791,7 +821,10 @@ fn primary_key_from_columns(columns: &[RawColumnRow]) -> Option<PrimaryKeyInfo> 
     members.sort_by_key(|column| column.primary_key_ordinal.unwrap_or(i64::MAX));
     Some(PrimaryKeyInfo {
         name: None,
-        columns: members.into_iter().map(|column| column.name.clone()).collect(),
+        columns: members
+            .into_iter()
+            .map(|column| column.name.clone())
+            .collect(),
     })
 }
 
@@ -810,8 +843,18 @@ fn backfill_column_flags(
         }
     }
 
-    for index in indexes.iter().filter(|index| index.is_unique && index.columns.len() == 1) {
-        if let Some(column) = columns.iter_mut().find(|column| column.name == index.columns[0]) {
+    // Only a plain single-column unique key makes a column unique on its own:
+    // the PK has its own flag and a partial index only constrains some rows.
+    for index in indexes.iter().filter(|index| {
+        index.is_unique
+            && !index.is_primary
+            && index.where_clause.is_none()
+            && index.columns.len() == 1
+    }) {
+        if let Some(column) = columns
+            .iter_mut()
+            .find(|column| column.name == index.columns[0])
+        {
             column.is_unique = true;
         }
     }
@@ -820,12 +863,86 @@ fn backfill_column_flags(
         .iter()
         .filter(|fk| fk.columns.len() == 1 && fk.referenced_columns.len() == 1)
     {
-        if let Some(column) = columns.iter_mut().find(|column| column.name == foreign_key.columns[0]) {
+        if let Some(column) = columns
+            .iter_mut()
+            .find(|column| column.name == foreign_key.columns[0])
+        {
             column.foreign_key = Some(ForeignKeyRef {
                 table: foreign_key.referenced_table.clone(),
                 column: foreign_key.referenced_columns[0].clone(),
                 constraint_name: foreign_key.name.clone(),
             });
         }
+    }
+}
+
+/// An explicit schema means `name` is already bare, so dots inside it (a table
+/// called `odd.name`) survive; only a repeated `<schema>.` prefix is dropped.
+/// Without one, `schema.table` splits on the first dot.
+fn split_relation_name(schema: Option<&str>, name: &str) -> (Option<String>, String) {
+    match schema {
+        Some(schema) => {
+            let bare = name
+                .strip_prefix(schema)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .filter(|rest| !rest.is_empty())
+                .unwrap_or(name);
+            (Some(schema.to_string()), bare.to_string())
+        }
+        None => match name.split_once('.') {
+            Some((schema, table)) if !table.is_empty() => {
+                (Some(schema.to_string()), table.to_string())
+            }
+            _ => (None, name.to_string()),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relation_names_keep_dots_inside_a_scoped_name() {
+        let split = |schema: Option<&str>, name: &str| split_relation_name(schema, name);
+        let owned = |schema: &str, name: &str| (Some(schema.to_string()), name.to_string());
+        assert_eq!(split(Some("gui_a"), "odd.name"), owned("gui_a", "odd.name"));
+        assert_eq!(split(Some("gui_a"), "gui_a.items"), owned("gui_a", "items"));
+        assert_eq!(split(None, "sales.items"), owned("sales", "items"));
+        assert_eq!(split(None, "items"), (None, "items".to_string()));
+    }
+
+    #[test]
+    fn unique_flag_only_for_plain_single_column_unique_keys() {
+        let column = |name: &str| ColumnInfo {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        let index = |name: &str, columns: &[&str], is_primary: bool, where_clause: Option<&str>| {
+            IndexInfo {
+                name: name.to_string(),
+                columns: columns.iter().map(|c| c.to_string()).collect(),
+                is_unique: true,
+                is_primary,
+                where_clause: where_clause.map(str::to_string),
+                ..Default::default()
+            }
+        };
+        let mut columns = ["id", "tenant", "email", "number", "code"].map(column);
+        let indexes = [
+            index("pk", &["id"], true, None),
+            index("composite", &["tenant", "email"], false, None),
+            index("single", &["number"], false, None),
+            index("partial", &["code"], false, Some("code IS NOT NULL")),
+        ];
+
+        backfill_column_flags(&mut columns, None, &[], &indexes);
+
+        let unique: Vec<_> = columns
+            .iter()
+            .filter(|c| c.is_unique)
+            .map(|c| &*c.name)
+            .collect();
+        assert_eq!(unique, ["number"]);
     }
 }

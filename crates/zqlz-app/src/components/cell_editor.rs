@@ -1777,7 +1777,7 @@ impl CellEditorPanel {
                 },
             ),
         )
-        .flex_grow()
+        .flex_grow_1()
         .h_full()
         .w_full()
         .min_w(min_content_width)

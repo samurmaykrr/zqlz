@@ -35,6 +35,7 @@ pub mod sql_lexing;
 pub mod syntax_brackets;
 pub mod transaction;
 mod types;
+mod value_json;
 
 pub use connection::*;
 pub use connection_security::*;
@@ -137,7 +138,9 @@ pub use sql_lexing::{
     SqlDocumentSymbol, SqlParameterPlaceholder, SqlParameterPlaceholderKind, SqlProtectedRange,
     SqlProtectedRangeKind, SqlStatementSpan, SqlSymbolWord, is_compound_routine_header,
     is_position_in_sql_ranges, qualified_sql_reference_at_offset, qualified_sql_reference_prefix,
-    split_sql_statement_spans, split_sql_statements, sql_document_symbols,
+    SqlLexDialect, split_sql_statement_spans, split_sql_statement_spans_for_dialect,
+    split_sql_statements, split_sql_statements_for_dialect, sql_protected_ranges_for_dialect,
+    sql_statement_span_at_for_dialect, sql_document_symbols,
     sql_matching_qualified_symbol_segments, sql_matching_symbol_segments,
     sql_parameter_placeholders, sql_parameter_placeholders_with_ranges, sql_protected_range_at,
     sql_protected_ranges, sql_protected_ranges_with_unclosed_dollar_strings, sql_statement_span_at,

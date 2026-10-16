@@ -3,7 +3,7 @@
 //! This module analyzes query execution plans and provides optimization suggestions.
 //! It detects common performance issues and recommends improvements.
 
-use crate::explain::{NodeType, QueryPlan};
+use crate::explain::{NodeType, PlanNode, QueryPlan};
 use serde::{Deserialize, Serialize};
 
 /// Severity level for suggestions
@@ -319,6 +319,9 @@ impl QueryAnalyzer {
         // Check for multiple seq scans
         self.check_multiple_seq_scans(&plan, &mut analysis);
 
+        // MySQL-only findings (filesort, temporary tables, selective scans)
+        self.check_mysql_specific(&plan, &mut analysis);
+
         // Generate summary
         analysis.summary = self.generate_summary(&analysis);
 
@@ -347,7 +350,12 @@ impl QueryAnalyzer {
                         Suggestion::new(
                             SuggestionType::FullTableScan,
                             severity,
-                            format!("Full table scan on '{}' reading {} rows", table, rows),
+                            format!(
+                                "Full table scan on '{}' reading {} rows{}",
+                                table,
+                                rows,
+                                mysql_index_availability(node)
+                            ),
                             format!(
                                 "Consider adding an index on '{}' or filtering on indexed columns",
                                 table
@@ -428,7 +436,7 @@ impl QueryAnalyzer {
 
     fn check_large_sorts(&self, plan: &QueryPlan, analysis: &mut QueryAnalysis) {
         for node in plan.iter_nodes() {
-            if node.node_type == NodeType::Sort {
+            if node.node_type == NodeType::Sort && !extra_flag(node, &["using_filesort"]) {
                 let rows = node.rows.unwrap_or(0);
                 let memory = node.memory_used_kb.unwrap_or(0);
 
@@ -521,6 +529,115 @@ impl QueryAnalyzer {
         }
     }
 
+    /// MySQL plans carry flags the other providers have no equivalent for:
+    /// `Using filesort`, `Using temporary`, and the optimizer's `filtered` estimate.
+    fn check_mysql_specific(&self, plan: &QueryPlan, analysis: &mut QueryAnalysis) {
+        // Sorting: one suggestion per sorting node
+        for node in plan.iter_nodes() {
+            if !extra_flag(node, &["using_filesort"]) {
+                continue;
+            }
+            let rows = node.rows.unwrap_or(0);
+            let severity = if rows >= self.config.high_row_threshold {
+                SeverityLevel::Warning
+            } else {
+                SeverityLevel::Info
+            };
+            let subject = node
+                .relation
+                .as_deref()
+                .map(|table| format!(" for '{table}'"))
+                .unwrap_or_default();
+            let mut suggestion = Suggestion::new(
+                SuggestionType::LargeSort,
+                severity,
+                format!(
+                    "Rows are sorted with filesort (Using filesort){subject}{}",
+                    if rows > 0 {
+                        format!(", about {rows} rows")
+                    } else {
+                        String::new()
+                    }
+                ),
+                "Add an index that matches the ORDER BY / GROUP BY columns so MySQL can read rows already sorted, or reduce the rows being sorted",
+            )
+            .with_impact((rows as f64 / self.config.high_row_threshold as f64).clamp(0.3, 0.8));
+            if let Some(table) = node.relation.as_deref() {
+                suggestion = suggestion.with_table(table);
+            }
+            analysis.add_suggestion(suggestion);
+        }
+
+        // Temporary tables: one summary suggestion
+        let temporary: Vec<&PlanNode> = plan
+            .iter_nodes()
+            .filter(|node| extra_flag(node, &["using_temporary", "using_temporary_table"]))
+            .collect();
+        if !temporary.is_empty() {
+            let largest = temporary
+                .iter()
+                .filter_map(|node| node.rows)
+                .max()
+                .unwrap_or(0);
+            let severity = if largest >= self.config.high_row_threshold {
+                SeverityLevel::Warning
+            } else {
+                SeverityLevel::Info
+            };
+            analysis.add_suggestion(
+                Suggestion::new(
+                    SuggestionType::HighMemoryUsage,
+                    severity,
+                    format!(
+                        "Query builds {} temporary table(s) (Using temporary){}",
+                        temporary.len(),
+                        if largest > 0 {
+                            format!(", the largest holding about {largest} rows")
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    "Temporary tables spill to disk when they outgrow tmp_table_size; add an index for the GROUP BY / DISTINCT / UNION columns or filter earlier to keep them small",
+                )
+                .with_impact(0.4),
+            );
+        }
+
+        // Scans that read many rows only to throw most of them away
+        for node in plan.iter_nodes() {
+            let (Some(rows), Some(filtered)) = (
+                node.rows,
+                node.extra.get("filtered").and_then(|value| value.as_f64()),
+            ) else {
+                continue;
+            };
+            if !node.is_scan()
+                || rows < self.config.large_table_threshold
+                || filtered > (1.0 - self.config.filter_efficiency_threshold) * 100.0
+            {
+                continue;
+            }
+            let table = node
+                .relation
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            analysis.add_suggestion(
+                Suggestion::new(
+                    SuggestionType::InefficientFilter,
+                    SeverityLevel::Info,
+                    format!(
+                        "Scan of '{table}' examines about {rows} rows but only {filtered:.0}% are expected to match the conditions"
+                    ),
+                    format!(
+                        "Consider an index covering the filtered column(s) of '{table}' so fewer rows are read"
+                    ),
+                )
+                .with_table(&table)
+                .with_impact(1.0 - filtered / 100.0),
+            );
+        }
+    }
+
     fn generate_summary(&self, analysis: &QueryAnalysis) -> String {
         let critical = analysis
             .suggestions
@@ -538,23 +655,62 @@ impl QueryAnalyzer {
             .filter(|s| s.severity == SeverityLevel::Info)
             .count();
 
-        if analysis.suggestions.is_empty() {
+        let cost = analysis
+            .plan
+            .total_cost
+            .map(|cost| format!(" Estimated cost: {cost:.0}."))
+            .unwrap_or_default();
+
+        let verdict = if analysis.suggestions.is_empty() {
             "Query plan looks optimal - no issues detected.".to_string()
         } else if critical > 0 {
             format!(
-                "Query has {} critical issue(s), {} warning(s), and {} suggestion(s). Performance score: {}/100",
+                "Query has {} critical issue(s), {} warning(s), and {} suggestion(s). Performance score: {}/100.",
                 critical, warnings, info, analysis.performance_score
             )
         } else if warnings > 0 {
             format!(
-                "Query has {} warning(s) and {} suggestion(s). Performance score: {}/100",
+                "Query has {} warning(s) and {} suggestion(s). Performance score: {}/100.",
                 warnings, info, analysis.performance_score
             )
         } else {
             format!(
-                "Query has {} minor suggestion(s). Performance score: {}/100",
+                "Query has {} minor suggestion(s). Performance score: {}/100.",
                 info, analysis.performance_score
             )
+        };
+        format!("{verdict}{cost}")
+    }
+}
+
+/// Whether any of the boolean `extra` flags is set on a node.
+fn extra_flag(node: &PlanNode, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        node.extra
+            .get(*key)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    })
+}
+
+/// For a MySQL table access, says whether an index could have been used.
+/// Empty for other providers, whose nodes do not record `possible_keys`.
+fn mysql_index_availability(node: &PlanNode) -> String {
+    if !node.extra.contains_key("mysql_access_type") {
+        return String::new();
+    }
+    match node.extra.get("possible_keys") {
+        None => " (no usable index: possible_keys is NULL)".to_string(),
+        Some(keys) => {
+            let keys = match keys {
+                serde_json::Value::Array(items) => items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                other => other.as_str().unwrap_or_default().to_string(),
+            };
+            format!(" (the optimizer skipped available indexes: {keys})")
         }
     }
 }

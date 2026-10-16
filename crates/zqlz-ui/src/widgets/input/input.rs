@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, InteractiveElement as _,
-    IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce, StyleRefinement,
-    Styled, Window, div, px, relative,
+    IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce, Role,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div, px, relative,
 };
 
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -233,6 +233,43 @@ impl Input {
     }
 }
 
+/// Writes the role and ARIA metadata that expose an input's masking, mode,
+/// and content to assistive technology onto an already-`id`'d div.
+///
+/// A masked field must never expose its contents through the accessibility
+/// tree, so it reports only a role and never an aria value. Pulled out of
+/// `render` so the role/value selection logic can be exercised without a
+/// window.
+fn div_with_accessibility_info(
+    element: gpui::Stateful<gpui::Div>,
+    masked: bool,
+    single_line: bool,
+    placeholder: &str,
+    text: &str,
+) -> gpui::Stateful<gpui::Div> {
+    let role = if masked {
+        Role::PasswordInput
+    } else if single_line {
+        Role::TextInput
+    } else {
+        Role::MultilineTextInput
+    };
+    let placeholder = Some(placeholder.to_string()).filter(|value| !value.is_empty());
+    let value = if masked {
+        None
+    } else {
+        Some(text.to_string()).filter(|value| !value.is_empty())
+    };
+
+    element
+        .role(role)
+        .when_some(placeholder.clone(), |this, label| this.aria_label(label))
+        .when_some(placeholder, |this, placeholder| {
+            this.aria_placeholder(placeholder)
+        })
+        .when_some(value, |this, value| this.aria_value(value))
+}
+
 impl Styled for Input {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
@@ -277,8 +314,14 @@ impl RenderOnce for Input {
         // left the moment the user types the first character.
         let has_suffix = suffix.is_some() || state.loading || self.mask_toggle || self.cleanable;
 
-        div()
-            .id(("input", self.state.entity_id()))
+        let text = state.text.to_string();
+        div_with_accessibility_info(
+            div().id(("input", self.state.entity_id())),
+            state.masked,
+            state.mode.is_single_line(),
+            &state.placeholder,
+            &text,
+        )
             .flex()
             .key_context(crate::widgets::input::CONTEXT)
             .track_focus(&state.focus_handle.clone())
@@ -438,5 +481,61 @@ impl RenderOnce for Input {
                         .children(suffix),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::Element as _;
+    use gpui::accesskit;
+
+    use super::*;
+
+    /// Modeled on gpui's own `write_a11y_info` tests (see
+    /// `gpui::elements::div::tests`): build the same accessibility-carrying
+    /// div `render` builds, then read back the accesskit node it writes to,
+    /// so the masked/single-line/multi-line/empty branches are covered by the
+    /// real code path rather than a re-typed copy of its conditions.
+    #[test]
+    fn test_div_with_accessibility_info_role_and_value_selection() {
+        let single_line = div_with_accessibility_info(
+            div().id("single-line"),
+            false,
+            true,
+            "Search",
+            "hello",
+        );
+        assert_eq!(single_line.a11y_role(), Some(Role::TextInput));
+        let mut node = accesskit::Node::new(Role::TextInput);
+        single_line.write_a11y_info(&mut node);
+        assert_eq!(node.value(), Some("hello"));
+        assert_eq!(node.label(), Some("Search"));
+        assert_eq!(node.placeholder(), Some("Search"));
+
+        let empty_multi_line =
+            div_with_accessibility_info(div().id("multi-line"), false, false, "", "");
+        assert_eq!(empty_multi_line.a11y_role(), Some(Role::MultilineTextInput));
+        let mut node = accesskit::Node::new(Role::MultilineTextInput);
+        empty_multi_line.write_a11y_info(&mut node);
+        assert_eq!(
+            node.value(),
+            None,
+            "an empty field should not announce a value"
+        );
+        assert_eq!(node.label(), None, "an empty placeholder is not a label");
+
+        let masked = div_with_accessibility_info(div().id("password"), true, true, "PIN", "1234");
+        assert_eq!(
+            masked.a11y_role(),
+            Some(Role::PasswordInput),
+            "masking must take priority over the single/multi-line role"
+        );
+        let mut node = accesskit::Node::new(Role::PasswordInput);
+        masked.write_a11y_info(&mut node);
+        assert_eq!(
+            node.value(),
+            None,
+            "a masked field must never expose its contents to assistive technology"
+        );
     }
 }

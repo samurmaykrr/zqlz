@@ -1,7 +1,7 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_core::{
-    ObjectFeatureSet, ObjectFormMode, ObjectsPanelAction, ObjectsPanelObjectRef,
+    ObjectFeatureSet, ObjectFormMode, ObjectsPanelAction, ObjectsPanelObjectRef, TableRef,
     objects_panel_action_feature_availability,
 };
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
@@ -23,6 +23,14 @@ impl DriverObjectMenuContext {
             .as_ref()
             .map(|schema| format!("{schema}.{}", self.object_name))
             .unwrap_or_else(|| self.object_name.clone())
+    }
+
+    fn table(&self) -> TableRef {
+        TableRef::new(
+            self.database_name.clone(),
+            self.object_schema.clone(),
+            self.object_name.clone(),
+        )
     }
 
     fn object_ref(&self) -> ObjectsPanelObjectRef {
@@ -236,84 +244,28 @@ impl ConnectionSidebar {
         menu
     }
 
+    /// Whether the sidebar can dispatch `action_id`. Which actions apply to
+    /// which object kind is the driver manifest's decision — the only
+    /// object-type gate kept here mirrors the two handlers that genuinely
+    /// support just tables and views.
     fn supports_driver_object_action(action_id: &str, object_type: &str) -> bool {
         match action_id {
-            "copy_name" | "copy_qualified_name" | "refresh" => true,
-            "open" => true,
-            "inspect" => matches!(
-                object_type,
-                "document_collection" | "document_view" | "document_gridfs_bucket"
-            ),
-            "design" => matches!(
-                object_type,
-                "table"
-                    | "partitioned_table"
-                    | "foreign_table"
-                    | "view"
-                    | "materialized_view"
-                    | "function"
-                    | "procedure"
-                    | "trigger"
-                    | "event"
-                    | "document_collection"
-                    | "document_view"
-                    | "document_user"
-                    | "document_role"
-            ),
-            "rename" | "duplicate" | "delete" => matches!(
-                object_type,
-                "table"
-                    | "partitioned_table"
-                    | "foreign_table"
-                    | "view"
-                    | "materialized_view"
-                    | "trigger"
-                    | "event"
-                    | "document_collection"
-                    | "document_view"
-                    | "document_index"
-                    | "document_user"
-                    | "document_role"
-            ),
-            "empty" | "import" | "dump_sql_structure_data" | "dump_sql_structure" => {
-                matches!(object_type, "table" | "partitioned_table" | "foreign_table")
-            }
-            "export" => matches!(
+            "rename" | "duplicate" => matches!(
                 object_type,
                 "table" | "partitioned_table" | "foreign_table" | "view" | "materialized_view"
             ),
-            "view_history" => matches!(
-                object_type,
-                "table"
-                    | "partitioned_table"
-                    | "foreign_table"
-                    | "view"
-                    | "materialized_view"
-                    | "function"
-                    | "procedure"
-                    | "trigger"
-                    | "event"
-            ),
+            "open" | "inspect" | "design" | "delete" | "empty" | "import" | "export"
+            | "dump_sql_structure_data" | "dump_sql_structure" | "copy_name"
+            | "copy_qualified_name" | "view_history" | "refresh" => true,
             _ => false,
         }
     }
 
+    /// `new_*` toolbar actions dispatch generically through the object
+    /// designer keyed by the manifest kind, so any driver-declared creator is
+    /// supported.
     fn supports_driver_toolbar_action(action_id: &str) -> bool {
-        matches!(
-            action_id,
-            "refresh"
-                | "new_table"
-                | "new_view"
-                | "new_trigger"
-                | "new_function"
-                | "new_procedure"
-                | "new_event"
-                | "new_document_collection"
-                | "new_document_view"
-                | "new_document_index"
-                | "new_document_user"
-                | "new_document_role"
-        )
+        action_id == "refresh" || action_id.starts_with("new_")
     }
 
     pub(in crate::widgets) fn normalized_manifest_object_type(object_type: &str) -> &str {
@@ -353,7 +305,7 @@ impl ConnectionSidebar {
             "delete" => self.invoke_delete_object(context, cx),
             "empty" => cx.emit(ConnectionSidebarEvent::EmptyTable {
                 connection_id: context.connection_id,
-                table_name: context.object_name,
+                table: context.table(),
             }),
             "import" => cx.emit(ConnectionSidebarEvent::ImportData {
                 connection_id: context.connection_id,
@@ -407,21 +359,8 @@ impl ConnectionSidebar {
             "new_table" => cx.emit(ConnectionSidebarEvent::NewTable { connection_id }),
             "new_view" => cx.emit(ConnectionSidebarEvent::NewView { connection_id }),
             "new_trigger" => cx.emit(ConnectionSidebarEvent::NewTrigger { connection_id }),
-            "new_function" | "new_procedure" | "new_event" => {
-                let kind_id = action_id.trim_start_matches("new_").to_string();
-                cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
-                    connection_id,
-                    kind_id,
-                    mode: ObjectFormMode::Create,
-                    object_ref: None,
-                });
-            }
-            "new_document_collection"
-            | "new_document_view"
-            | "new_document_index"
-            | "new_document_user"
-            | "new_document_role" => {
-                let kind_id = action_id.trim_start_matches("new_").to_string();
+            other if other.starts_with("new_") => {
+                let kind_id = other.trim_start_matches("new_").to_string();
                 cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
                     connection_id,
                     kind_id,
@@ -438,14 +377,12 @@ impl ConnectionSidebar {
             "table" | "partitioned_table" | "foreign_table" => {
                 cx.emit(ConnectionSidebarEvent::OpenTable {
                     connection_id: context.connection_id,
-                    table_name: context.object_name,
-                    database_name: context.database_name,
+                    table: context.table(),
                 });
             }
             "view" | "materialized_view" => cx.emit(ConnectionSidebarEvent::OpenView {
                 connection_id: context.connection_id,
-                view_name: context.object_name,
-                database_name: context.database_name,
+                view: context.table().view(),
             }),
             "function" => cx.emit(ConnectionSidebarEvent::OpenFunction {
                 connection_id: context.connection_id,
@@ -476,7 +413,7 @@ impl ConnectionSidebar {
             "table" | "partitioned_table" | "foreign_table" => {
                 cx.emit(ConnectionSidebarEvent::DesignTable {
                     connection_id: context.connection_id,
-                    table_name: context.object_name,
+                    table: context.table(),
                 });
             }
             "view" | "materialized_view" => cx.emit(ConnectionSidebarEvent::DesignView {
@@ -501,21 +438,14 @@ impl ConnectionSidebar {
                 trigger_name: context.object_name,
                 object_schema: context.object_schema,
             }),
-            "event" => cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+            // Every other kind (events, sequences, document objects, ...)
+            // goes through the generic object designer keyed by manifest kind.
+            _ => cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
                 connection_id: context.connection_id,
-                kind_id: "event".to_string(),
+                kind_id: context.object_type.clone(),
                 mode: ObjectFormMode::Edit,
                 object_ref: Some(context.object_ref()),
             }),
-            "document_collection" | "document_view" | "document_user" | "document_role" => {
-                cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
-                    connection_id: context.connection_id,
-                    kind_id: context.object_type.clone(),
-                    mode: ObjectFormMode::Edit,
-                    object_ref: Some(context.object_ref()),
-                })
-            }
-            _ => {}
         }
     }
 
@@ -524,7 +454,7 @@ impl ConnectionSidebar {
             "table" | "partitioned_table" | "foreign_table" => {
                 cx.emit(ConnectionSidebarEvent::RenameTable {
                     connection_id: context.connection_id,
-                    table_name: context.object_name,
+                    table: context.table(),
                 });
             }
             "view" | "materialized_view" => cx.emit(ConnectionSidebarEvent::RenameView {
@@ -544,7 +474,7 @@ impl ConnectionSidebar {
             "table" | "partitioned_table" | "foreign_table" => {
                 cx.emit(ConnectionSidebarEvent::DuplicateTable {
                     connection_id: context.connection_id,
-                    table_name: context.object_name,
+                    table: context.table(),
                 });
             }
             "view" | "materialized_view" => cx.emit(ConnectionSidebarEvent::DuplicateView {
@@ -560,7 +490,7 @@ impl ConnectionSidebar {
             "table" | "partitioned_table" | "foreign_table" => {
                 cx.emit(ConnectionSidebarEvent::DeleteTable {
                     connection_id: context.connection_id,
-                    table_name: context.object_name,
+                    table: context.table(),
                 });
             }
             "view" | "materialized_view" => cx.emit(ConnectionSidebarEvent::DeleteView {
@@ -571,25 +501,14 @@ impl ConnectionSidebar {
                 connection_id: context.connection_id,
                 trigger_name: context.object_name,
             }),
-            "event" => cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+            // Every other kind drops through the generic object designer
+            // keyed by manifest kind.
+            _ => cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
                 connection_id: context.connection_id,
-                kind_id: "event".to_string(),
+                kind_id: context.object_type.clone(),
                 mode: ObjectFormMode::Drop,
                 object_ref: Some(context.object_ref()),
             }),
-            "document_collection"
-            | "document_view"
-            | "document_index"
-            | "document_user"
-            | "document_role" => {
-                cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
-                    connection_id: context.connection_id,
-                    kind_id: context.object_type.clone(),
-                    mode: ObjectFormMode::Drop,
-                    object_ref: Some(context.object_ref()),
-                });
-            }
-            _ => {}
         }
     }
 }

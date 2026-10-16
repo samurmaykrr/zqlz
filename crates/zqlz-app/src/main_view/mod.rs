@@ -38,6 +38,7 @@
 //!
 //! Toggle: Cmd/Ctrl + J or via toolbar button
 
+mod agent_handlers;
 mod command_palette_helpers;
 mod connection_handlers;
 mod connection_window;
@@ -52,7 +53,6 @@ mod saved_query_handlers;
 mod tab_menu;
 pub(crate) mod table_handlers;
 pub(crate) mod table_handlers_utils;
-mod table_workflow_adapter;
 mod ui_components;
 mod versioning_facade;
 mod versioning_handlers;
@@ -88,6 +88,7 @@ use crate::workspace_state::{
 };
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
 
+pub(crate) use agent_handlers::{AgentReply, AgentSqlRequest};
 pub use tab_menu::TabContextMenuState;
 
 const DOCK_AREA_ID: &str = "main-dock";
@@ -139,6 +140,8 @@ pub struct MainView {
     objects_panel: Entity<ObjectsPanel>,
     tab_context_menu: Option<Entity<TabContextMenuState>>,
     query_editors: Vec<WeakEntity<crate::components::QueryEditor>>,
+    /// One reusable "Agent" query tab per connection for MCP agent SQL.
+    agent_query_editors: HashMap<Uuid, WeakEntity<crate::components::QueryEditor>>,
     query_editor_subscriptions: HashMap<EntityId, Subscription>,
     query_editor_ids: HashMap<EntityId, EditorId>,
     table_viewer_subscriptions: HashMap<EntityId, Subscription>,
@@ -151,16 +154,8 @@ pub struct MainView {
     version_history_panel: Option<Entity<VersionHistoryPanel>>,
     /// Diff viewer panel (opened on demand)
     diff_viewer_panel: Option<Entity<DiffViewer>>,
-    /// Task for the most recent table-open async work. Replaced on every new
-    /// open_table_viewer call so that stale loads for a previous table are
-    /// automatically cancelled when the user rapidly clicks another table.
-    active_table_load_task: Option<Task<anyhow::Result<()>>>,
-    /// Monotonic ownership token for `active_table_load_task`.
-    ///
-    /// The open-viewer async flow only clears `active_table_load_task` when
-    /// the completion path still owns the latest token. This prevents an older
-    /// finishing task from clearing a newer in-flight task reference.
-    active_table_load_task_generation: u64,
+    /// Correlates open-viewer log lines; each viewer owns its own load task.
+    open_viewer_request_counter: u64,
     restored_session_viewer_connections: HashSet<Uuid>,
     _subscriptions: Vec<Subscription>,
 }
@@ -565,6 +560,7 @@ impl MainView {
             objects_panel,
             tab_context_menu: None,
             query_editors: Vec::new(),
+            agent_query_editors: HashMap::new(),
             query_editor_subscriptions: HashMap::new(),
             query_editor_ids: HashMap::new(),
             table_viewer_subscriptions: HashMap::new(),
@@ -574,8 +570,7 @@ impl MainView {
             version_repository,
             version_history_panel: None,
             diff_viewer_panel: None,
-            active_table_load_task: None,
-            active_table_load_task_generation: 0,
+            open_viewer_request_counter: 0,
             restored_session_viewer_connections: HashSet::new(),
             _subscriptions: vec![
                 sidebar_subscription,
@@ -729,19 +724,17 @@ impl MainView {
 
             let restored_tab = tab.clone();
             match tab.kind {
-                WorkspaceSessionViewerKind::Table {
-                    table_name,
-                    database_name,
-                    is_view,
-                    viewer_state,
+                ref kind @ WorkspaceSessionViewerKind::Table {
+                    ref viewer_state, ..
                 } => {
+                    let Some(table) = kind.table_ref() else {
+                        continue;
+                    };
                     self.open_table_viewer_with_session_state(
                         table_handlers::TableViewerSessionOpenRequest {
                             connection_id: tab.connection_id,
-                            table_name,
-                            database_name,
-                            is_view,
-                            session_state: viewer_state,
+                            table,
+                            session_state: viewer_state.clone(),
                         },
                         window,
                         cx,
@@ -1113,6 +1106,7 @@ impl Render for MainView {
             .on_action(cx.listener(Self::handle_close_window))
             .on_action(cx.listener(Self::handle_minimize_window))
             .on_action(cx.listener(Self::handle_zoom_window))
+            .on_action(cx.listener(Self::handle_copy_accessibility_tree))
             .on_action(cx.listener(Self::handle_new_query))
             .on_action(cx.listener(Self::handle_new_connection))
             .on_action(cx.listener(Self::handle_refresh_connection))

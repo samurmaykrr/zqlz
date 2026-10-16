@@ -2,10 +2,11 @@
 //!
 //! This is the main entry point for the ZQLZ application.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 #![allow(unexpected_cfgs)]
 
 mod actions;
+mod agent_tools;
 mod app;
 mod app_init;
 mod app_menus;
@@ -24,11 +25,11 @@ mod window_manager;
 mod workspace;
 mod workspace_state;
 
+use futures::StreamExt as _;
 use gpui::*;
 use panic_handler::{PanicData, PanicHandler};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use url::Url;
 use zqlz_settings::ZqlzSettings;
 use zqlz_ui::widgets::{Root, menu::AppMenuBar};
@@ -37,6 +38,11 @@ use crate::app::AppState;
 use crate::main_view::MainView;
 
 fn main() {
+    // Must run before logging init: this binary is linked as a Windows-subsystem
+    // application, so it starts with no console and the `eprintln!` below would
+    // otherwise go nowhere.
+    logging::attach_parent_console(foreground_requested());
+
     // Initialize comprehensive logging system first
     // This sets up both console and file logging with JSON output for bug reports
     if let Err(e) = logging::init_default() {
@@ -127,17 +133,20 @@ fn main() {
 
         let startup_targets = snapshot_launch_targets(&launch_targets);
 
+        agent_tools::load_agent_access_policy(cx);
+
         // Start the IPC server so the `zqlz` CLI can communicate with this
         // running instance. We clone only the Arc fields we need so the handle
         // is Send + Sync without pulling AppState out of GPUI's context.
         let state = cx.global::<AppState>();
+        let (ui_jobs, ui_job_receiver) = futures::channel::mpsc::unbounded();
         let ipc_handle = ipc_server::IpcServerHandle {
             connection_service: state.connection_service.clone(),
             query_service: state.query_service.clone(),
             query_history: state.query_history.clone(),
             storage: state.storage.clone(),
+            ui_jobs,
         };
-        let forwarded_targets_queue = ipc_handle.open_targets_queue();
 
         match ipc_server::default_socket_path() {
             Ok(socket_path) => {
@@ -179,11 +188,7 @@ fn main() {
 
         // Open the main window
         tracing::info!("Opening main window...");
-        let result = open_main_window(
-            cx,
-            launch_targets.clone(),
-            forwarded_targets_queue.clone(),
-        );
+        let result = open_main_window(cx, launch_targets.clone(), ui_job_receiver);
         if let Err(e) = result {
             tracing::error!("Failed to open main window: {}", e);
         }
@@ -207,7 +212,7 @@ impl Global for AppMenuBarGlobal {}
 fn open_main_window(
     cx: &mut App,
     launch_targets: Arc<Mutex<Vec<String>>>,
-    forwarded_targets_queue: ipc_server::OpenTargetsQueue,
+    ui_job_receiver: ipc_server::UiJobReceiver,
 ) -> anyhow::Result<()> {
     window_manager::open_main_window(cx, move |window, cx| {
         // Apply saved settings (fonts, scrollbar, mode)
@@ -226,23 +231,28 @@ fn open_main_window(
             });
         }
 
-        start_forwarded_targets_runtime(
-            &main_view,
-            launch_targets.clone(),
-            forwarded_targets_queue.clone(),
-            window,
-            cx,
-        );
+        start_ui_job_runtime(&main_view, ui_job_receiver, window, cx);
 
         // Wrap in Root for theme support, dialogs, notifications, etc.
         cx.new(|cx| Root::new(main_view, window, cx))
     })
 }
 
+/// The hidden `--foreground` flag passed by `zqlz --foreground`, which asks this
+/// process to attach to the launching terminal instead of detaching from it.
+const FOREGROUND_FLAG: &str = "--foreground";
+
+fn foreground_requested() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == FOREGROUND_FLAG)
+}
+
 fn collect_launch_targets() -> Arc<Mutex<Vec<String>>> {
     let targets = std::env::args_os()
         .skip(1)
         .map(|argument| argument.to_string_lossy().into_owned())
+        .filter(|argument| argument != FOREGROUND_FLAG)
         .collect::<Vec<_>>();
     Arc::new(Mutex::new(targets))
 }
@@ -257,7 +267,7 @@ fn snapshot_launch_targets(launch_targets: &Arc<Mutex<Vec<String>>>) -> Vec<Stri
     }
 }
 
-fn path_from_open_target(target: &str) -> Option<PathBuf> {
+pub(crate) fn path_from_open_target(target: &str) -> Option<PathBuf> {
     if let Ok(url) = Url::parse(target) {
         match url.scheme() {
             "file" => return url.to_file_path().ok(),
@@ -285,56 +295,27 @@ fn drain_launch_target_paths(launch_targets: &Arc<Mutex<Vec<String>>>) -> Vec<Pa
         .collect()
 }
 
-fn move_forwarded_targets_to_launch_queue(
-    launch_targets: &Arc<Mutex<Vec<String>>>,
-    forwarded_targets_queue: &ipc_server::OpenTargetsQueue,
-) {
-    let mut forwarded_targets = forwarded_targets_queue.write();
-    if forwarded_targets.is_empty() {
-        return;
-    }
-
-    let Ok(mut pending_targets) = launch_targets.lock() else {
-        tracing::warn!("failed to acquire launch target queue for forwarded targets");
-        return;
-    };
-
-    pending_targets.extend(std::mem::take(&mut *forwarded_targets));
-}
-
-fn start_forwarded_targets_runtime(
+/// Runs work posted by the IPC server (forwarded open targets, MCP agent
+/// tools) against the main view as it arrives.
+fn start_ui_job_runtime(
     main_view: &Entity<MainView>,
-    launch_targets: Arc<Mutex<Vec<String>>>,
-    forwarded_targets_queue: ipc_server::OpenTargetsQueue,
+    mut ui_job_receiver: ipc_server::UiJobReceiver,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let main_view = main_view.downgrade();
-    let main_view_for_task = main_view.clone();
-    if let Err(error) = main_view.update(cx, |_, cx| {
-        cx.spawn_in(window, async move |_main_view, cx| {
-            loop {
-                move_forwarded_targets_to_launch_queue(&launch_targets, &forwarded_targets_queue);
-
-                let paths = drain_launch_target_paths(&launch_targets);
-                if !paths.is_empty()
-                    && let Err(error) = main_view_for_task.update_in(cx, |main_view, window, cx| {
-                        for path in &paths {
-                            main_view.open_external_path(path, window, cx);
-                        }
-                    })
+    main_view.update(cx, |_, cx| {
+        cx.spawn_in(window, async move |main_view, cx| {
+            while let Some(job) = ui_job_receiver.next().await {
+                if let Err(error) =
+                    main_view.update_in(cx, |main_view, window, cx| job(main_view, window, cx))
                 {
-                    tracing::debug!(%error, "stopping forwarded target runtime poller");
+                    tracing::debug!(%error, "stopping IPC UI job runtime");
                     break;
                 }
-
-                smol::Timer::after(Duration::from_millis(250)).await;
             }
         })
         .detach();
-    }) {
-        tracing::debug!(%error, "failed to start forwarded target runtime poller");
-    }
+    });
 }
 
 fn path_from_zqlz_url(url: &Url) -> Option<PathBuf> {

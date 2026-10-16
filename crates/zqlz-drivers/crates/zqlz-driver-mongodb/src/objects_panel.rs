@@ -91,7 +91,7 @@ pub fn document_databases_and_objects(
             "size".to_string(),
             collection
                 .size_bytes
-                .map(|size| size.to_string())
+                .map(format_size)
                 .unwrap_or_else(|| "-".to_string()),
         );
 
@@ -335,7 +335,7 @@ fn push_document_gridfs_row(rows: &mut Vec<ObjectsPanelRow>, bucket: DocumentGri
         "size".to_string(),
         bucket
             .size_bytes
-            .map(|size| size.to_string())
+            .map(format_size)
             .unwrap_or_else(|| "-".to_string()),
     );
 
@@ -513,4 +513,19 @@ fn document_read_only_actions() -> Vec<ObjectsPanelAction> {
         ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
         ObjectsPanelAction::new("refresh", "Refresh"),
     ]
+}
+
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }

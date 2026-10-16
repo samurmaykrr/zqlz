@@ -85,24 +85,8 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
                     cx,
                 );
             }
-            Self::OpenTables {
-                object_names,
-                database_name,
-            } => {
-                main_view.open_tables(
-                    connection_id,
-                    object_names,
-                    database_name,
-                    false,
-                    window,
-                    cx,
-                );
-            }
-            Self::OpenViews {
-                object_names,
-                database_name,
-            } => {
-                main_view.open_tables(connection_id, object_names, database_name, true, window, cx);
+            Self::OpenTables { tables } => {
+                main_view.open_tables(connection_id, tables, window, cx);
             }
             Self::OpenFunction { function_ref } | Self::DesignFunction { function_ref } => {
                 main_view.open_function_definition(
@@ -155,8 +139,8 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
                     cx,
                 );
             }
-            Self::DesignTables { object_names } => {
-                main_view.design_tables(connection_id, object_names, window, cx);
+            Self::DesignTables { tables } => {
+                main_view.design_tables(connection_id, tables, window, cx);
             }
             Self::DesignViews { object_names } => {
                 main_view.design_views(connection_id, object_names, window, cx);
@@ -208,11 +192,11 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
             Self::RenameView { view_name } => {
                 main_view.rename_view(connection_id, view_name, window, cx);
             }
-            Self::RenameTable { table_name } => {
-                main_view.rename_table(connection_id, table_name, window, cx);
+            Self::RenameTable { table } => {
+                main_view.rename_table(connection_id, table, window, cx);
             }
-            Self::DeleteTables { object_names } => {
-                main_view.delete_tables(connection_id, object_names, window, cx);
+            Self::DeleteTables { tables } => {
+                main_view.delete_tables(connection_id, tables, window, cx);
             }
             Self::DeleteViews { object_names } => {
                 main_view.delete_views(connection_id, object_names, window, cx);
@@ -223,17 +207,14 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
             Self::DeleteKeys { key_names } => {
                 main_view.delete_keys(connection_id, key_names, window, cx);
             }
-            Self::DuplicateTables { object_names } => {
-                main_view.duplicate_tables(connection_id, object_names, window, cx);
+            Self::DuplicateTables { tables } => {
+                main_view.duplicate_tables(connection_id, tables, window, cx);
             }
             Self::DuplicateViews { object_names } => {
                 main_view.duplicate_views(connection_id, object_names, window, cx);
             }
-            Self::EmptyTable { table_name } => {
-                main_view.empty_table(connection_id, table_name, window, cx);
-            }
-            Self::EmptyTables { table_names } => {
-                main_view.empty_tables(connection_id, table_names, window, cx);
+            Self::EmptyTables { tables } => {
+                main_view.empty_tables(connection_id, tables, window, cx);
             }
             Self::ImportTable { table_name } => {
                 main_view.import_data(connection_id, table_name, window, cx);
@@ -473,7 +454,7 @@ mod tests {
     use super::*;
     use zqlz_core::{
         FeatureAvailability, ObjectFeatureSet, ObjectFormMode, ObjectsPanelManifest,
-        ObjectsPanelObjectKind, format_qualified_object_name, parse_redis_database_index,
+        ObjectsPanelObjectKind, TableRef, format_qualified_object_name, parse_redis_database_index,
     };
     use zqlz_services::{ActionRegistryError, ObjectsPanelActionResolutionTelemetry};
     use zqlz_versioning::DatabaseObjectType;
@@ -863,8 +844,7 @@ mod tests {
         assert_eq!(
             action_resolution,
             ResolvedObjectsPanelAction::OpenTables {
-                object_names: vec!["users".to_string()],
-                database_name: Some("main".to_string()),
+                tables: vec![TableRef::new(Some("main".to_string()), None, "users")],
             }
         );
     }
@@ -882,8 +862,11 @@ mod tests {
         assert_eq!(
             action_resolution,
             ResolvedObjectsPanelAction::OpenTables {
-                object_names: vec!["public.event_log".to_string()],
-                database_name: Some("erp_lab".to_string()),
+                tables: vec![TableRef::new(
+                    Some("erp_lab".to_string()),
+                    Some("public".to_string()),
+                    "event_log"
+                )],
             }
         );
     }
@@ -905,8 +888,11 @@ mod tests {
         assert_eq!(
             action_resolution,
             ResolvedObjectsPanelAction::OpenTables {
-                object_names: vec!["analytics.dim_dates".to_string()],
-                database_name: Some("erp_lab".to_string()),
+                tables: vec![TableRef::new(
+                    Some("erp_lab".to_string()),
+                    Some("analytics".to_string()),
+                    "dim_dates"
+                )],
             }
         );
     }
@@ -923,9 +909,8 @@ mod tests {
 
         assert_eq!(
             action_resolution,
-            ResolvedObjectsPanelAction::OpenViews {
-                object_names: vec!["users_view".to_string()],
-                database_name: Some("main".to_string()),
+            ResolvedObjectsPanelAction::OpenTables {
+                tables: vec![TableRef::new(Some("main".to_string()), None, "users_view").view()],
             }
         );
     }
@@ -942,9 +927,15 @@ mod tests {
 
         assert_eq!(
             action_resolution,
-            ResolvedObjectsPanelAction::OpenViews {
-                object_names: vec!["analytics.orders_view".to_string()],
-                database_name: Some("erp_lab".to_string()),
+            ResolvedObjectsPanelAction::OpenTables {
+                tables: vec![
+                    TableRef::new(
+                        Some("erp_lab".to_string()),
+                        Some("analytics".to_string()),
+                        "orders_view"
+                    )
+                    .view()
+                ],
             }
         );
     }
@@ -1441,8 +1432,7 @@ mod tests {
         assert_eq!(
             action_resolution,
             ResolvedObjectsPanelAction::OpenTables {
-                object_names: vec!["users".to_string()],
-                database_name: Some("main".to_string()),
+                tables: vec![TableRef::new(Some("main".to_string()), None, "users")],
             }
         );
     }

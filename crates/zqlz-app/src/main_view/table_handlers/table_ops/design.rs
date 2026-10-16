@@ -3,12 +3,15 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{ConnectionScope, TableDetails};
+use zqlz_core::{ConnectionScope, TableDetails, TableRef};
 use zqlz_ui::widgets::WindowExt;
 use zqlz_versioning::{DatabaseObjectType, make_object_id};
 
 use crate::app::AppState;
 use crate::main_view::MainView;
+use crate::main_view::table_handlers::standalone_events::{
+    BecameActiveRequest, handle_became_active_event, handle_became_inactive_event,
+};
 
 pub(in crate::main_view) struct TableDesignSaveRequest {
     pub connection_id: Uuid,
@@ -22,34 +25,11 @@ impl MainView {
     pub(in crate::main_view) fn design_table(
         &mut self,
         connection_id: Uuid,
-        table_name: String,
+        table: TableRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(decision) =
-            self.decide_design_tables_workflow(connection_id, vec![table_name], window, cx)
-        else {
-            return;
-        };
-
-        let Some(request) = decision.requests.into_iter().next() else {
-            tracing::warn!(
-                connection_id = %connection_id,
-                "Single-table design request produced no workflow requests"
-            );
-            return;
-        };
-
-        self.open_table_designer(request.connection_id, request.table_name, window, cx);
-    }
-
-    fn open_table_designer(
-        &mut self,
-        connection_id: Uuid,
-        table_name: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+        let table_name = table.name.clone();
         tracing::info!(
             "Design table: {} on connection {}",
             table_name,
@@ -63,20 +43,12 @@ impl MainView {
 
         let table_design_service = app_state.table_design_service.clone();
         let connection_service = app_state.connection_service.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
 
         let table_name_clone = table_name.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let scope = target_database
-                .map(ConnectionScope::Database)
-                .unwrap_or(ConnectionScope::Default);
             let resolved_connection = match connection_service
-                .resolve_connection(connection_id, scope)
+                .resolve_connection(connection_id, table.scope())
                 .await
             {
                 Ok(resolved_connection) => resolved_connection,
@@ -99,7 +71,15 @@ impl MainView {
 
             let dialect = table_design_service
                 .dialect_for_connection(resolved_connection.connection.as_ref());
-            let object_schema = resolved_connection.effective_namespace.clone();
+            let object_schema = table
+                .schema
+                .clone()
+                .or_else(|| resolved_connection.effective_namespace.clone());
+            let bare_table_name = table.name.clone();
+            let activity_table = TableRef {
+                schema: object_schema.clone(),
+                ..table.clone()
+            };
 
             // Load table structure
             match table_design_service
@@ -107,7 +87,7 @@ impl MainView {
                     resolved_connection.connection,
                     dialect,
                     object_schema.as_deref(),
-                    &table_name_clone,
+                    &bare_table_name,
                 )
                 .await
             {
@@ -141,6 +121,41 @@ impl MainView {
                                 }
                             });
                             main_view._subscriptions.push(subscription);
+
+                            // The inspector otherwise keeps describing whichever object
+                            // was active before the designer tab opened.
+                            let activity_table = activity_table.clone();
+                            let activity_subscription = cx.subscribe_in(&panel, window, {
+                                move |this,
+                                      _panel,
+                                      activity: &zqlz_table_designer::TableDesignerActivity,
+                                      window,
+                                      cx| match activity {
+                                    zqlz_table_designer::TableDesignerActivity::BecameActive => {
+                                        handle_became_active_event(
+                                            BecameActiveRequest {
+                                                connection_id,
+                                                table: activity_table.clone(),
+                                            },
+                                            this.schema_details_panel.clone(),
+                                            this.results_panel.clone(),
+                                            &this.workspace_controller,
+                                            &this.inspector_panel,
+                                            window,
+                                            cx,
+                                        )
+                                    }
+                                    zqlz_table_designer::TableDesignerActivity::BecameInactive => {
+                                        handle_became_inactive_event(
+                                            connection_id,
+                                            &activity_table,
+                                            &this.schema_details_panel,
+                                            cx,
+                                        )
+                                    }
+                                }
+                            });
+                            main_view._subscriptions.push(activity_subscription);
                             main_view.workspace_controller.update(cx, |workspace, cx| {
                                 workspace.add_center_item(Arc::new(panel.clone()), window, cx);
                             });
@@ -172,18 +187,12 @@ impl MainView {
     pub(in crate::main_view) fn design_tables(
         &mut self,
         connection_id: Uuid,
-        table_names: Vec<String>,
+        tables: Vec<TableRef>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(decision) =
-            self.decide_design_tables_workflow(connection_id, table_names, window, cx)
-        else {
-            return;
-        };
-
-        for request in decision.requests {
-            self.open_table_designer(request.connection_id, request.table_name, window, cx);
+        for table in tables {
+            self.design_table(connection_id, table, window, cx);
         }
     }
 

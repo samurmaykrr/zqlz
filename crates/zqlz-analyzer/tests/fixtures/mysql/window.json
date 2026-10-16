@@ -1,0 +1,51 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "169711.19"
+    },
+    "windowing": {
+      "windows": [
+        {
+          "name": "<unnamed window>",
+          "using_filesort": true,
+          "filesort_key": [
+            "`tenant_id`",
+            "`order_timestamp`"
+          ],
+          "functions": [
+            "row_number"
+          ]
+        }
+      ],
+      "cost_info": {
+        "sort_cost": "152189.00"
+      },
+      "table": {
+        "table_name": "orders_orders",
+        "access_type": "index",
+        "key": "idx_orders_tenant_time",
+        "used_key_parts": [
+          "tenant_id",
+          "order_timestamp"
+        ],
+        "key_length": "149",
+        "rows_examined_per_scan": 152189,
+        "rows_produced_per_join": 152189,
+        "filtered": "100.00",
+        "using_index": true,
+        "cost_info": {
+          "read_cost": "2303.29",
+          "eval_cost": "15218.90",
+          "prefix_cost": "17522.19",
+          "data_read_per_join": "208M"
+        },
+        "used_columns": [
+          "order_id",
+          "tenant_id",
+          "order_timestamp"
+        ]
+      }
+    }
+  }
+}

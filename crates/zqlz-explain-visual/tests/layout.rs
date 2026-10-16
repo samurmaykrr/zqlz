@@ -2,7 +2,7 @@ use zqlz_analyzer::{
     QueryAnalysis,
     explain::{JoinType, NodeType, PlanNode, QueryPlan},
 };
-use zqlz_explain_visual::{ExplainGraph, IconFamily, icon_family, provider_label};
+use zqlz_explain_visual::{COST_THRESHOLD, ExplainGraph, IconFamily, icon_family, provider_label};
 
 #[test]
 fn layout_for_multijoin_plan_keeps_depth_and_branches_readable() {
@@ -46,17 +46,17 @@ fn cost_highlight_points_at_the_expensive_node_not_the_root() {
     // highlight must not use it.
     assert_eq!(root.cost_percent(graph.root_total_cost()), 1.0);
     assert!(root.self_cost_percent(graph.root_total_cost()) < 0.01);
-    assert!(!root.exceeds_threshold(graph.root_total_cost()));
+    assert!(!root.exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD));
 
     assert!(product_scan.cost_percent(graph.root_total_cost()) < 0.01);
-    assert!(!product_scan.exceeds_threshold(graph.root_total_cost()));
+    assert!(!product_scan.exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD));
 
-    assert!(order_items_scan.exceeds_threshold(graph.root_total_cost()));
+    assert!(order_items_scan.exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD));
 
     let highlighted = graph
         .nodes()
         .iter()
-        .filter(|node| node.exceeds_threshold(graph.root_total_cost()))
+        .filter(|node| node.exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD))
         .count();
     assert_eq!(highlighted, 1);
 }
@@ -100,9 +100,8 @@ fn row_label_contrasts_estimate_with_actual_when_analyze_data_is_present() {
         .with_rows(2_000_000);
     estimate_only.filter = Some("(status = 'open')".to_string());
 
-    let graph = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(
-        estimate_only.clone(),
-    )));
+    let graph =
+        ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(estimate_only.clone())));
     let node = graph.nodes().first().expect("root");
     assert_eq!(node.rows_label().as_deref(), Some("2.0M rows"));
 
@@ -114,6 +113,64 @@ fn row_label_contrasts_estimate_with_actual_when_analyze_data_is_present() {
     let node = graph.nodes().first().expect("root");
     assert_eq!(node.rows_label().as_deref(), Some("est 2.0M / act 12"));
     assert!(node.copy_payload().contains("Rows Removed by Filter: 2.0M"));
+}
+
+#[test]
+fn fit_zoom_is_width_first_readable_and_centers_small_plans() {
+    let graph = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(sample_plan())));
+    let (width, height) = (900.0, 360.0);
+
+    let zoom = graph.fit_zoom(width);
+    assert!((0.6..=1.0).contains(&zoom));
+    // Very narrow viewports stop at the readable minimum and scroll.
+    assert_eq!(graph.fit_zoom(10.0), 0.6);
+    assert_eq!(graph.fit_zoom(100_000.0), 1.0);
+
+    let single_node = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(
+        PlanNode::new(NodeType::SeqScan),
+    )));
+    assert_eq!(single_node.fit_zoom(width), 1.0);
+    let (offset_x, offset_y) = single_node.centering_offset(1.0, width, height);
+    assert!(offset_x > 0.0 && offset_y > 0.0);
+    assert_eq!(single_node.centering_offset(1.0, 10.0, 10.0), (0.0, 0.0));
+}
+
+#[test]
+fn a_plan_taller_than_the_viewport_is_anchored_to_the_top() {
+    let graph = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(sample_plan())));
+
+    // Centering a taller-than-viewport child would push its top out of reach.
+    let (offset_x, offset_y) = graph.centering_offset(1.0, 100_000.0, 40.0);
+    assert!(offset_x > 0.0, "spare width still centers horizontally");
+    assert_eq!(offset_y, 0.0);
+    assert_eq!(graph.centering_offset(1.0, 100_000.0, 300.0).1, 0.0);
+}
+
+#[test]
+fn initial_scroll_brings_the_root_into_a_short_viewport() {
+    let graph = ExplainGraph::from_analysis(&QueryAnalysis::new(QueryPlan::new(sample_plan())));
+    let root = graph.nodes().first().expect("root");
+    let (root_x, root_y) = root.position();
+
+    // A dock a few dozen pixels tall: the root's top edge must be on screen.
+    let (_, scroll_y) = graph.initial_scroll(1.0, 1400.0, 40.0);
+    assert!(scroll_y > 0.0, "root sits below the blank top padding");
+    assert!(
+        (0.0..40.0).contains(&(root_y - scroll_y)),
+        "root top at {}",
+        root_y - scroll_y
+    );
+
+    // A taller viewport shows the whole root node.
+    let (_, scroll_y) = graph.initial_scroll(1.0, 1400.0, 400.0);
+    assert!(root_y - scroll_y >= 0.0 && root_y + 148.0 - scroll_y <= 400.0);
+
+    // Narrow viewports keep the root horizontally on screen too.
+    let (scroll_x, _) = graph.initial_scroll(0.6, 120.0, 400.0);
+    assert!((0.0..120.0).contains(&(root_x * 0.6 - scroll_x)));
+
+    // Nothing to scroll when the plan fits.
+    assert_eq!(graph.initial_scroll(1.0, 100_000.0, 100_000.0), (0.0, 0.0));
 }
 
 #[test]
@@ -161,6 +218,106 @@ fn detail_payload_includes_provider_specific_fields() {
     assert!(payload.contains("Index: customers_email_per_tenant_unique"));
     assert!(payload.contains("Provider Extra"));
     assert!(payload.contains("Parent Relationship"));
+}
+
+fn mysql_graph(fixture: &str) -> ExplainGraph {
+    let path = format!(
+        "{}/../zqlz-analyzer/tests/fixtures/mysql/{fixture}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).expect("fixture");
+    let plan = zqlz_analyzer::explain::parse_mysql_explain(&text).expect("mysql plan");
+    ExplainGraph::from_analysis(&zqlz_analyzer::QueryAnalyzer::new().analyze(plan))
+}
+
+#[test]
+fn mysql_nodes_use_mysql_operation_names() {
+    let graph = mysql_graph("join3.tree.txt");
+    let names: Vec<&str> = graph.nodes().iter().map(|node| node.short_name()).collect();
+    assert_eq!(names[0], "Limit");
+    assert_eq!(graph.nodes()[0].secondary_label().as_deref(), Some("20 row(s)"));
+    assert!(names.contains(&"Nested loop inner join"));
+    assert!(names.contains(&"Covering index scan"));
+    assert!(names.contains(&"Index lookup"));
+    assert!(!names.iter().any(|name| name.contains("Unknown")));
+
+    let lookup = graph
+        .nodes()
+        .iter()
+        .find(|node| node.short_name() == "Index lookup")
+        .unwrap();
+    assert_eq!(lookup.icon_family(), IconFamily::IndexScan);
+    assert!(
+        lookup
+            .secondary_label()
+            .unwrap()
+            .contains("using idx_order")
+    );
+
+    for fixture in ["scan.json", "scan.classic.txt", "union.tree.txt", "cte.tree.txt"] {
+        let graph = mysql_graph(fixture);
+        assert!(
+            graph
+                .nodes()
+                .iter()
+                .all(|node| !node.short_name().contains("Unknown")),
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
+fn mysql_plan_fits_the_dock_with_the_root_visible() {
+    for fixture in ["join3.tree.txt", "union.tree.txt", "semi.json", "scan.tree.txt"] {
+        let graph = mysql_graph(fixture);
+        let zoom = graph.fit_zoom(900.0);
+        assert!((0.6..=1.0).contains(&zoom), "{fixture}");
+        let (root_x, root_y) = graph.nodes()[0].position();
+        let (scroll_x, scroll_y) = graph.initial_scroll(zoom, 900.0, 40.0);
+        assert!((0.0..900.0).contains(&(root_x * zoom - scroll_x)), "{fixture}");
+        assert!((0.0..40.0).contains(&(root_y * zoom - scroll_y)), "{fixture}");
+    }
+}
+
+#[test]
+fn mysql_cost_highlight_points_at_the_expensive_node() {
+    // the semi-join's nested loop multiplies 152k rows by a 74k-cost lookup
+    let graph = mysql_graph("semi.tree.txt");
+    let highlighted: Vec<&str> = graph
+        .nodes()
+        .iter()
+        .filter(|node| node.exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD))
+        .map(|node| node.short_name())
+        .collect();
+    assert_eq!(highlighted, ["Nested loop inner join"]);
+
+    // the cumulative estimate never flags the pass-through root
+    let graph = mysql_graph("group_order_limit.tree.txt");
+    assert!(!graph.nodes()[0].exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD));
+}
+
+#[test]
+fn explain_analyze_highlights_by_measured_self_time() {
+    let graph = mysql_graph("semi.analyze.txt");
+    let highlighted: Vec<String> = graph
+        .nodes()
+        .iter()
+        .filter(|node| node.exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD))
+        .map(|node| node.display_label().to_string())
+        .collect();
+    // 1.9 s of the 2.7 s go into scanning order_items; 0.6 s into orders_orders
+    assert_eq!(highlighted, ["orders_orders", "orders_order_items"]);
+    assert!(!graph.nodes()[0].exceeds_threshold(graph.root_total_cost(), COST_THRESHOLD));
+
+    let lookup = graph
+        .nodes()
+        .iter()
+        .find(|node| node.short_name() == "Single-row index lookup")
+        .unwrap();
+    assert_eq!(lookup.rows_label().as_deref(), Some("est 1 / act 0 x150.0K"));
+    let payload = lookup.copy_payload();
+    assert!(payload.contains("Total Time (all loops): 506 ms"), "{payload}");
+    assert!(payload.contains("Self Time"), "{payload}");
 }
 
 fn sample_plan() -> PlanNode {

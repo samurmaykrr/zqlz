@@ -61,16 +61,13 @@ impl TableDesignService {
         schema: Option<&str>,
         table_name: &str,
     ) -> ServiceResult<TableDesign> {
-        let schema_introspection = connection
-            .as_schema_introspection()
-            .ok_or(ServiceError::SchemaNotSupported)?;
+        if connection.as_schema_introspection().is_none() {
+            return Err(ServiceError::SchemaNotSupported);
+        }
 
-        let table_details = schema_introspection
-            .get_table(schema, table_name)
+        TableLoader::load_table(connection, schema, table_name, dialect)
             .await
-            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
-
-        Ok(TableDesign::from_table_details(table_details, dialect))
+            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))
     }
 
     /// Create a new empty table design

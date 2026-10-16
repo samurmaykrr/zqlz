@@ -152,7 +152,7 @@ fn mongodb_stage_node_type(stage: &str) -> NodeType {
         "SORT" => NodeType::Sort,
         "LIMIT" => NodeType::Limit,
         "SKIP" => NodeType::Result,
-        "FETCH" => NodeType::SeqScan,
+        "FETCH" => NodeType::BitmapHeapScan,
         "PROJECTION" | "PROJECTION_SIMPLE" | "PROJECTION_DEFAULT" | "PROJECTION_COVERED" => {
             NodeType::ProjectSet
         }

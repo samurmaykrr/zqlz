@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use zqlz_core::{
-    Connection, QueryResult, Result, ZqlzError, split_sql_statements, sql_protected_range_at,
+    Connection, QueryResult, Result, ZqlzError, SqlLexDialect, split_sql_statements, split_sql_statements_for_dialect,
+    sql_protected_range_at,
     sql_protected_ranges,
 };
 
@@ -587,7 +588,7 @@ async fn execute_single_statement(
         Ok((Some(result), 0))
     } else {
         let result = conn.execute(sql, &[]).await?;
-        Ok((None, result.affected_rows))
+        Ok((statement_result_rows(result.result), result.affected_rows))
     }
 }
 
@@ -601,8 +602,15 @@ async fn execute_single_in_transaction(
         Ok((Some(result), 0))
     } else {
         let result = tx.execute(sql, &[]).await?;
-        Ok((None, result.affected_rows))
+        Ok((statement_result_rows(result.result), result.affected_rows))
     }
+}
+
+/// A driver answers `execute` with rows when the statement produced a result
+/// set (`INSERT ... RETURNING`, `CALL`, ...); a result without columns only
+/// carries notices.
+fn statement_result_rows(result: Option<QueryResult>) -> Option<QueryResult> {
+    result.filter(|result| !result.columns.is_empty())
 }
 
 /// Collect the leading bare (non string/comment/quoted-identifier) words of a
@@ -695,6 +703,13 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     split_sql_statements(sql)
 }
 
+/// Like [`split_statements`], applying the lexing rules of the connection's dialect id
+/// (`Connection::dialect_id`): MySQL scripts honour `DELIMITER`, `#` comments and backslash
+/// string escapes.
+pub fn split_statements_for_dialect(sql: &str, dialect_id: Option<&str>) -> Vec<String> {
+    split_sql_statements_for_dialect(sql, SqlLexDialect::from_profile_id(dialect_id))
+}
+
 #[cfg(test)]
 mod non_transactable_statement_tests {
     use super::{leading_sql_keyword, statement_cannot_run_in_transaction};
@@ -702,19 +717,32 @@ mod non_transactable_statement_tests {
     #[test]
     fn leading_sql_keyword_is_comment_and_whitespace_safe() {
         assert_eq!(leading_sql_keyword("VACUUM t").as_deref(), Some("VACUUM"));
-        assert_eq!(leading_sql_keyword("  \n\t vacuum t").as_deref(), Some("VACUUM"));
-        assert_eq!(leading_sql_keyword("-- x\nVACUUM t").as_deref(), Some("VACUUM"));
-        assert_eq!(leading_sql_keyword("/* x */ VACUUM t").as_deref(), Some("VACUUM"));
+        assert_eq!(
+            leading_sql_keyword("  \n\t vacuum t").as_deref(),
+            Some("VACUUM")
+        );
+        assert_eq!(
+            leading_sql_keyword("-- x\nVACUUM t").as_deref(),
+            Some("VACUUM")
+        );
+        assert_eq!(
+            leading_sql_keyword("/* x */ VACUUM t").as_deref(),
+            Some("VACUUM")
+        );
         assert_eq!(leading_sql_keyword("   ").as_deref(), None);
     }
 
     #[test]
     fn detects_statements_that_cannot_run_in_a_transaction() {
         assert!(statement_cannot_run_in_transaction("VACUUM users;"));
-        assert!(statement_cannot_run_in_transaction("-- x\nvacuum (analyze) users"));
+        assert!(statement_cannot_run_in_transaction(
+            "-- x\nvacuum (analyze) users"
+        ));
         assert!(statement_cannot_run_in_transaction("REINDEX TABLE users"));
         assert!(statement_cannot_run_in_transaction("CREATE DATABASE demo"));
-        assert!(statement_cannot_run_in_transaction("ALTER SYSTEM SET work_mem = '64MB'"));
+        assert!(statement_cannot_run_in_transaction(
+            "ALTER SYSTEM SET work_mem = '64MB'"
+        ));
         assert!(statement_cannot_run_in_transaction(
             "CREATE INDEX CONCURRENTLY idx ON users (id)"
         ));
@@ -723,12 +751,18 @@ mod non_transactable_statement_tests {
     #[test]
     fn ignores_ordinary_statements() {
         assert!(!statement_cannot_run_in_transaction("SELECT 1"));
-        assert!(!statement_cannot_run_in_transaction("INSERT INTO t VALUES (1)"));
-        assert!(!statement_cannot_run_in_transaction("CREATE INDEX idx ON users (id)"));
+        assert!(!statement_cannot_run_in_transaction(
+            "INSERT INTO t VALUES (1)"
+        ));
+        assert!(!statement_cannot_run_in_transaction(
+            "CREATE INDEX idx ON users (id)"
+        ));
         assert!(!statement_cannot_run_in_transaction(
             "INSERT INTO logs (message) VALUES ('VACUUM users')"
         ));
-        assert!(!statement_cannot_run_in_transaction("-- VACUUM users\nSELECT 1"));
+        assert!(!statement_cannot_run_in_transaction(
+            "-- VACUUM users\nSELECT 1"
+        ));
         assert!(!statement_cannot_run_in_transaction(""));
     }
 }

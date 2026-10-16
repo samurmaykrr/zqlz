@@ -1,34 +1,40 @@
 use std::collections::{HashMap, HashSet};
 
-use sqlparser::ast::{GroupByExpr, Query, Select, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{
+    FromTable, GroupByExpr, ObjectName, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins,
+};
 
 use crate::{
     SchemaCache, SchemaValidator, ValidationIssue, ValidationSeverity,
-    schema_validation_issue::ValidationSymbolRole, schema_validation_lookup,
+    schema_validation_issue::ValidationSymbolRole,
+    schema_validation_lookup::{self, CteScope},
 };
 
 impl SchemaValidator {
-    pub(super) fn validate_query(
-        &self,
-        query: &Query,
-        schema: &SchemaCache,
-        issues: &mut Vec<ValidationIssue>,
-    ) {
-        self.validate_query_with_ctes(query, schema, &HashSet::new(), issues);
-    }
-
     pub(super) fn validate_query_with_ctes(
         &self,
         query: &Query,
         schema: &SchemaCache,
-        inherited_ctes: &HashSet<String>,
+        inherited_ctes: &CteScope,
         issues: &mut Vec<ValidationIssue>,
     ) {
         let mut cte_names = inherited_ctes.clone();
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
+                let name = cte.alias.name.value.to_ascii_lowercase();
+                if with.recursive {
+                    // The recursive member reads the CTE itself.
+                    cte_names.insert(
+                        name.clone(),
+                        schema_validation_lookup::relation_output_columns(&cte.alias, &cte.query),
+                    );
+                }
                 self.validate_query_with_ctes(&cte.query, schema, &cte_names, issues);
-                cte_names.insert(cte.alias.name.value.to_ascii_lowercase());
+                cte_names.insert(
+                    cte.alias.name.value.to_ascii_lowercase(),
+                    schema_validation_lookup::relation_output_columns(&cte.alias, &cte.query),
+                );
             }
         }
 
@@ -37,6 +43,7 @@ impl SchemaValidator {
         if let SetExpr::Select(select) = query.body.as_ref()
             && let Some(order_by) = &query.order_by
         {
+            let cte_names = schema_validation_lookup::scope_with_derived_tables(select, &cte_names);
             let mut available_tables = HashMap::new();
             schema_validation_lookup::collect_select_table_aliases(
                 select,
@@ -62,7 +69,7 @@ impl SchemaValidator {
         &self,
         set_expr: &SetExpr,
         schema: &SchemaCache,
-        cte_names: &HashSet<String>,
+        cte_names: &CteScope,
         issues: &mut Vec<ValidationIssue>,
     ) {
         match set_expr {
@@ -81,11 +88,11 @@ impl SchemaValidator {
         }
     }
 
-    fn validate_statement(
+    pub(super) fn validate_statement(
         &self,
         statement: &Statement,
         schema: &SchemaCache,
-        cte_names: &HashSet<String>,
+        cte_names: &CteScope,
         issues: &mut Vec<ValidationIssue>,
     ) {
         match statement {
@@ -97,26 +104,113 @@ impl SchemaValidator {
                 if !insert.columns.is_empty() {
                     self.validate_columns(&insert.table_name, &insert.columns, schema, issues);
                 }
+                if let Some(source) = &insert.source {
+                    self.validate_query_with_ctes(source, schema, cte_names, issues);
+                }
             }
-            Statement::Update { table, .. } => {
-                self.validate_table_factor(&table.relation, schema, cte_names, issues);
+            Statement::Update {
+                table,
+                assignments,
+                from,
+                selection,
+                ..
+            } => {
+                let sources: Vec<&TableWithJoins> = std::iter::once(table).chain(from).collect();
+                let available_tables = self.validate_sources(&sources, schema, cte_names, issues);
+                let values = assignments.iter().map(|assignment| &assignment.value);
+                for expression in values.chain(selection) {
+                    self.validate_expression(
+                        expression,
+                        &available_tables,
+                        &HashSet::new(),
+                        schema,
+                        cte_names,
+                        issues,
+                    );
+                }
             }
             Statement::Delete(delete) => {
-                for table_name in &delete.tables {
-                    self.validate_table_reference(table_name, schema, cte_names, issues);
+                let (FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from)) =
+                    &delete.from;
+                // With USING, the FROM list names the rows' targets (MySQL
+                // `DELETE FROM t USING t JOIN u ...`); otherwise it is the source.
+                let (targets, sources): (Vec<&ObjectName>, Vec<&TableWithJoins>) =
+                    match &delete.using {
+                        Some(using) => (
+                            delete
+                                .tables
+                                .iter()
+                                .chain(from.iter().filter_map(|source| match &source.relation {
+                                    TableFactor::Table { name, .. } => Some(name),
+                                    _ => None,
+                                }))
+                                .collect(),
+                            using.iter().collect(),
+                        ),
+                        None => (delete.tables.iter().collect(), from.iter().collect()),
+                    };
+                let available_tables = self.validate_sources(&sources, schema, cte_names, issues);
+                // `DELETE t1, t2 FROM ...` targets may be aliases of the sources.
+                for target in targets {
+                    let key = schema_validation_lookup::object_name_lookup_key(target)
+                        .to_ascii_lowercase();
+                    if !available_tables.contains_key(&key) {
+                        self.validate_table_reference(target, schema, cte_names, issues);
+                    }
+                }
+                if let Some(selection) = &delete.selection {
+                    self.validate_expression(
+                        selection,
+                        &available_tables,
+                        &HashSet::new(),
+                        schema,
+                        cte_names,
+                        issues,
+                    );
                 }
             }
             _ => {}
         }
     }
 
+    /// Validates a DML statement's source relations and returns their aliases.
+    fn validate_sources(
+        &self,
+        sources: &[&TableWithJoins],
+        schema: &SchemaCache,
+        cte_names: &CteScope,
+        issues: &mut Vec<ValidationIssue>,
+    ) -> HashMap<String, String> {
+        let mut available_tables = HashMap::new();
+        for source in sources {
+            schema_validation_lookup::collect_table_aliases(
+                source,
+                &mut available_tables,
+                schema,
+                cte_names,
+            );
+        }
+        for source in sources {
+            self.validate_table_with_joins(
+                source,
+                schema,
+                &available_tables,
+                &HashSet::new(),
+                cte_names,
+                issues,
+            );
+        }
+        available_tables
+    }
+
     fn validate_select(
         &self,
         select: &Select,
         schema: &SchemaCache,
-        cte_names: &HashSet<String>,
+        cte_names: &CteScope,
         issues: &mut Vec<ValidationIssue>,
     ) {
+        let cte_names = &schema_validation_lookup::scope_with_derived_tables(select, cte_names);
         let mut available_tables = HashMap::new();
 
         schema_validation_lookup::collect_select_table_aliases(

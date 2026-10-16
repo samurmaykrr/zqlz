@@ -11,7 +11,10 @@ pub struct TableRef {
 
 impl TableRef {
     pub fn new(table_name: String, alias: Option<String>) -> Self {
-        Self { table_name, alias }
+        Self {
+            table_name: unquote_identifier(&table_name),
+            alias: alias.map(|alias| unquote_identifier(&alias)),
+        }
     }
 
     /// Get the identifier to use when referencing this table
@@ -25,6 +28,18 @@ impl TableRef {
             .as_ref()
             .is_some_and(|alias| alias.eq_ignore_ascii_case(identifier))
             || self.table_name.eq_ignore_ascii_case(identifier)
+    }
+}
+
+/// `` `Table With Spaces` `` -> `Table With Spaces`; the schema cache holds bare names.
+fn unquote_identifier(name: &str) -> String {
+    let mut chars = name.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(open @ ('`' | '"')), Some(close)) if open == close && name.len() >= 2 => {
+            name[1..name.len() - 1].replace(&format!("{open}{open}"), &open.to_string())
+        }
+        (Some('['), Some(']')) => name[1..name.len() - 1].to_string(),
+        _ => name.to_string(),
     }
 }
 

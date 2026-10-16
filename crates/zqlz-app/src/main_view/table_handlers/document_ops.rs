@@ -345,110 +345,67 @@ impl MainView {
             let key_value_editor_panel = self.key_value_editor_panel.clone();
             let workspace_controller = self.workspace_controller.clone();
             let inspector_panel = self.inspector_panel.clone();
-            move |_this, _viewer, event: &TableViewerEvent, window, cx| match event {
-                TableViewerEvent::EditCell {
-                    table_name,
-                    connection_id,
-                    row,
-                    col,
-                    column_meta,
-                    column_name,
-                    column_type,
-                    current_value,
-                    all_row_values,
-                    all_column_names,
-                    all_column_types,
-                    raw_bytes,
-                } => {
-                    tracing::debug!(
-                        table = %table_name,
-                        column = %column_name,
-                        row = *row,
-                        "Opening document cell editor"
-                    );
-                    let cell_data = CellData {
-                        table_name: table_name.clone(),
-                        column_name: column_name.clone(),
-                        column_type: column_type.clone(),
-                        column_meta: column_meta.clone(),
-                        current_value: current_value.clone(),
-                        row_index: *row,
-                        col_index: *col,
-                        connection_id: *connection_id,
-                        all_row_values: all_row_values.clone(),
-                        all_column_names: all_column_names.clone(),
-                        all_column_types: all_column_types.clone(),
-                        raw_bytes: raw_bytes.clone(),
-                    };
+            move |_this, viewer, event: &TableViewerEvent, window, cx| {
+                let (connection_id, table_name, database_name) =
+                    viewer.read_with(cx, |viewer, _cx| {
+                        (
+                            viewer.connection_id().unwrap_or_default(),
+                            viewer.table_name().unwrap_or_default(),
+                            viewer.database_name(),
+                        )
+                    });
+                let (connection_id, table_name, database_name) =
+                    (&connection_id, &table_name, &database_name);
+                match event {
+                    TableViewerEvent::EditCell {
+                        row,
+                        col,
+                        column_meta,
+                        column_name,
+                        column_type,
+                        current_value,
+                        all_row_values,
+                        all_column_names,
+                        all_column_types,
+                        raw_bytes,
+                    } => {
+                        tracing::debug!(
+                            table = %table_name,
+                            column = %column_name,
+                            row = *row,
+                            "Opening document cell editor"
+                        );
+                        let cell_data = CellData {
+                            table_name: table_name.clone(),
+                            column_name: column_name.clone(),
+                            column_type: column_type.clone(),
+                            column_meta: column_meta.clone(),
+                            current_value: current_value.clone(),
+                            row_index: *row,
+                            col_index: *col,
+                            connection_id: *connection_id,
+                            all_row_values: all_row_values.clone(),
+                            all_column_names: all_column_names.clone(),
+                            all_column_types: all_column_types.clone(),
+                            raw_bytes: raw_bytes.clone(),
+                        };
 
-                    handle_edit_cell_event(
-                        cell_data,
-                        viewer_weak_for_edit.clone(),
-                        &cell_editor_panel,
-                        &workspace_controller,
-                        &inspector_panel,
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::EditRow {
-                    connection_id,
-                    table_name,
-                    row_index,
-                    row_values,
-                    column_meta,
-                    all_column_names,
-                } => {
-                    _this.apply_document_existing_row_editor_update(
-                        *connection_id,
-                        table_name,
-                        *row_index,
+                        handle_edit_cell_event(
+                            cell_data,
+                            viewer_weak_for_edit.clone(),
+                            &cell_editor_panel,
+                            &workspace_controller,
+                            &inspector_panel,
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::EditRow {
+                        row_index,
                         row_values,
                         column_meta,
                         all_column_names,
-                        viewer_weak_for_edit.clone(),
-                        None,
-                        true,
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::CellSelected {
-                    connection_id,
-                    table_name,
-                    row_index,
-                    col_index,
-                    row_values,
-                    column_meta,
-                    all_column_names,
-                } => {
-                    _this.apply_document_existing_row_editor_update(
-                        *connection_id,
-                        table_name,
-                        *row_index,
-                        row_values,
-                        column_meta,
-                        all_column_names,
-                        viewer_weak_for_edit.clone(),
-                        Some(*col_index),
-                        false,
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::RowSelected {
-                    connection_id,
-                    table_name,
-                    row_index,
-                    row_values,
-                    column_meta,
-                    all_column_names,
-                } => {
-                    let is_key_editor_active =
-                        _this.inspector_panel.read(cx).active_view() == InspectorView::KeyEditor;
-                    let is_row_editor_active =
-                        key_value_editor_panel.read(cx).mode() == &RowEditorMode::SqlRow;
-                    if is_key_editor_active && is_row_editor_active {
+                    } => {
                         _this.apply_document_existing_row_editor_update(
                             *connection_id,
                             table_name,
@@ -458,101 +415,133 @@ impl MainView {
                             all_column_names,
                             viewer_weak_for_edit.clone(),
                             None,
+                            true,
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::CellSelected {
+                        row_index,
+                        col_index,
+                        row_values,
+                        column_meta,
+                        all_column_names,
+                    } => {
+                        _this.apply_document_existing_row_editor_update(
+                            *connection_id,
+                            table_name,
+                            *row_index,
+                            row_values,
+                            column_meta,
+                            all_column_names,
+                            viewer_weak_for_edit.clone(),
+                            Some(*col_index),
                             false,
                             window,
                             cx,
                         );
                     }
-                }
-                TableViewerEvent::AddRow {
-                    connection_id,
-                    table_name,
-                    all_column_names,
-                } => {
-                    handle_add_row_event(
-                        *connection_id,
-                        table_name,
-                        all_column_names,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::AddRowForm {
-                    connection_id,
-                    table_name,
-                    column_meta,
-                    row_values,
-                    row_index,
-                } => {
-                    _this.apply_document_new_row_editor_update(
-                        *connection_id,
-                        table_name,
-                        row_values.as_deref(),
-                        *row_index,
+                    TableViewerEvent::RowSelected {
+                        row_index,
+                        row_values,
                         column_meta,
-                        viewer_weak_for_edit.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::DeleteRows {
-                    connection_id,
-                    table_name,
-                    all_column_names,
-                    rows_to_delete,
-                } => {
-                    _this.delete_document_rows(
-                        *connection_id,
-                        table_name,
+                        all_column_names,
+                    } => {
+                        let is_key_editor_active = _this.inspector_panel.read(cx).active_view()
+                            == InspectorView::KeyEditor;
+                        let is_row_editor_active =
+                            key_value_editor_panel.read(cx).mode() == &RowEditorMode::SqlRow;
+                        if is_key_editor_active && is_row_editor_active {
+                            _this.apply_document_existing_row_editor_update(
+                                *connection_id,
+                                table_name,
+                                *row_index,
+                                row_values,
+                                column_meta,
+                                all_column_names,
+                                viewer_weak_for_edit.clone(),
+                                None,
+                                false,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                    TableViewerEvent::AddRow { all_column_names } => {
+                        handle_add_row_event(
+                            *connection_id,
+                            table_name,
+                            all_column_names,
+                            viewer_entity_for_events.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::AddRowForm {
+                        column_meta,
+                        row_values,
+                        row_index,
+                    } => {
+                        _this.apply_document_new_row_editor_update(
+                            *connection_id,
+                            table_name,
+                            row_values.as_deref(),
+                            *row_index,
+                            column_meta,
+                            viewer_weak_for_edit.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::DeleteRows {
                         all_column_names,
                         rows_to_delete,
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    );
+                    } => {
+                        _this.delete_document_rows(
+                            *connection_id,
+                            table_name,
+                            all_column_names,
+                            rows_to_delete,
+                            viewer_entity_for_events.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::RefreshTable => {
+                        _this.reload_document_collection_viewer(
+                            *connection_id,
+                            database_name.clone().unwrap_or_default(),
+                            table_name.clone(),
+                            viewer_entity_for_events.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    TableViewerEvent::ValidationFailed { message } => {
+                        window.push_notification(Notification::warning(message.clone()), cx);
+                    }
+                    TableViewerEvent::CommitChanges {
+                        modified_cells,
+                        deleted_rows,
+                        new_rows,
+                        column_meta,
+                        all_rows,
+                    } => {
+                        handle_document_commit_changes_event(
+                            *connection_id,
+                            table_name.clone(),
+                            modified_cells.clone(),
+                            deleted_rows.clone(),
+                            new_rows.clone(),
+                            column_meta.clone(),
+                            all_rows.clone(),
+                            viewer_entity_for_events.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    _ => {}
                 }
-                TableViewerEvent::RefreshTable {
-                    connection_id,
-                    table_name,
-                    database_name,
-                    ..
-                } => {
-                    _this.reload_document_collection_viewer(
-                        *connection_id,
-                        database_name.clone().unwrap_or_default(),
-                        table_name.clone(),
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                TableViewerEvent::ValidationFailed { message } => {
-                    window.push_notification(Notification::warning(message.clone()), cx);
-                }
-                TableViewerEvent::CommitChanges {
-                    connection_id,
-                    table_name,
-                    modified_cells,
-                    deleted_rows,
-                    new_rows,
-                    column_meta,
-                    all_rows,
-                } => {
-                    handle_document_commit_changes_event(
-                        *connection_id,
-                        table_name.clone(),
-                        modified_cells.clone(),
-                        deleted_rows.clone(),
-                        new_rows.clone(),
-                        column_meta.clone(),
-                        all_rows.clone(),
-                        viewer_entity_for_events.clone(),
-                        window,
-                        cx,
-                    );
-                }
-                _ => {}
             }
         })
         .detach();

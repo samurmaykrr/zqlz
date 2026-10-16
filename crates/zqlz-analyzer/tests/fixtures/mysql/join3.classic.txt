@@ -1,0 +1,4 @@
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	s	NULL	index	PRIMARY	PRIMARY	130	NULL	7	100.00	Using index
+1	SIMPLE	o	NULL	ref	PRIMARY,uq_order_number,idx_orders_tenant_time,fk_order_status,idx_order_tenant_status	idx_order_tenant_status	274	const,erp_lab.s.status_code	5247	100.00	Using index condition
+1	SIMPLE	i	NULL	ref	uq_order_line,idx_order_item_order	idx_order_item_order	144	erp_lab.o.order_id	3	100.00	NULL

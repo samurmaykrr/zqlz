@@ -4,7 +4,7 @@ use crate::widgets::{ActiveTheme, AxisExt, ElementExt, StyledExt, h_flex};
 use gpui::{
     Along, App, AppContext as _, Axis, Background, Bounds, Context, Corners, DragMoveEvent, Empty,
     Entity, EntityId, EventEmitter, Hsla, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Point, Render, RenderOnce,
+    MouseDownEvent, Orientation, ParentElement as _, Pixels, Point, Render, RenderOnce, Role,
     StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -550,6 +550,16 @@ impl RenderOnce for Slider {
 
         div()
             .id(("slider", self.state.entity_id()))
+            .role(Role::Slider)
+            .aria_numeric_value(state.value().end() as f64)
+            .aria_min_numeric_value(state.min as f64)
+            .aria_max_numeric_value(state.max as f64)
+            .aria_numeric_value_step(state.step as f64)
+            .aria_orientation(if axis.is_vertical() {
+                Orientation::Vertical
+            } else {
+                Orientation::Horizontal
+            })
             .flex()
             .flex_1()
             .items_center()

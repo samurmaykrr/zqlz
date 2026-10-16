@@ -3,14 +3,18 @@
 //! This module provides functions to convert between different data types
 //! and formats used throughout the application.
 
-use crate::components::{ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaDetails};
+use crate::app::AppState;
+use crate::components::{ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaDetails, TableViewerPanel};
+use anyhow::Context as _;
+use gpui::App;
 use std::sync::Arc;
 use uuid::Uuid;
+use zqlz_core::{Connection, TableRef};
 
 /// Converts service-level TableDetails to component-level SchemaDetails.
 pub(in crate::main_view) fn convert_to_schema_details(
     connection_id: Uuid,
-    table_name: &str,
+    table: &TableRef,
     table_details: zqlz_services::TableDetails,
     create_statement: Option<String>,
 ) -> SchemaDetails {
@@ -56,7 +60,8 @@ pub(in crate::main_view) fn convert_to_schema_details(
     SchemaDetails {
         connection_id,
         object_type: table_details.table_type.display_name().to_string(),
-        object_name: table_name.to_string(),
+        table: table.clone(),
+        object_name: table.display_name(),
         columns,
         indexes,
         foreign_keys,
@@ -64,14 +69,21 @@ pub(in crate::main_view) fn convert_to_schema_details(
     }
 }
 
-/// App-level adapter that preserves existing table-handler call signatures
-/// while delegating qualifier policy to `zqlz-core`.
-pub(in crate::main_view) fn resolve_schema_qualifier(
-    connection: &Arc<dyn zqlz_core::Connection>,
-    database_name: &Option<String>,
-) -> Option<String> {
-    zqlz_core::resolve_schema_qualifier_for_connection(
-        connection.as_ref(),
-        database_name.as_deref(),
-    )
+/// The table `viewer` shows, as its open resolved it, and the connection
+/// statements against it run on.
+pub(in crate::main_view) fn viewer_table(
+    viewer: &TableViewerPanel,
+    cx: &App,
+) -> anyhow::Result<(TableRef, Arc<dyn Connection>)> {
+    let connection_id = viewer
+        .connection_id()
+        .context("The viewer has no connection")?;
+    let table = viewer.table().context("The table is still opening")?;
+    let connection = cx
+        .try_global::<AppState>()
+        .context("Application state is unavailable")?
+        .connection_service
+        .get_connection_for_database_cached(connection_id, table.database.as_deref())
+        .context("The connection is no longer open")?;
+    Ok((table, connection))
 }

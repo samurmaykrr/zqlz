@@ -19,6 +19,7 @@ use zqlz_query::{
     resolve_query_connection_selection, resolve_query_editor_open_connection,
     run_execute_query_workflow, run_explain_query_workflow_with_mode,
 };
+use zqlz_settings::ZqlzSettings;
 use zqlz_text_editor::{DocumentIdentity, TextDocument};
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps,
@@ -64,12 +65,12 @@ impl QueryCancelHandle for NoopQueryCancelHandle {
 }
 
 #[derive(Clone)]
-struct QueryWorkflowResources {
-    query_service: Arc<QueryService>,
-    connection_id: Uuid,
-    connection: Arc<dyn Connection>,
+pub(super) struct QueryWorkflowResources {
+    pub(super) query_service: Arc<QueryService>,
+    pub(super) connection_id: Uuid,
+    pub(super) connection: Arc<dyn Connection>,
     cancel_handle: Option<Arc<dyn QueryCancelHandle>>,
-    display_context: QueryDisplayContext,
+    pub(super) display_context: QueryDisplayContext,
 }
 
 #[derive(Clone)]
@@ -307,6 +308,7 @@ impl MainView {
                     params,
                     source,
                     destructive_warning,
+                    continue_on_error,
                 } => {
                     if let Some(warning) = destructive_warning.as_ref() {
                         tracing::warn!(
@@ -323,6 +325,7 @@ impl MainView {
                         resources.connection_id,
                         sql,
                         params,
+                        continue_on_error,
                         resources.display_context,
                         chrono::Utc::now(),
                     )
@@ -437,7 +440,7 @@ impl MainView {
         .detach();
     }
 
-    fn resolve_query_workflow_resources(
+    pub(super) fn resolve_query_workflow_resources(
         preferred_connection_id: Option<Uuid>,
         selected_database_name: Option<String>,
         app_state: &AppState,
@@ -1310,7 +1313,8 @@ impl MainView {
                             QuerySqlSource::FullBuffer,
                             confirm_destructive,
                             start_log_message,
-                        );
+                        )
+                        .with_continue_on_error(ZqlzSettings::continue_on_error(cx));
 
                         _this.dispatch_query_workflow_editor_event(
                             &query_editor_weak,
@@ -1342,7 +1346,8 @@ impl MainView {
                             QuerySqlSource::CurrentStatement,
                             confirm_destructive,
                             start_log_message,
-                        );
+                        )
+                        .with_continue_on_error(ZqlzSettings::continue_on_error(cx));
 
                         _this.dispatch_query_workflow_editor_event(
                             &query_editor_weak,
@@ -1421,14 +1426,28 @@ impl MainView {
                             kind = %object.kind,
                             "Go to definition: opening schema object"
                         );
-                        _this.open_table_viewer(
-                            *connection_id,
-                            object.name.clone(),
-                            database_name.clone(),
-                            object.is_view(),
-                            window,
-                            cx,
-                        );
+                        let dialect = cx
+                            .try_global::<AppState>()
+                            .and_then(|state| state.connection_service.get_connection(*connection_id))
+                            .and_then(|connection| connection.dialect_id());
+                        match zqlz_core::TableRef::parse(
+                            &object.name,
+                            dialect,
+                            database_name.as_deref(),
+                        ) {
+                            Ok(table) => {
+                                let table = if object.is_view() { table.view() } else { table };
+                                _this.open_table_viewer(*connection_id, table, window, cx);
+                            }
+                            Err(error) => zqlz_ui::widgets::WindowExt::push_notification(
+                                window,
+                                zqlz_ui::widgets::notification::Notification::error(format!(
+                                    "Cannot open '{}': {error}",
+                                    object.name
+                                )),
+                                cx,
+                            ),
+                        }
                     }
                     QueryEditorEvent::SaveObject { .. } => {
                         // View/procedure/function editors use a separate subscription

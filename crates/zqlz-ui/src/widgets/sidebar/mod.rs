@@ -1,27 +1,15 @@
 #![allow(clippy::type_complexity)]
 
 use crate::widgets::{
-    ActiveTheme, Collapsible, Icon, IconName, Side, Sizable, StyledExt,
-    button::{Button, ButtonVariants},
-    h_flex,
-    scroll::ScrollableElement,
-    v_flex,
+    ActiveTheme, Collapsible, Side, StyledExt, h_flex, scroll::ScrollableElement, v_flex,
 };
 use gpui::{
-    AbsoluteLength, AnyElement, App, ClickEvent, DefiniteLength, EdgesRefinement, ElementId,
-    InteractiveElement as _, IntoElement, Length, ListAlignment, ListState, ParentElement, Pixels,
-    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, list, prelude::FluentBuilder,
-    px,
+    AnyElement, App, EdgesRefinement, ElementId, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement, Pixels, RenderOnce, SharedString, StyleRefinement,
+    Styled, Window, div, list, prelude::FluentBuilder, px,
 };
-use std::rc::Rc;
 
-mod footer;
-mod group;
-mod header;
 mod menu;
-pub use footer::*;
-pub use group::*;
-pub use header::*;
 pub use menu::*;
 
 const DEFAULT_WIDTH: Pixels = px(255.);
@@ -48,7 +36,6 @@ pub struct Sidebar<E: SidebarItem + 'static> {
     footer: Option<AnyElement>,
     /// The side of the sidebar
     side: Side,
-    collapsible: bool,
     collapsed: bool,
 }
 
@@ -62,7 +49,6 @@ impl<E: SidebarItem> Sidebar<E> {
             header: None,
             footer: None,
             side: Side::Left,
-            collapsible: true,
             collapsed: false,
         }
     }
@@ -72,12 +58,6 @@ impl<E: SidebarItem> Sidebar<E> {
     /// Default is `Side::Left`.
     pub fn side(mut self, side: Side) -> Self {
         self.side = side;
-        self
-    }
-
-    /// Set the sidebar to be collapsible, default is true
-    pub fn collapsible(mut self, collapsible: bool) -> Self {
-        self.collapsible = collapsible;
         self
     }
 
@@ -112,83 +92,6 @@ impl<E: SidebarItem> Sidebar<E> {
     }
 }
 
-/// Toggle button to collapse/expand the [`Sidebar`].
-#[derive(IntoElement)]
-pub struct SidebarToggleButton {
-    btn: Button,
-    collapsed: bool,
-    side: Side,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
-}
-
-impl SidebarToggleButton {
-    /// Create a new SidebarToggleButton.
-    pub fn new() -> Self {
-        Self {
-            btn: Button::new("collapse").ghost().small(),
-            collapsed: false,
-            side: Side::Left,
-            on_click: None,
-        }
-    }
-
-    /// Set the side of the toggle button.
-    ///
-    /// Default is `Side::Left`.
-    pub fn side(mut self, side: Side) -> Self {
-        self.side = side;
-        self
-    }
-
-    /// Set the collapsed state of the toggle button.
-    pub fn collapsed(mut self, collapsed: bool) -> Self {
-        self.collapsed = collapsed;
-        self
-    }
-
-    /// Add a click handler to the toggle button.
-    pub fn on_click(
-        mut self,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_click = Some(Rc::new(on_click));
-        self
-    }
-}
-
-impl Default for SidebarToggleButton {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RenderOnce for SidebarToggleButton {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let collapsed = self.collapsed;
-        let on_click = self.on_click.clone();
-
-        let icon = if collapsed {
-            if self.side.is_left() {
-                IconName::PanelLeftOpen
-            } else {
-                IconName::PanelRightOpen
-            }
-        } else if self.side.is_left() {
-            IconName::PanelLeftClose
-        } else {
-            IconName::PanelRightClose
-        };
-
-        self.btn
-            .when_some(on_click, |this, on_click| {
-                this.on_click(move |ev, window, cx| {
-                    on_click(ev, window, cx);
-                })
-            })
-            .icon(Icon::new(icon).size_4())
-    }
-}
-
 impl<E: SidebarItem> Styled for Sidebar<E> {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
@@ -214,11 +117,6 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
             list_state.reset(content_len);
         }
 
-        let collapsed = self.collapsed;
-
-        // Sidebar content renders at its target width immediately.
-        // A wrapper div animates clip-width for smooth transitions
-        // without re-laying out sidebar content each animation frame.
         let sidebar = v_flex()
             .id(id.clone())
             .flex_shrink_0()
@@ -259,22 +157,17 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
                         .child(
                             list(list_state.clone(), {
                                 move |ix, window, cx| {
-                                    let group = self.content.get(ix).cloned();
-                                    let is_first = ix == 0;
-                                    let is_last =
-                                        content_len > 0 && ix == content_len.saturating_sub(1);
+                                    let group = self.content[ix].clone();
                                     div()
                                         .id(ix)
-                                        .when_some(group, |this, group| {
-                                            this.child(
-                                                group
-                                                    .collapsed(self.collapsed)
-                                                    .render(ix, window, cx)
-                                                    .into_any_element(),
-                                            )
-                                        })
-                                        .when(is_first, |this| this.pt_3())
-                                        .when(is_last, |this| this.pb_3())
+                                        .child(
+                                            group
+                                                .collapsed(self.collapsed)
+                                                .render(ix, window, cx)
+                                                .into_any_element(),
+                                        )
+                                        .when(ix == 0, |this| this.pt_3())
+                                        .when(ix + 1 == content_len, |this| this.pb_3())
                                         .into_any_element()
                                 }
                             })
@@ -295,53 +188,6 @@ impl<E: SidebarItem> RenderOnce for Sidebar<E> {
                 )
             });
 
-        if !self.collapsible {
-            return sidebar.into_any_element();
-        }
-
-        // Determine effective expanded width from user's custom style or default.
-        let expanded_width = match self.style.size.width {
-            Some(Length::Definite(DefiniteLength::Absolute(AbsoluteLength::Pixels(px)))) => px,
-            Some(_) => {
-                return sidebar.into_any_element();
-            }
-            None => DEFAULT_WIDTH,
-        };
-
-        // Store animation widths in keyed state so they remain stable across
-        // re-renders (GPUI re-renders the whole tree on each animation frame).
-        // Only update when `collapsed` actually changes.
-        let prev_collapsed =
-            window.use_keyed_state(format!("{}-prev-col", id), cx, |_, _| collapsed);
-        let anim_widths = window.use_keyed_state(format!("{}-anim-w", id), cx, |_, _| {
-            // First render: from == to, no visible animation
-            let w = if collapsed {
-                COLLAPSED_WIDTH
-            } else {
-                expanded_width
-            };
-            (w, w)
-        });
-
-        if *prev_collapsed.read(cx) != collapsed {
-            let (new_from, new_to) = if collapsed {
-                (expanded_width, COLLAPSED_WIDTH)
-            } else {
-                (COLLAPSED_WIDTH, expanded_width)
-            };
-            anim_widths.update(cx, |v, _| *v = (new_from, new_to));
-            prev_collapsed.update(cx, |v, _| *v = collapsed);
-        }
-        let (from_w, to_w) = *anim_widths.read(cx);
-
-        let wrapper = div()
-            .id(format!("{}-anim", id))
-            .h_full()
-            .flex_shrink_0()
-            .overflow_hidden()
-            .child(sidebar);
-
-        let _ = from_w;
-        wrapper.w(to_w).into_any_element()
+        sidebar.into_any_element()
     }
 }

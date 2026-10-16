@@ -3849,10 +3849,7 @@ impl EditorElement {
         let corner_radius = px(6.0);
         let title_font_size = px(12.5);
         let body_font_size = px(12.0);
-        let title_line_height = px(20.0);
-        let body_line_height = px(17.0);
-        let blank_gap = px(5.0);
-        let max_lines = 15usize;
+        let gap = px(6.0);
 
         let bg_color = cx.theme().colors.popover;
         let border_color = cx.theme().colors.border;
@@ -3867,7 +3864,15 @@ impl EditorElement {
         if lines.is_empty() {
             return;
         }
-        let lines = &lines[..lines.len().min(max_lines)];
+        let anchor = hover.anchor_bounds;
+        let space_above = anchor.origin.y - hover.content_top;
+        let space_below = window.viewport_size().height - (anchor.origin.y + anchor.size.height);
+        let space = if space_above > space_below {
+            space_above
+        } else {
+            space_below
+        };
+        let lines = fit_tooltip_lines(lines, space - gap - pad_y * 2.0);
 
         let text_system = window.text_system();
 
@@ -3881,7 +3886,7 @@ impl EditorElement {
             .map(|line| match line {
                 TooltipLine::Blank => ShapedRow {
                     shaped: None,
-                    height: blank_gap,
+                    height: tooltip_line_height(line),
                 },
                 TooltipLine::Title(text) => {
                     let bold_font = Font {
@@ -3909,7 +3914,7 @@ impl EditorElement {
                     );
                     ShapedRow {
                         shaped: Some(shaped),
-                        height: title_line_height,
+                        height: tooltip_line_height(line),
                     }
                 }
                 TooltipLine::Body(text) => {
@@ -3918,7 +3923,7 @@ impl EditorElement {
                     let shaped = text_system.shape_line(display_text, body_font_size, &runs, None);
                     ShapedRow {
                         shaped: Some(shaped),
-                        height: body_line_height,
+                        height: tooltip_line_height(line),
                     }
                 }
                 TooltipLine::Code(text) => {
@@ -3927,7 +3932,7 @@ impl EditorElement {
                     let shaped = text_system.shape_line(display_text, body_font_size, &runs, None);
                     ShapedRow {
                         shaped: Some(shaped),
-                        height: body_line_height,
+                        height: tooltip_line_height(line),
                     }
                 }
             })
@@ -3948,7 +3953,6 @@ impl EditorElement {
         let tooltip_width = content_width + pad_x * 2.0;
         let tooltip_height = content_height + pad_y * 2.0;
 
-        let gap = px(6.0);
         let above_y = hover.anchor_bounds.origin.y - tooltip_height - gap;
         let below_y = hover.anchor_bounds.origin.y + hover.anchor_bounds.size.height + gap;
         let origin_y = if above_y > hover.content_top {
@@ -4305,6 +4309,33 @@ enum TooltipLine {
     Blank,
 }
 
+fn tooltip_line_height(line: &TooltipLine) -> Pixels {
+    match line {
+        TooltipLine::Title(_) => px(20.0),
+        TooltipLine::Body(_) | TooltipLine::Code(_) => px(17.0),
+        TooltipLine::Blank => px(5.0),
+    }
+}
+
+/// Keeps the leading lines that fit in `max_height`, ending on `…` when any
+/// are dropped so a cut-off tooltip never looks complete.
+fn fit_tooltip_lines(mut lines: Vec<TooltipLine>, max_height: Pixels) -> Vec<TooltipLine> {
+    let mut used = px(0.0);
+    let fitting = lines
+        .iter()
+        .take_while(|line| {
+            used += tooltip_line_height(line);
+            used <= max_height
+        })
+        .count();
+    if fitting < lines.len() {
+        // At least the title stays, even in a cramped window.
+        lines.truncate(fitting.saturating_sub(1).max(1));
+        lines.push(TooltipLine::Body("…".to_string()));
+    }
+    lines
+}
+
 fn preprocess_hover_text(raw: &str) -> Vec<TooltipLine> {
     let mut result = Vec::new();
     let mut last_was_blank = true;
@@ -4540,7 +4571,7 @@ enum Marker {
 mod tests {
     use super::{
         CachedViewportLayout, EditorElement, TooltipLine, ViewportLayoutKeyInput,
-        ViewportTextStyleCacheKey, build_body_runs, preprocess_hover_text,
+        ViewportTextStyleCacheKey, build_body_runs, fit_tooltip_lines, preprocess_hover_text,
         sanitize_completion_text,
     };
     use crate::buffer::Position;
@@ -4605,6 +4636,26 @@ mod tests {
         assert!(matches!(lines[3], TooltipLine::Blank));
         assert!(matches!(lines[4], TooltipLine::Body(ref body) if body == "`sql`"));
         assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn fit_tooltip_lines_keeps_long_hovers_whole_when_they_fit() {
+        // Sakila `rental`: three foreign keys sit past line 15, where a fixed
+        // line cap used to cut all but the first.
+        let hover = "**Table: rental**\n\nSchema: `main`\n\n**Columns:**\n- `rental_id`\n\
+            - `rental_date`\n- `inventory_id`\n- `customer_id`\n- `return_date`\n\
+            - `staff_id`\n- `last_update`\n\n**Foreign Keys:**\n- `customer_id`\n\
+            - `inventory_id`\n- `staff_id`\n";
+        let lines = preprocess_hover_text(hover);
+        assert_eq!(lines.len(), 17);
+        assert_eq!(
+            fit_tooltip_lines(preprocess_hover_text(hover), px(1000.0)).len(),
+            17
+        );
+
+        let cut = fit_tooltip_lines(lines, px(60.0));
+        assert!(matches!(cut.last(), Some(TooltipLine::Body(body)) if body == "…"));
+        assert!(cut.len() < 17);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::ForeignKeyAction;
+use zqlz_core::{ForeignKeyAction, TableRef};
 use zqlz_ui::widgets::{
     ActiveTheme, Sizable, Theme,
     button::{Button, ButtonVariants},
@@ -52,6 +52,8 @@ pub struct ForeignKeyInfo {
 pub struct SchemaDetails {
     pub connection_id: Uuid,
     pub object_type: String,
+    /// The table shown; `object_name` is its title.
+    pub table: TableRef,
     pub object_name: String,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
@@ -72,7 +74,7 @@ pub struct SchemaDetailsPanel {
     details: Option<SchemaDetails>,
     is_loading: bool,
     active_connection_id: Option<Uuid>,
-    active_table_name: Option<String>,
+    active_table: Option<TableRef>,
     /// Flag set by parent when connection is invalidated
     connection_valid: bool,
 }
@@ -84,7 +86,7 @@ impl SchemaDetailsPanel {
             details: None,
             is_loading: false,
             active_connection_id: None,
-            active_table_name: None,
+            active_table: None,
             connection_valid: true,
         }
     }
@@ -92,7 +94,7 @@ impl SchemaDetailsPanel {
     /// Set schema details to display
     pub fn set_details(&mut self, details: SchemaDetails, cx: &mut Context<Self>) {
         self.active_connection_id = Some(details.connection_id);
-        self.active_table_name = Some(details.object_name.clone());
+        self.active_table = Some(details.table.clone());
         self.details = Some(details);
         self.is_loading = false;
         self.connection_valid = true;
@@ -104,7 +106,7 @@ impl SchemaDetailsPanel {
         self.details = None;
         self.is_loading = false;
         self.active_connection_id = None;
-        self.active_table_name = None;
+        self.active_table = None;
         self.connection_valid = true;
         cx.notify();
     }
@@ -120,19 +122,25 @@ impl SchemaDetailsPanel {
     pub fn set_loading_for_table(
         &mut self,
         connection_id: Uuid,
-        table_name: &str,
+        table: &TableRef,
         cx: &mut Context<Self>,
     ) {
         self.active_connection_id = Some(connection_id);
-        self.active_table_name = Some(table_name.to_string());
+        self.active_table = Some(table.clone());
         self.is_loading = true;
         cx.notify();
     }
 
     /// Check if the panel is showing details for a specific table
-    pub fn is_showing_table(&self, connection_id: Uuid, table_name: &str) -> bool {
+    /// Whether the panel shows `table`; the same name in another schema or
+    /// database is a different table.
+    pub fn is_showing_table(&self, connection_id: Uuid, table: &TableRef) -> bool {
         self.active_connection_id == Some(connection_id)
-            && self.active_table_name.as_deref() == Some(table_name)
+            && self.active_table.as_ref().is_some_and(|active| {
+                active.database == table.database
+                    && active.schema == table.schema
+                    && active.name == table.name
+            })
     }
 
     /// Get the currently active connection ID

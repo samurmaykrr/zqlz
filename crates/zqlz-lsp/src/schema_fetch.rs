@@ -7,8 +7,8 @@ use zqlz_core::Connection;
 use zqlz_services::{SchemaService, TableDetails};
 
 use crate::{
-    ColumnInfo, DatabaseObject, FunctionInfo, IndexInfo, ParameterDirection, ParameterInfo,
-    ProcedureInfo, SchemaCache, TableInfo, TriggerInfo, ViewInfo,
+    ColumnInfo, DatabaseObject, FunctionInfo, IndexInfo, ProcedureInfo, SchemaCache, TableInfo,
+    TriggerInfo, ViewInfo,
 };
 
 /// Projects a service-level `TableDetails` onto the LSP's flatter `ColumnInfo`.
@@ -327,119 +327,4 @@ pub(crate) async fn fetch_schema_cache(
     );
 
     Ok(cache)
-}
-
-pub(crate) async fn fetch_procedures(conn: &dyn Connection) -> Result<Vec<ProcedureInfo>> {
-    let introspection = conn
-        .as_schema_introspection()
-        .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
-    let procedures = introspection.list_procedures(None).await?;
-    Ok(procedures
-        .into_iter()
-        .map(|procedure| ProcedureInfo {
-            name: procedure.name,
-            schema: procedure.schema,
-            parameters: procedure
-                .parameters
-                .into_iter()
-                .map(|parameter| ParameterInfo {
-                    name: parameter.name.unwrap_or_default(),
-                    data_type: parameter.data_type,
-                    direction: match parameter.mode {
-                        zqlz_core::ParameterMode::Out => ParameterDirection::Out,
-                        zqlz_core::ParameterMode::InOut => ParameterDirection::InOut,
-                        _ => ParameterDirection::In,
-                    },
-                })
-                .collect(),
-            return_type: None,
-            definition: procedure.definition,
-            comment: procedure.comment,
-        })
-        .collect())
-}
-
-pub(crate) async fn fetch_functions(conn: &dyn Connection) -> Result<Vec<FunctionInfo>> {
-    let introspection = conn
-        .as_schema_introspection()
-        .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
-    let functions = introspection.list_functions(None).await?;
-    Ok(functions
-        .into_iter()
-        .map(|function| FunctionInfo {
-            name: function.name,
-            schema: function.schema,
-            parameters: function
-                .parameters
-                .into_iter()
-                .map(|parameter| ParameterInfo {
-                    name: parameter.name.unwrap_or_default(),
-                    data_type: parameter.data_type,
-                    direction: match parameter.mode {
-                        zqlz_core::ParameterMode::Out => ParameterDirection::Out,
-                        zqlz_core::ParameterMode::InOut => ParameterDirection::InOut,
-                        _ => ParameterDirection::In,
-                    },
-                })
-                .collect(),
-            return_type: function.return_type,
-            definition: function.definition,
-            is_aggregate: false,
-            comment: function.comment,
-        })
-        .collect())
-}
-
-pub(crate) async fn fetch_triggers(conn: &dyn Connection) -> Result<Vec<TriggerInfo>> {
-    let introspection = conn
-        .as_schema_introspection()
-        .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
-    let triggers = introspection.list_triggers(None, None).await?;
-    Ok(triggers
-        .into_iter()
-        .map(|trigger| TriggerInfo {
-            name: trigger.name,
-            table_name: trigger.table_name,
-            event: trigger
-                .events
-                .first()
-                .map(|event| match event {
-                    zqlz_core::TriggerEvent::Insert => "INSERT",
-                    zqlz_core::TriggerEvent::Update => "UPDATE",
-                    zqlz_core::TriggerEvent::Delete => "DELETE",
-                    zqlz_core::TriggerEvent::Truncate => "TRUNCATE",
-                })
-                .unwrap_or("UNKNOWN")
-                .to_string(),
-            timing: match trigger.timing {
-                zqlz_core::TriggerTiming::Before => "BEFORE",
-                zqlz_core::TriggerTiming::After => "AFTER",
-                zqlz_core::TriggerTiming::InsteadOf => "INSTEAD OF",
-            }
-            .to_string(),
-            definition: trigger.definition,
-        })
-        .collect())
-}
-
-pub(crate) async fn fetch_indexes(conn: &dyn Connection) -> Result<Vec<IndexInfo>> {
-    let introspection = conn
-        .as_schema_introspection()
-        .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
-
-    let tables = introspection.list_tables(None).await?;
-    let mut indexes = Vec::new();
-    for table in tables {
-        let table_indexes = introspection
-            .get_indexes(table.schema.as_deref(), &table.name)
-            .await?;
-        indexes.extend(table_indexes.into_iter().map(|index| IndexInfo {
-            name: index.name,
-            table_name: table.name.clone(),
-            columns: index.columns,
-            is_unique: index.is_unique,
-        }));
-    }
-
-    Ok(indexes)
 }

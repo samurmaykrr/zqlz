@@ -43,6 +43,11 @@ line_comment = "--"
 block_comment_start = "/*"
 block_comment_end = "*/"
 
+[auto_increment]
+keyword = ""
+style = "generated"
+description = "Use INTEGER PRIMARY KEY for auto-increment (DuckDB auto-generates)"
+
 [syntax_quality]
 text = """
 INSTALL httpfs;

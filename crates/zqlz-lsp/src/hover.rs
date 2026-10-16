@@ -79,6 +79,42 @@ fn operator_at_offset(text: &Rope, offset: usize) -> Option<String> {
     }
 }
 
+pub(crate) fn table_hover(lsp: &SqlLsp, table_name: &str) -> Option<Hover> {
+    let table = lsp.table_info(table_name)?;
+    Some(create_table_hover(
+        table,
+        lsp.columns_for_table(&table.name).map(Vec::as_slice),
+        lsp.foreign_keys_for_table(&table.name).map(Vec::as_slice),
+        lsp.reverse_foreign_keys_for_table(&table.name)
+            .map(Vec::as_slice),
+    ))
+}
+
+/// Hover for a table outside the cached schema, from freshly loaded details.
+/// `None` when the details hold no columns, i.e. the table doesn't exist.
+pub(crate) fn table_details_hover(
+    schema: &str,
+    details: &zqlz_services::TableDetails,
+) -> Option<Hover> {
+    if details.columns.is_empty() {
+        return None;
+    }
+    let table = crate::TableInfo {
+        name: details.name.clone(),
+        schema: Some(schema.to_string()),
+        comment: None,
+        row_count: details.row_count.and_then(|rows| i64::try_from(rows).ok()),
+        table_type: details.table_type,
+    };
+    let columns = crate::schema_fetch::columns_from_table_details(&details.name, details);
+    Some(create_table_hover(
+        &table,
+        Some(&columns),
+        Some(&details.foreign_keys),
+        None,
+    ))
+}
+
 pub(crate) fn get_hover(lsp: &SqlLsp, text: &Rope, offset: usize) -> Option<Hover> {
     tracing::debug!("get_hover: offset={}", offset);
 
@@ -122,14 +158,8 @@ pub(crate) fn get_hover(lsp: &SqlLsp, text: &Rope, offset: usize) -> Option<Hove
     }
 
     if let Some(table_name) = lsp.resolve_table_identifier(&word, text, offset) {
-        if let Some(table) = lsp.table_info(&table_name) {
-            return Some(create_table_hover(
-                table,
-                lsp.columns_for_table(&table.name).map(Vec::as_slice),
-                lsp.foreign_keys_for_table(&table.name).map(Vec::as_slice),
-                lsp.reverse_foreign_keys_for_table(&table.name)
-                    .map(Vec::as_slice),
-            ));
+        if let Some(hover) = table_hover(lsp, &table_name) {
+            return Some(hover);
         }
 
         if let Some(columns) = lsp.derived_columns_for_identifier(&table_name, text) {

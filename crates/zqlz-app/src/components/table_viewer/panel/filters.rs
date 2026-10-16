@@ -1,51 +1,19 @@
 use super::*;
 
 impl TableViewerPanel {
-    pub fn apply_filters(
-        &mut self,
-        connection_id: Uuid,
-        table_name: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn apply_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(filter_state) = self.filter_panel_state.clone() else {
             return;
         };
 
-        let (filters, sorts) = filter_state.read_with(cx, |state, _cx| {
-            (state.get_filter_conditions(), state.get_sort_criteria())
-        });
-
         if self.uses_client_side_filters() {
+            let (filters, sorts) = filter_state.read_with(cx, |state, _cx| {
+                (state.get_filter_conditions(), state.get_sort_criteria())
+            });
             self.apply_filters_client_side(&filters, &sorts, cx);
         } else {
-            let visible_columns: Vec<String> = self
-                .column_visibility_state
-                .as_ref()
-                .map(|state| state.read(cx).visible_columns())
-                .unwrap_or_else(|| self.column_meta.iter().map(|c| c.name.clone()).collect());
-
-            let search_columns = self
-                .performance_profile
-                .as_ref()
-                .map(|profile| profile.searchable_columns.clone())
-                .filter(|columns| !columns.is_empty());
-
-            cx.emit(TableViewerEvent::ApplyFilters {
-                connection_id,
-                table_name,
-                filters,
-                sorts,
-                visible_columns,
-                search_text: self.search_text.clone(),
-                search_columns,
-            });
-
-            if let Some(pag_state) = &self.pagination_state {
-                pag_state.update(cx, |state, cx| {
-                    state.current_page = 1;
-                    cx.notify();
-                });
-            }
+            cx.emit(TableViewerEvent::FiltersApplied);
+            self.reload(zqlz_services::FetchMode::Page(1), window, cx);
         }
 
         filter_state.update(cx, |state, cx| {
@@ -120,17 +88,15 @@ impl TableViewerPanel {
         cx.notify();
     }
 
-    pub fn clear_sort_and_apply(&mut self, cx: &mut Context<Self>) {
+    pub fn clear_sort_and_apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(filter_state) = &self.filter_panel_state {
             filter_state.update(cx, |state, cx| {
                 state.clear_sorts(cx);
             });
         }
 
-        if let (Some(connection_id), Some(table_name)) =
-            (self.connection_id, self.table_name.clone())
-        {
-            self.apply_filters(connection_id, table_name, cx);
+        if self.connection_id.is_some() && self.table_name.is_some() {
+            self.apply_filters(window, cx);
         }
     }
 
@@ -138,6 +104,7 @@ impl TableViewerPanel {
         &mut self,
         column_name: String,
         direction: super::super::filter_types::SortDirection,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Some(filter_state) = &self.filter_panel_state {
@@ -153,10 +120,8 @@ impl TableViewerPanel {
             });
         }
 
-        if let (Some(connection_id), Some(table_name)) =
-            (self.connection_id, self.table_name.clone())
-        {
-            self.apply_filters(connection_id, table_name, cx);
+        if self.connection_id.is_some() && self.table_name.is_some() {
+            self.apply_filters(window, cx);
         }
     }
 

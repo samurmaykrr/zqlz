@@ -12,11 +12,12 @@ path = "src/zqlz_driver_clickhouse.rs"
 
 [dependencies]
 zqlz-core.workspace = true
+zqlz-analyzer.workspace = true
 zqlz-schema-engine.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
 chrono.workspace = true
 uuid.workspace = true
 serde_json.workspace = true

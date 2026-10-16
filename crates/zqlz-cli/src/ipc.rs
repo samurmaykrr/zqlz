@@ -32,7 +32,32 @@ pub struct ColumnMeta {
 /// A single row in a query result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Row {
+    /// Display text per cell. Servers that send `cells` get it rewritten from
+    /// them by [`Row::normalize`]; older servers only send this.
     pub values: Vec<String>,
+    /// Typed cells; SQL NULL is `null`. Absent from older servers.
+    #[serde(default)]
+    pub cells: Vec<serde_json::Value>,
+}
+
+impl Row {
+    /// Rebuild `values` from the typed `cells` so every output format renders
+    /// NULL as `NULL` and structured cells (arrays, JSON) as compact JSON.
+    pub fn normalize(&mut self) {
+        if self.cells.is_empty() {
+            return;
+        }
+        self.values = self.cells.iter().map(cell_text).collect();
+    }
+}
+
+/// Text for one typed cell: `NULL`, a string as-is, anything else as compact JSON.
+pub fn cell_text(cell: &serde_json::Value) -> String {
+    match cell {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Result of a single SQL statement.
@@ -44,6 +69,12 @@ pub struct StatementResult {
     pub rows: Vec<Row>,
     pub affected_rows: u64,
     pub error: Option<String>,
+    /// Server notices (`RAISE NOTICE`, ...). Absent from older servers.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Not run because an earlier statement failed. Absent from older servers.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// Result of executing one or more SQL statements.
@@ -75,6 +106,14 @@ pub struct ColumnInfo {
     pub nullable: bool,
     pub default_value: Option<String>,
     pub is_primary_key: bool,
+}
+
+/// One table or view in a listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationEntry {
+    pub name: String,
+    /// `table`, `view` or `materialized view`.
+    pub kind: String,
 }
 
 /// View description for schema browsing.
@@ -151,11 +190,19 @@ pub enum Request {
         connection: String,
         database: Option<String>,
         sql: String,
+        /// Keep running after a failed statement. Omitted (stop at the first
+        /// error) unless set, so older servers see the request they know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continue_on_error: Option<bool>,
     },
     ListDatabases(String),
     ListTables {
         connection: String,
         database: Option<String>,
+        /// Also list views, with their kind. Only sent when asked, so older
+        /// servers see the request they know (and answer with tables only).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_views: bool,
     },
     ListColumns {
         connection: String,
@@ -173,6 +220,10 @@ pub enum Request {
     OpenTargets {
         targets: Vec<String>,
     },
+    AgentCall {
+        name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 /// Responses the GUI server sends back.
@@ -184,9 +235,12 @@ pub enum Response {
     Connections(Vec<ConnectionSummary>),
     QueryResult(QueryExecution),
     StringList(Vec<String>),
+    /// Tables and views with their kind; the answer to `include_views`.
+    Relations(Vec<RelationEntry>),
     Columns(Vec<ColumnInfo>),
     History(Vec<HistoryEntry>),
     HistoryEntry(HistoryEntry),
+    Json(serde_json::Value),
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +290,18 @@ pub async fn send_request(socket_path: &Path, request: Request) -> Result<Respon
         .await
         .context("reading IPC response payload")?;
 
-    let response: Response =
+    let mut response: Response =
         serde_json::from_slice(&response_buf).context("deserializing IPC response")?;
+
+    if let Response::QueryResult(execution) = &mut response {
+        for row in execution
+            .statements
+            .iter_mut()
+            .flat_map(|s| s.rows.iter_mut())
+        {
+            row.normalize();
+        }
+    }
 
     Ok(response)
 }
@@ -259,4 +323,48 @@ async fn connect_windows_named_pipe(socket_path: &Path) -> Result<NamedPipeClien
     Err(anyhow::anyhow!(
         "timed out waiting for named pipe server availability"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statement_result_from_an_older_server_still_parses() {
+        let statement: StatementResult = serde_json::from_value(serde_json::json!({
+            "sql": "SELECT 1", "duration_ms": 1, "columns": [], "rows": [],
+            "affected_rows": 0, "error": null
+        }))
+        .unwrap();
+        assert!(statement.warnings.is_empty() && !statement.skipped);
+    }
+
+    #[test]
+    fn list_tables_request_only_carries_include_views_when_asked() {
+        let request = |include_views| {
+            serde_json::to_value(Request::ListTables {
+                connection: "c".into(),
+                database: None,
+                include_views,
+            })
+            .unwrap()
+        };
+        assert!(request(false)["payload"].get("include_views").is_none());
+        assert_eq!(request(true)["payload"]["include_views"], true);
+    }
+
+    #[test]
+    fn execute_request_only_carries_continue_on_error_when_asked() {
+        let request = |continue_on_error| {
+            serde_json::to_value(Request::ExecuteQuery {
+                connection: "c".into(),
+                database: None,
+                sql: "SELECT 1".into(),
+                continue_on_error,
+            })
+            .unwrap()
+        };
+        assert!(request(None)["payload"].get("continue_on_error").is_none());
+        assert_eq!(request(Some(true))["payload"]["continue_on_error"], true);
+    }
 }

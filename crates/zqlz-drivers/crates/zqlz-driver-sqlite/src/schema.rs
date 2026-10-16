@@ -13,12 +13,16 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection as RusqliteConnection;
 use zqlz_core::{
-    AutoIncrementRules, CatalogCapabilities, CatalogSource, DatabaseObject, NamespaceModel,
-    ObjectKindSupport, ObjectType, QueryResult, RawColumnRow, RawForeignKeyRow, RawIdentity,
-    RawIndexRow, RawRelationRow, RawTriggerRow, RelationRef, Result, Row, TableType, Value,
+    AutoIncrementRules, CatalogCapabilities, CatalogSource, ColumnInfo, ConstraintInfo,
+    DatabaseInfo, DatabaseObject, Dependency, ForeignKeyInfo, FunctionInfo, IndexInfo,
+    NamespaceModel, ObjectFormDdlRequest, ObjectFormSpec, ObjectFormSpecRequest, ObjectKindSupport,
+    ObjectType, ObjectsPanelData, ObjectsPanelManifest, PrimaryKeyInfo, ProcedureInfo, QueryResult,
+    RawColumnRow, RawForeignKeyRow, RawIdentity, RawIndexRow, RawRelationRow, RawTriggerRow,
+    RelationRef, Result, Row, SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails,
+    TableInfo, TableType, TriggerInfo, TypeInfo, Value, ViewInfo,
 };
 
-use crate::connection::{object_type_to_sqlite, run_sqlite_query};
+use crate::connection::{SqliteConnection, object_type_to_sqlite, run_sqlite_query};
 
 fn sqlite_string_literal(value: &str) -> String {
     value.replace('\'', "''")
@@ -430,5 +434,156 @@ impl CatalogSource for SqliteCatalog {
             .rows
             .first()
             .and_then(|row| row.get(0).and_then(|v| v.as_str()).map(ToString::to_string)))
+    }
+}
+
+/// Object kinds SQLite actually lists via `sqlite_master`: tables, views, and
+/// triggers. Structured introspection is delegated to the shared
+/// `zqlz-schema-engine`; only the runtime-refinement hooks are overridden here.
+#[async_trait]
+impl SchemaIntrospection for SqliteConnection {
+    fn object_kind_support(&self) -> Option<ObjectKindSupport> {
+        Some(crate::driver::OBJECT_KINDS)
+    }
+
+    fn default_schema_name(&self) -> Option<String> {
+        Some("main".to_string())
+    }
+
+    async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
+        self.schema_engine.list_databases().await
+    }
+
+    async fn list_schemas(&self) -> Result<Vec<SchemaInfo>> {
+        self.schema_engine.list_schemas().await
+    }
+
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>> {
+        self.schema_engine.list_tables(schema).await
+    }
+
+    async fn list_views(&self, schema: Option<&str>) -> Result<Vec<ViewInfo>> {
+        self.schema_engine.list_views(schema).await
+    }
+
+    async fn list_materialized_views(&self, schema: Option<&str>) -> Result<Vec<ViewInfo>> {
+        self.schema_engine.list_materialized_views(schema).await
+    }
+
+    async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
+        self.schema_engine.get_table(schema, name).await
+    }
+
+    async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+        self.schema_engine.get_columns(schema, table).await
+    }
+
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        self.schema_engine.list_all_columns(schema).await
+    }
+
+    async fn list_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        self.schema_engine.list_all_foreign_keys(schema).await
+    }
+
+    async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
+        self.schema_engine.get_indexes(schema, table).await
+    }
+
+    async fn get_foreign_keys(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyInfo>> {
+        self.schema_engine.get_foreign_keys(schema, table).await
+    }
+
+    async fn get_primary_key(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Option<PrimaryKeyInfo>> {
+        self.schema_engine.get_primary_key(schema, table).await
+    }
+
+    async fn get_constraints(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ConstraintInfo>> {
+        self.schema_engine.get_constraints(schema, table).await
+    }
+
+    async fn list_functions(&self, schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
+        self.schema_engine.list_functions(schema).await
+    }
+
+    async fn list_procedures(&self, schema: Option<&str>) -> Result<Vec<ProcedureInfo>> {
+        self.schema_engine.list_procedures(schema).await
+    }
+
+    async fn list_triggers(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<TriggerInfo>> {
+        self.schema_engine.list_triggers(schema, table).await
+    }
+
+    async fn list_sequences(&self, schema: Option<&str>) -> Result<Vec<SequenceInfo>> {
+        self.schema_engine.list_sequences(schema).await
+    }
+
+    async fn list_types(&self, schema: Option<&str>) -> Result<Vec<TypeInfo>> {
+        self.schema_engine.list_types(schema).await
+    }
+
+    async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
+        self.schema_engine.generate_ddl(object).await
+    }
+
+    async fn get_dependencies(&self, object: &DatabaseObject) -> Result<Vec<Dependency>> {
+        self.schema_engine.get_dependencies(object).await
+    }
+
+    async fn list_tables_extended(&self, schema: Option<&str>) -> Result<ObjectsPanelData> {
+        self.schema_engine.list_tables_extended(schema).await
+    }
+
+    async fn list_objects_panel_data_for_kind(
+        &self,
+        schema: Option<&str>,
+        kind_id: &str,
+    ) -> Result<ObjectsPanelData> {
+        self.schema_engine
+            .list_objects_panel_data_for_kind(schema, kind_id)
+            .await
+    }
+
+    async fn list_objects_panel_manifest(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<ObjectsPanelManifest> {
+        self.schema_engine.list_objects_panel_manifest(schema).await
+    }
+
+    async fn object_form_spec(
+        &self,
+        request: &ObjectFormSpecRequest,
+    ) -> Result<Option<ObjectFormSpec>> {
+        self.schema_engine.object_form_spec(request).await
+    }
+
+    async fn generate_object_form_ddl(
+        &self,
+        request: &ObjectFormDdlRequest,
+    ) -> Result<Vec<String>> {
+        self.schema_engine.generate_object_form_ddl(request).await
     }
 }

@@ -485,9 +485,14 @@ fn test_hover_postgres_json_operator() {
     let text = Rope::from(sql);
     let offset = sql.find("->>").expect("operator present") + 1;
 
-    let hover = lsp.get_hover(&text, offset).expect("hover for ->> operator");
+    let hover = lsp
+        .get_hover(&text, offset)
+        .expect("hover for ->> operator");
     let hover_text = hover_to_text(hover);
-    assert!(hover_text.contains("->>"), "hover names the operator: {hover_text}");
+    assert!(
+        hover_text.contains("->>"),
+        "hover names the operator: {hover_text}"
+    );
     assert!(
         hover_text.to_lowercase().contains("text"),
         "hover explains text extraction: {hover_text}"
@@ -507,6 +512,128 @@ fn test_hover_json_operator_absent_for_sqlite() {
         assert!(
             !hover_text.contains("Get JSON field"),
             "sqlite should not get postgres JSON operator docs: {hover_text}"
+        );
+    }
+}
+
+#[test]
+fn test_table_hover_loads_uncached_columns_on_demand() {
+    use zqlz_services::TableDetails;
+
+    let mut lsp = create_test_lsp();
+    lsp.pre_populate_tables(&["rental".to_string()]);
+
+    assert_eq!(lsp.table_awaiting_columns("users"), None);
+    assert_eq!(
+        lsp.table_awaiting_columns("RENTAL"),
+        Some(("rental".to_string(), None))
+    );
+    let hover_text = hover_to_text(lsp.table_hover("rental").expect("table hover"));
+    assert!(
+        !hover_text.contains("Columns"),
+        "No empty column header before columns load. Got: {}",
+        hover_text
+    );
+
+    let details = TableDetails {
+        name: "rental".to_string(),
+        table_type: zqlz_core::TableType::Table,
+        columns: vec![zqlz_services::ColumnInfo {
+            name: "rental_id".to_string(),
+            data_type: "integer".to_string(),
+            nullable: false,
+            is_primary_key: true,
+            default_value: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_auto_increment: false,
+            comment: None,
+            enum_values: None,
+        }],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        constraints: Vec::new(),
+        triggers: Vec::new(),
+        primary_key_columns: vec!["rental_id".to_string()],
+        row_count: None,
+    };
+    lsp.merge_table_columns("rental", &details);
+
+    assert_eq!(lsp.table_awaiting_columns("rental"), None);
+    let hover_text = hover_to_text(lsp.table_hover("rental").expect("table hover"));
+    assert!(
+        hover_text.contains("- `rental_id`: integer **PK**"),
+        "Loaded columns should render. Got: {}",
+        hover_text
+    );
+}
+
+#[test]
+fn test_table_details_hover_for_table_in_another_schema() {
+    use zqlz_services::TableDetails;
+
+    let lsp = create_test_lsp();
+    assert!(!lsp.has_table_in_schema("organizations", "app"));
+    // Fixture tables carry no schema, so they belong to the active one.
+    assert!(lsp.has_table_in_schema("users", "public"));
+
+    let foreign_key = |column: &str, table: &str| zqlz_core::ForeignKeyInfo {
+        name: format!("fk_{column}"),
+        columns: vec![column.to_string()],
+        referenced_table: table.to_string(),
+        referenced_schema: Some("app".to_string()),
+        referenced_columns: vec!["id".to_string()],
+        on_update: zqlz_core::ForeignKeyAction::NoAction,
+        on_delete: zqlz_core::ForeignKeyAction::NoAction,
+        is_deferrable: false,
+        initially_deferred: false,
+    };
+    let mut details = TableDetails {
+        name: "organizations".to_string(),
+        table_type: zqlz_core::TableType::Table,
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: vec![
+            foreign_key("owner_id", "users"),
+            foreign_key("plan_id", "plans"),
+        ],
+        constraints: Vec::new(),
+        triggers: Vec::new(),
+        primary_key_columns: Vec::new(),
+        row_count: None,
+    };
+    assert!(
+        lsp.table_details_hover("app", &details).is_none(),
+        "A table with no columns doesn't exist"
+    );
+
+    details.columns = ["owner_id", "plan_id"]
+        .map(|name| zqlz_services::ColumnInfo {
+            name: name.to_string(),
+            data_type: "uuid".to_string(),
+            nullable: false,
+            is_primary_key: false,
+            default_value: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_auto_increment: false,
+            comment: None,
+            enum_values: None,
+        })
+        .to_vec();
+    let hover_text = hover_to_text(lsp.table_details_hover("app", &details).expect("hover"));
+    for expected in [
+        "**Table: organizations**",
+        "Schema: `app`",
+        "- `owner_id`: uuid **FK** NOT NULL",
+        "- `owner_id` → `users.id`",
+        "- `plan_id` → `plans.id`",
+    ] {
+        assert!(
+            hover_text.contains(expected),
+            "missing {expected:?} in: {hover_text}"
         );
     }
 }

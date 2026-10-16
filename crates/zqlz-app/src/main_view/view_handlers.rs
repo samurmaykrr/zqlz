@@ -43,6 +43,7 @@ use crate::app::AppState;
 use crate::components::QueryEditor;
 use crate::workspace_state::RefreshScope;
 use zqlz_services::SchemaService;
+use zqlz_settings::ZqlzSettings;
 use zqlz_text_editor::{DocumentIdentity, TextDocument};
 
 use super::MainView;
@@ -1227,6 +1228,7 @@ impl MainView {
         let connection = connection.clone();
         let connection_name = Some(selection.connection_name);
         let database_name = database_name.or(selection.default_database_name);
+        let continue_on_error = ZqlzSettings::continue_on_error(cx);
 
         results_panel.update(cx, |panel, cx| {
             panel.set_loading(true, cx);
@@ -1239,6 +1241,7 @@ impl MainView {
                 conn_id,
                 sql,
                 None,
+                continue_on_error,
                 QueryDisplayContext {
                     connection_name,
                     database_name,

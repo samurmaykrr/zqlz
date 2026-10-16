@@ -169,8 +169,8 @@ impl Render for TableViewerPanel {
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| {
                 this.toggle_search(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &CloseSearch, _window, cx| {
-                this.close_search(cx);
+            .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                this.close_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleReplace, window, cx| {
                 this.toggle_replace(window, cx);

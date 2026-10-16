@@ -43,7 +43,6 @@ impl TableViewerDelegate {
 
         let viewer_panel = self.viewer_panel.clone();
         let table_name = self.table_name.clone();
-        let connection_id = self.connection_id;
         let all_row_values = self.rows.get(actual_row_ix).cloned().unwrap_or_default();
         let all_column_names: Vec<String> =
             self.column_meta.iter().map(|c| c.name.clone()).collect();
@@ -242,7 +241,6 @@ impl TableViewerDelegate {
                     let column_meta = column_meta.clone();
                     let current_value = current_value.clone();
                     let viewer_panel = viewer_panel.clone();
-                    let table_name = table_name.clone();
                     let all_row_values = all_row_values.clone();
                     let all_column_names = all_column_names.clone();
                     let all_column_types = all_column_types.clone();
@@ -254,8 +252,6 @@ impl TableViewerDelegate {
                         if let Some(col_meta) = &column_meta
                             && let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                                 cx.emit(TableViewerEvent::EditCell {
-                                    table_name: table_name.clone(),
-                                    connection_id,
                                     row: actual_row_ix,
                                     col: data_col_ix,
                                     column_meta: col_meta.clone(),
@@ -277,7 +273,6 @@ impl TableViewerDelegate {
         )
         .item({
             let viewer_panel = viewer_panel.clone();
-            let table_name = table_name.clone();
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let column_meta_vec = self.column_meta.clone();
@@ -292,8 +287,6 @@ impl TableViewerDelegate {
                     move |_this, _, _, cx| {
                         if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::EditRow {
-                                connection_id,
-                                table_name: table_name.clone(),
                                 row_index: actual_row_ix,
                                 row_values: all_row_values.clone(),
                                 column_meta: column_meta_vec.clone(),
@@ -789,8 +782,6 @@ impl TableViewerDelegate {
         .item({
             let viewer_panel = self.viewer_panel.clone();
             let column_name = column_name.clone();
-            let connection_id = self.connection_id;
-            let table_name = self.table_name.clone();
             PopupMenuItem::new("Filter by Distinct Values")
                 .disabled_with_reason(first_disabled_reason(&[(
                     !supports_distinct_values,
@@ -799,8 +790,6 @@ impl TableViewerDelegate {
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::LoadDistinctValues {
-                            connection_id,
-                            table_name: table_name.clone(),
                             column_name: column_name.clone(),
                         });
                     }) {

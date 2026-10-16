@@ -10,7 +10,9 @@
 //! - Functions: CREATE/ALTER FUNCTION definitions
 //! - Triggers: CREATE/ALTER TRIGGER definitions
 
-use crate::schema_metadata::{SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo};
+use crate::schema_metadata::{
+    SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo, SchemaSymbolType,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use lsp_types::DiagnosticSeverity;
@@ -47,10 +49,12 @@ use zqlz_text_editor::{
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
     button::{Button, ButtonVariants, DropdownButton},
+    checkbox::Checkbox,
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     menu::DropdownMenu,
     scroll::ScrollableElement,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -368,7 +372,7 @@ impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
         text: &ropey::Rope,
         offset: usize,
         _window: &mut Window,
-        _cx: &App,
+        cx: &App,
     ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
         if !allow_full_document_lsp(text) {
             return Task::ready(Ok(None));
@@ -378,22 +382,41 @@ impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
         let schema_hover = {
             let lsp = self.sql_lsp.read();
             let db_schema = lsp.get_schema_for_metadata();
+            // `schema.table` outside the cached (active) schema: load it directly
+            // rather than matching a same-named table of the active schema.
+            if let Some((schema, table)) = crate::schema_metadata::schema_qualified_table_at(
+                &text_string,
+                offset,
+                &db_schema.schema_names,
+            ) && !lsp.has_table_in_schema(&table, &schema)
+            {
+                drop(lsp);
+                return qualified_table_hover(&self.sql_lsp, schema, table, cx);
+            }
             if db_schema.tables.is_empty() {
                 None
             } else {
                 let schema_metadata = SchemaMetadata::new(db_schema);
-                schema_metadata
-                    .find_symbol_at_offset(&text_string, offset)
-                    .map(|symbol| {
-                        let documentation = schema_symbol_hover_documentation(&symbol);
-                        lsp_types::Hover {
-                            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
-                                kind: lsp_types::MarkupKind::Markdown,
-                                value: documentation,
-                            }),
-                            range: None,
-                        }
-                    })
+                let symbol = schema_metadata.find_symbol_at_offset(&text_string, offset);
+                // `SchemaMetadata` carries no columns, so tables render from the
+                // LSP cache, which also has foreign keys.
+                if let Some(symbol) = &symbol
+                    && symbol.symbol_type == SchemaSymbolType::Table
+                {
+                    let table_name = symbol.name.clone();
+                    drop(lsp);
+                    return table_hover_with_columns(self.sql_lsp.clone(), table_name, cx);
+                }
+                symbol.map(|symbol| {
+                    let documentation = schema_symbol_hover_documentation(&symbol);
+                    lsp_types::Hover {
+                        contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                            kind: lsp_types::MarkupKind::Markdown,
+                            value: documentation,
+                        }),
+                        range: None,
+                    }
+                })
             }
         };
         if schema_hover.is_some() {
@@ -406,6 +429,71 @@ impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
     }
 }
 
+/// Table hover that first loads the table's columns when nothing has cached
+/// them yet (a fresh query tab), instead of rendering an empty column list.
+fn table_hover_with_columns(
+    sql_lsp: Arc<RwLock<SqlLsp>>,
+    table_name: String,
+    cx: &App,
+) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+    let pending = sql_lsp.read().table_awaiting_columns(&table_name);
+    let Some((canonical_name, fetch)) = pending.and_then(|(canonical_name, schema)| {
+        let fetch = fetch_table_details(&sql_lsp, canonical_name.clone(), schema, cx)?;
+        Some((canonical_name, fetch))
+    }) else {
+        return Task::ready(Ok(sql_lsp.read().table_hover(&table_name)));
+    };
+
+    cx.spawn(async move |_| {
+        let details = fetch.await;
+        let mut lsp = sql_lsp.write();
+        match details {
+            Ok(details) => lsp.merge_table_columns(&canonical_name, &details),
+            Err(error) => {
+                tracing::warn!(table = %canonical_name, %error, "Failed to load columns for hover");
+            }
+        }
+        Ok(lsp.table_hover(&canonical_name))
+    })
+}
+
+/// Table hover for `schema.table` in a schema the LSP hasn't cached.
+fn qualified_table_hover(
+    sql_lsp: &Arc<RwLock<SqlLsp>>,
+    schema: String,
+    table: String,
+    cx: &App,
+) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+    let Some(fetch) = fetch_table_details(sql_lsp, table.clone(), Some(schema.clone()), cx) else {
+        return Task::ready(Ok(None));
+    };
+    let sql_lsp = sql_lsp.clone();
+    cx.spawn(async move |_| match fetch.await {
+        Ok(details) => Ok(sql_lsp.read().table_details_hover(&schema, &details)),
+        Err(error) => {
+            tracing::warn!(%schema, %table, %error, "Failed to load table for hover");
+            Ok(None)
+        }
+    })
+}
+
+/// Loads a table's details off the main thread; `None` without a live connection.
+fn fetch_table_details(
+    sql_lsp: &RwLock<SqlLsp>,
+    table: String,
+    schema: Option<String>,
+    cx: &App,
+) -> Option<Task<Result<zqlz_services::TableDetails, zqlz_services::ServiceError>>> {
+    let lsp = sql_lsp.read();
+    let (connection, connection_id) = (lsp.connection()?, lsp.connection_id()?);
+    let schema_service = lsp.schema_service();
+    Some(cx.background_spawn(async move {
+        schema_service
+            .get_table_details(connection, connection_id, &table, schema.as_deref())
+            .await
+    }))
+}
+
 fn schema_symbol_hover_documentation(symbol_info: &SchemaSymbolInfo) -> String {
     let mut content = String::new();
 
@@ -416,7 +504,9 @@ fn schema_symbol_hover_documentation(symbol_info: &SchemaSymbolInfo) -> String {
     ));
 
     if let Some(details) = &symbol_info.details {
-        if let Some(columns) = &details.columns {
+        if let Some(columns) = &details.columns
+            && !columns.is_empty()
+        {
             content.push_str("**Columns**:\n");
             for col in columns.iter().take(10) {
                 let pk_marker = if col.is_primary_key { " PK" } else { "" };
@@ -1663,7 +1753,13 @@ impl QueryEditor {
             .collect()
     }
 
-    fn run_menu_entries() -> Vec<QueryEditorRunMenuEntry> {
+    /// Persisted by the settings observer in `zqlz-settings`; every open
+    /// editor re-renders through its own settings observer.
+    fn set_continue_on_error(value: bool, cx: &mut App) {
+        ZqlzSettings::global_mut(cx).connections.continue_on_error = value;
+    }
+
+    fn run_menu_entries(continue_on_error: bool) -> Vec<QueryEditorRunMenuEntry> {
         vec![
             QueryEditorRunMenuEntry {
                 label: "Run",
@@ -1682,8 +1778,8 @@ impl QueryEditor {
             QueryEditorRunMenuEntry {
                 label: "Continue on Error",
                 action: QueryEditorRunMenuAction::ContinueOnError,
-                checked: true,
-                disabled: true,
+                checked: continue_on_error,
+                disabled: false,
                 separator_before: true,
             },
         ]
@@ -1909,7 +2005,7 @@ impl QueryEditor {
     fn selector_label(label: impl Into<SharedString>) -> impl IntoElement {
         div()
             .min_w_0()
-            .flex_grow()
+            .flex_grow_1()
             .truncate()
             .line_height(relative(1.0))
             .child(label.into())
@@ -3798,6 +3894,7 @@ impl QueryEditor {
         };
         let execute_disabled = self.is_executing || is_empty || has_template_error;
         let run_target_preview = self.run_target_preview(cx);
+        let continue_on_error = ZqlzSettings::continue_on_error(cx);
 
         v_flex()
             .id("query-editor-toolbar")
@@ -3884,7 +3981,7 @@ impl QueryEditor {
                                 .icon(ZqlzIcon::Plug)
                                 .tooltip(connection_label.clone())
                                 .w(px(220.0))
-                                .flex_shrink()
+                                .flex_shrink_1()
                                 .child(Self::selector_label(connection_label))
                                 .dropdown_menu(move |mut menu, _window, _cx| {
                                     use zqlz_ui::widgets::menu::PopupMenuItem;
@@ -3935,7 +4032,7 @@ impl QueryEditor {
                                 .icon(ZqlzIcon::Database)
                                 .tooltip(database_label.clone())
                                 .w(px(180.0))
-                                .flex_shrink()
+                                .flex_shrink_1()
                                 .child(Self::selector_label(database_label))
                                 .dropdown_menu(move |mut menu, _window, _cx| {
                                     use zqlz_ui::widgets::menu::PopupMenuItem;
@@ -3983,7 +4080,7 @@ impl QueryEditor {
                                 .icon(ZqlzIcon::Stack)
                                 .tooltip(schema_label.clone())
                                 .w(px(180.0))
-                                .flex_shrink()
+                                .flex_shrink_1()
                                 .child(Self::selector_label(schema_label))
                                 .dropdown_menu(move |mut menu, _window, _cx| {
                                     use zqlz_ui::widgets::menu::PopupMenuItem;
@@ -4045,7 +4142,7 @@ impl QueryEditor {
                                 move |mut menu, _window, _cx| {
                                     use zqlz_ui::widgets::menu::PopupMenuItem;
                                     menu = menu.min_w(px(320.0)).max_w(px(420.0));
-                                    for entry in QueryEditor::run_menu_entries() {
+                                    for entry in QueryEditor::run_menu_entries(continue_on_error) {
                                         if entry.separator_before {
                                             menu = menu.item(PopupMenuItem::separator());
                                         }
@@ -4112,7 +4209,12 @@ impl QueryEditor {
                                                         QueryEditorRunMenuAction::RunCurrentStatement => {
                                                             this.emit_execute_selection(cx);
                                                         }
-                                                        QueryEditorRunMenuAction::ContinueOnError => {}
+                                                        QueryEditorRunMenuAction::ContinueOnError => {
+                                                            Self::set_continue_on_error(
+                                                                !ZqlzSettings::continue_on_error(cx),
+                                                                cx,
+                                                            );
+                                                        }
                                                     })
                                                 {
                                                     tracing::warn!(
@@ -4129,6 +4231,19 @@ impl QueryEditor {
                             .primary()
                             .xsmall()
                             .disabled(execute_disabled),
+                    )
+                    .child(
+                        Checkbox::new("continue-on-error")
+                            .label("Continue on error")
+                            .xsmall()
+                            .checked(continue_on_error)
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Keep running the remaining statements after one fails")
+                                    .build(window, cx)
+                            })
+                            .on_click(|checked, _window, cx| {
+                                Self::set_continue_on_error(*checked, cx);
+                            }),
                     )
                     .child(
                         Button::new("stop")
@@ -4844,7 +4959,7 @@ mod tests {
 
     #[test]
     fn run_menu_entries_match_navicat_v1_actions() {
-        let entries = QueryEditor::run_menu_entries();
+        let entries = QueryEditor::run_menu_entries(false);
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].label, "Run");
@@ -4859,9 +4974,10 @@ mod tests {
         );
         assert_eq!(entries[2].label, "Continue on Error");
         assert_eq!(entries[2].action, QueryEditorRunMenuAction::ContinueOnError);
-        assert!(entries[2].checked);
-        assert!(entries[2].disabled);
+        assert!(!entries[2].checked);
+        assert!(!entries[2].disabled);
         assert!(entries[2].separator_before);
+        assert!(QueryEditor::run_menu_entries(true)[2].checked);
     }
 
     #[test]

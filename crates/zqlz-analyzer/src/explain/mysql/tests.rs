@@ -32,7 +32,9 @@ mod json_parsing {
         assert_eq!(plan.root.node_type, NodeType::SeqScan);
         assert_eq!(plan.root.relation, Some("users".to_string()));
         assert_eq!(plan.root.rows, Some(100));
-        assert_eq!(plan.root.actual_rows, Some(10));
+        // rows_produced_per_join is an optimizer estimate, not an actual count
+        assert_eq!(plan.root.actual_rows, None);
+        assert_eq!(plan.root.extra["rows_produced"], 10);
     }
 
     #[test]

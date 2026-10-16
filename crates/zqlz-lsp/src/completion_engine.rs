@@ -170,6 +170,10 @@ impl SqlLsp {
         );
 
         completions.truncate(20);
+        completion_edit::quote_identifier_completions(
+            &mut completions,
+            self.dialect.dialect_info().identifier_quote,
+        );
         completion_edit::apply_completion_text_edits(&mut completions, text, offset);
 
         tracing::debug!("Returning {} completions", completions.len());

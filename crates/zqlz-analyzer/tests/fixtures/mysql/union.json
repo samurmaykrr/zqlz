@@ -1,0 +1,76 @@
+{
+  "query_block": {
+    "union_result": {
+      "using_temporary_table": true,
+      "select_id": 3,
+      "table_name": "<union1,2>",
+      "access_type": "ALL",
+      "query_specifications": [
+        {
+          "dependent": false,
+          "cacheable": true,
+          "query_block": {
+            "select_id": 1,
+            "cost_info": {
+              "query_cost": "17517.03"
+            },
+            "table": {
+              "table_name": "orders_orders",
+              "access_type": "index",
+              "key": "fk_order_currency",
+              "used_key_parts": [
+                "currency_code"
+              ],
+              "key_length": "12",
+              "rows_examined_per_scan": 152189,
+              "rows_produced_per_join": 152189,
+              "filtered": "100.00",
+              "using_index": true,
+              "cost_info": {
+                "read_cost": "2298.13",
+                "eval_cost": "15218.90",
+                "prefix_cost": "17517.03",
+                "data_read_per_join": "208M"
+              },
+              "used_columns": [
+                "order_id"
+              ]
+            }
+          }
+        },
+        {
+          "dependent": false,
+          "cacheable": true,
+          "query_block": {
+            "select_id": 2,
+            "cost_info": {
+              "query_cost": "57708.07"
+            },
+            "table": {
+              "table_name": "orders_order_items",
+              "access_type": "index",
+              "key": "idx_order_item_order",
+              "used_key_parts": [
+                "order_id"
+              ],
+              "key_length": "144",
+              "rows_examined_per_scan": 488256,
+              "rows_produced_per_join": 488256,
+              "filtered": "100.00",
+              "using_index": true,
+              "cost_info": {
+                "read_cost": "8882.47",
+                "eval_cost": "48825.60",
+                "prefix_cost": "57708.07",
+                "data_read_per_join": "286M"
+              },
+              "used_columns": [
+                "order_id"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

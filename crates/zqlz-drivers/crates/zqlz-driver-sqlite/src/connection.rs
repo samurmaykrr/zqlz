@@ -61,7 +61,7 @@ impl QueryCancelHandle for SqliteCancelHandle {
 pub struct SqliteConnection {
     conn: Arc<Mutex<RusqliteConnection>>,
     interrupt_handle: Arc<InterruptHandle>,
-    schema_engine: SchemaEngine,
+    pub(crate) schema_engine: SchemaEngine,
     closed: AtomicBool,
 }
 
@@ -384,6 +384,14 @@ impl Connection for SqliteConnection {
         Some("sqlite")
     }
 
+    fn table_sql_name(&self, table: &zqlz_core::TableRef) -> zqlz_core::SqlObjectName {
+        // `main` is the default; only attached databases are qualified.
+        zqlz_core::SqlObjectName {
+            namespace: table.schema.clone().filter(|schema| schema != "main"),
+            name: table.name.clone(),
+        }
+    }
+
     async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
         let mut resolved = ResolvedConnectionScope::default_scope();
         resolved.requested_scope = scope.clone();
@@ -467,15 +475,9 @@ impl Connection for SqliteConnection {
     }
 
     fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {
-        if table_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "SQLite does not support schema-qualified RENAME TABLE".to_string(),
-            ));
-        }
-
         Ok(format!(
             "ALTER TABLE {} RENAME TO {}",
-            self.quote_identifier(&table_name.name),
+            self.render_qualified_name(table_name),
             self.quote_identifier(new_table_name)
         ))
     }
@@ -485,12 +487,6 @@ impl Connection for SqliteConnection {
         table_name: &SqlObjectName,
         options: DropTableOptions,
     ) -> Result<String> {
-        if table_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "SQLite does not support schema-qualified DROP TABLE".to_string(),
-            ));
-        }
-
         if options.cascade {
             return Err(ZqlzError::NotSupported(
                 "SQLite does not support DROP TABLE ... CASCADE".to_string(),
@@ -502,7 +498,7 @@ impl Connection for SqliteConnection {
             sql.push_str(" IF EXISTS");
         }
         sql.push(' ');
-        sql.push_str(&self.quote_identifier(&table_name.name));
+        sql.push_str(&self.render_qualified_name(table_name));
         Ok(sql)
     }
 
@@ -513,18 +509,12 @@ impl Connection for SqliteConnection {
             ));
         }
 
-        if view_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "SQLite does not support schema-qualified DROP VIEW".to_string(),
-            ));
-        }
-
         let mut sql = String::from("DROP VIEW");
         if options.if_exists {
             sql.push_str(" IF EXISTS");
         }
         sql.push(' ');
-        sql.push_str(&self.quote_identifier(&view_name.name));
+        sql.push_str(&self.render_qualified_name(view_name));
         Ok(sql)
     }
 
@@ -541,12 +531,6 @@ impl Connection for SqliteConnection {
         _table_name: Option<&SqlObjectName>,
         options: DropTriggerOptions,
     ) -> Result<String> {
-        if trigger_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "SQLite does not support schema-qualified DROP TRIGGER".to_string(),
-            ));
-        }
-
         if options.cascade {
             return Err(ZqlzError::NotSupported(
                 "SQLite does not support DROP TRIGGER ... CASCADE".to_string(),
@@ -558,7 +542,7 @@ impl Connection for SqliteConnection {
             sql.push_str(" IF EXISTS");
         }
         sql.push(' ');
-        sql.push_str(&self.quote_identifier(&trigger_name.name));
+        sql.push_str(&self.render_qualified_name(trigger_name));
         Ok(sql)
     }
 
@@ -567,16 +551,10 @@ impl Connection for SqliteConnection {
         source_table_name: &SqlObjectName,
         new_table_name: &SqlObjectName,
     ) -> Result<String> {
-        if source_table_name.namespace.is_some() || new_table_name.namespace.is_some() {
-            return Err(ZqlzError::NotSupported(
-                "SQLite does not support schema-qualified table duplication".to_string(),
-            ));
-        }
-
         Ok(format!(
             "CREATE TABLE {} AS SELECT * FROM {}",
-            self.quote_identifier(&new_table_name.name),
-            self.quote_identifier(&source_table_name.name)
+            self.render_qualified_name(new_table_name),
+            self.render_qualified_name(source_table_name)
         ))
     }
 
@@ -935,7 +913,7 @@ impl Connection for SqliteConnection {
     }
 
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
-        Some(&self.schema_engine)
+        Some(self)
     }
 
     fn cancel_handle(&self) -> Option<Arc<dyn QueryCancelHandle>> {
@@ -1249,6 +1227,23 @@ fn rusqlite_to_value(row: &rusqlite::Row, idx: usize) -> Result<Value> {
 mod tests {
     use super::{SqliteConnection, object_type_to_sqlite, value_to_rusqlite};
     use zqlz_core::{Connection, ObjectType, Value, ZqlzError};
+
+    #[test]
+    fn table_sql_name_leaves_main_unqualified() {
+        let connection = SqliteConnection::open(":memory:").expect("open sqlite memory db");
+        let name = |schema: Option<&str>| {
+            connection.table_sql_name(&zqlz_core::TableRef::new(
+                None,
+                schema.map(Into::into),
+                "odd.name",
+            ))
+        };
+
+        assert_eq!(name(Some("main")).namespace, None);
+        assert_eq!(name(None).namespace, None);
+        assert_eq!(name(Some("aux")).namespace.as_deref(), Some("aux"));
+        assert_eq!(name(Some("aux")).name, "odd.name");
+    }
 
     #[test]
     fn object_type_to_sqlite_maps_supported_types() {

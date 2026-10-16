@@ -3,7 +3,7 @@ use thiserror::Error;
 pub type ServiceResult<T> = Result<T, ServiceError>;
 
 /// Service-level errors with user-friendly messages
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ServiceError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),

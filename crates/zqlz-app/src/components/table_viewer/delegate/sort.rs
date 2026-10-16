@@ -13,7 +13,7 @@ impl TableViewerDelegate {
         &mut self,
         col_ix: usize,
         sort: ColumnSort,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<TableViewerDelegate>>,
     ) {
         use super::super::filter_types::SortDirection;
@@ -42,7 +42,7 @@ impl TableViewerDelegate {
             } else {
                 let viewer_panel = self.viewer_panel.clone();
                 if let Err(error) = viewer_panel.update(cx, |panel, cx| {
-                    panel.clear_sort_and_apply(cx);
+                    panel.clear_sort_and_apply(window, cx);
                 }) {
                     tracing::error!("Failed to clear server-side sort: {:?}", error);
                 }
@@ -78,13 +78,9 @@ impl TableViewerDelegate {
         }
 
         let viewer_panel = self.viewer_panel.clone();
-        let table_name = self.table_name.clone();
-        let connection_id = self.connection_id;
 
         if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
             cx.emit(TableViewerEvent::SortColumn {
-                connection_id,
-                table_name,
                 column_name,
                 direction,
             });

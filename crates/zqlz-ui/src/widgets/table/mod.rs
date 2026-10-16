@@ -1,7 +1,8 @@
 use crate::widgets::{ActiveTheme, Sizable, Size, actions::Cancel};
 use gpui::{
     App, Edges, Entity, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    Pixels, RenderOnce, Styled, Window, actions, div, prelude::FluentBuilder,
+    Pixels, RenderOnce, Role, StatefulInteractiveElement as _, Styled, Window, actions, div,
+    prelude::FluentBuilder,
 };
 
 mod column;
@@ -170,8 +171,18 @@ where
             state.options = self.options;
         });
 
+        let (rows_count, cols_count) = self.state.read_with(cx, |state, cx| {
+            (
+                state.delegate().rows_count(cx),
+                state.delegate().columns_count(cx),
+            )
+        });
+
         div()
             .id("table")
+            .role(Role::Table)
+            .aria_row_count(rows_count)
+            .aria_column_count(cols_count)
             .size_full()
             .key_context(CONTEXT)
             .track_focus(&focus_handle)

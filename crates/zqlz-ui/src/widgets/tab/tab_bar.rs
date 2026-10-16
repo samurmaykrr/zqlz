@@ -1,7 +1,7 @@
 use gpui::{
     Anchor, AnyElement, App, Div, Edges, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    Pixels, RenderOnce, Role, ScrollHandle, Stateful, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -240,6 +240,7 @@ impl RenderOnce for TabBar {
             .child(
                 h_flex()
                     .id("tabs")
+                    .role(Role::TabList)
                     .flex_1()
                     .overflow_x_scroll()
                     .when_some(self.scroll_handle, |this, scroll_handle| {

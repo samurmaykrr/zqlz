@@ -17,7 +17,7 @@ use crate::components::{
 };
 
 use crate::main_view::table_handlers_utils::{
-    conversion::resolve_schema_qualifier,
+    conversion::viewer_table,
     redis::{fetch_redis_key_value, fetch_redis_string_bytes, parse_human_readable_ttl},
 };
 use crate::workspace::WorkspaceController;
@@ -52,12 +52,31 @@ pub(in crate::main_view) fn handle_save_cell_event(
         return;
     };
 
-    let Some(connection) = app_state
-        .connections
-        .get_for_database_cached(request.connection_id, database_name.as_deref())
-    else {
-        tracing::error!("Connection not found: {}", request.connection_id);
-        return;
+    // Relational rows are addressed through the table the viewer resolved;
+    // document rows through their database and collection.
+    let viewer_target = viewer_weak
+        .upgrade()
+        .filter(|viewer| !matches!(viewer.read(cx).driver_category, DriverCategory::Document))
+        .map(|viewer| viewer_table(viewer.read(cx), cx));
+    let (connection, table) = match viewer_target {
+        Some(Ok((table, connection))) => (connection, Some(table)),
+        Some(Err(error)) => {
+            window.push_notification(
+                Notification::error(format!("Cannot save the cell: {error}")),
+                cx,
+            );
+            return;
+        }
+        None => match app_state
+            .connections
+            .get_for_database_cached(request.connection_id, database_name.as_deref())
+        {
+            Some(connection) => (connection, None),
+            None => {
+                tracing::error!("Connection not found: {}", request.connection_id);
+                return;
+            }
+        },
     };
 
     let table_service = app_state.table_service.clone();
@@ -73,8 +92,6 @@ pub(in crate::main_view) fn handle_save_cell_event(
         .and_then(|index| request.all_row_values.get(index).cloned());
     let connection = connection.clone();
     let driver_category = connection.driver_category();
-
-    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     let cell_update_data = zqlz_services::CellUpdateData {
         column_name: column_name.clone(),
@@ -121,15 +138,13 @@ pub(in crate::main_view) fn handle_save_cell_event(
                 }
             }
         } else {
-            table_service
-                .update_cell(
-                    connection,
-                    &table_name,
-                    schema_qualifier.as_deref(),
-                    cell_update_data,
-                )
-                .await
-                .map_err(|error| anyhow::anyhow!("{}", error))
+            match &table {
+                Some(table) => table_service
+                    .update_cell(connection, table, cell_update_data)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{}", error)),
+                None => Err(anyhow::anyhow!("The table is still opening")),
+            }
         };
 
         match update_result {

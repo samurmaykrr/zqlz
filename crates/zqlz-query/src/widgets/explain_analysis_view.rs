@@ -492,7 +492,7 @@ impl<'a> ExplainAnalysisView<'a> {
         for node in self.analysis.plan.iter_nodes() {
             let entry = rows.entry(Self::node_title(node)).or_insert((0, 0.0));
             entry.0 += 1;
-            entry.1 += Self::node_cost(node);
+            entry.1 += Self::node_self_cost(node);
         }
 
         let mut rows = rows
@@ -512,7 +512,7 @@ impl<'a> ExplainAnalysisView<'a> {
             let entry = rows
                 .entry(relation)
                 .or_insert((0, 0.0, Self::node_title(node)));
-            let node_cost = Self::node_cost(node);
+            let node_cost = Self::node_self_cost(node);
             if node.is_scan() {
                 entry.0 += 1;
             }
@@ -552,7 +552,24 @@ impl<'a> ExplainAnalysisView<'a> {
         node.cost.map(|cost| cost.total).unwrap_or(0.0)
     }
 
+    /// What a node costs by itself. Totals are cumulative (children included),
+    /// so summing them per node type or relation would count the same work
+    /// several times and push shares past 100%.
+    fn node_self_cost(node: &PlanNode) -> f64 {
+        let children = node.children.iter().map(Self::node_cost).sum::<f64>();
+        (Self::node_cost(node) - children).max(0.0)
+    }
+
     fn node_title(node: &PlanNode) -> String {
+        // Providers that name their own operations (MySQL) are listed by that name.
+        if let Some(operation) = node
+            .extra
+            .get("operation")
+            .and_then(|operation| operation.as_str())
+            .filter(|operation| !operation.is_empty())
+        {
+            return operation.to_string();
+        }
         format!("{:?}", node.node_type)
             .replace("SeqScan", "Seq Scan")
             .replace("IndexScan", "Index Scan")

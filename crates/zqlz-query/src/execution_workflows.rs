@@ -38,6 +38,9 @@ pub enum QueryWorkflowRequest {
         params: Option<QueryExecutionParams>,
         source: QuerySqlSource,
         destructive_warning: Option<DestructiveOperationWarning>,
+        /// Keep running the remaining statements after one fails. `false` stops
+        /// at the first failure and reports the rest as skipped.
+        continue_on_error: bool,
     },
     Explain {
         sql: String,
@@ -101,9 +104,21 @@ impl QueryWorkflowDispatch {
                 params: normalized.params,
                 source: normalized.source,
                 destructive_warning: normalized.destructive_warning,
+                continue_on_error: false,
             },
             refresh_history: true,
         }
+    }
+
+    /// Apply the user's "Continue on error" choice to an execute request.
+    pub fn with_continue_on_error(mut self, value: bool) -> Self {
+        if let QueryWorkflowRequest::Execute {
+            continue_on_error, ..
+        } = &mut self.request
+        {
+            *continue_on_error = value;
+        }
+        self
     }
 
     pub fn explain(
@@ -453,6 +468,7 @@ pub async fn execute_query_request(
     connection_id: Uuid,
     sql: &str,
     params: Option<&QueryExecutionParams>,
+    continue_on_error: bool,
 ) -> QueryServiceResult<view_models::QueryExecution> {
     match params {
         Some(QueryExecutionParams::Positional(positional_params)) => {
@@ -462,17 +478,24 @@ pub async fn execute_query_request(
                     connection_id,
                     sql,
                     positional_params,
+                    continue_on_error,
                 )
                 .await
         }
         Some(QueryExecutionParams::Named(named_params)) => {
             query_service
-                .execute_query_with_named_params(connection, connection_id, sql, named_params)
+                .execute_query_with_named_params(
+                    connection,
+                    connection_id,
+                    sql,
+                    named_params,
+                    continue_on_error,
+                )
                 .await
         }
         None => {
             query_service
-                .execute_query(connection, connection_id, sql)
+                .execute_query(connection, connection_id, sql, continue_on_error)
                 .await
         }
     }
@@ -531,6 +554,8 @@ pub fn build_query_execution_outcome(
                     result: statement.result,
                     error: statement.error,
                     affected_rows: statement.affected_rows,
+                    warnings: statement.warnings,
+                    skipped: statement.skipped,
                 })
                 .collect(),
         },
@@ -549,6 +574,8 @@ pub fn build_query_execution_outcome(
                 result: None,
                 error: Some(format!("Service error: {}", error)),
                 affected_rows: 0,
+                warnings: Vec::new(),
+                skipped: false,
             }],
         },
     };
@@ -618,13 +645,19 @@ pub async fn run_query_workflow(
     completed_at: DateTime<Utc>,
 ) -> QueryWorkflowOutcome {
     match request {
-        QueryWorkflowRequest::Execute { sql, params, .. } => {
+        QueryWorkflowRequest::Execute {
+            sql,
+            params,
+            continue_on_error,
+            ..
+        } => {
             let service_execution = execute_query_request(
                 query_service,
                 connection,
                 connection_id,
                 &sql,
                 params.as_ref(),
+                continue_on_error,
             )
             .await;
 
@@ -651,12 +684,14 @@ pub async fn run_query_workflow(
 }
 
 /// Execute a typed "run query" workflow directly without outcome enum routing.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_execute_query_workflow(
     query_service: &QueryService,
     connection: Arc<dyn Connection>,
     connection_id: Uuid,
     sql: String,
     params: Option<QueryExecutionParams>,
+    continue_on_error: bool,
     display_context: QueryDisplayContext,
     completed_at: DateTime<Utc>,
 ) -> QueryExecutionOutcome {
@@ -666,6 +701,7 @@ pub async fn run_execute_query_workflow(
         connection_id,
         &sql,
         params.as_ref(),
+        continue_on_error,
     )
     .await;
 
@@ -1066,6 +1102,70 @@ mod tests {
 
         assert_eq!(request.source, QuerySqlSource::Selection);
         assert!(request.destructive_warning.is_none());
+    }
+
+    #[test]
+    fn dispatch_stops_on_error_unless_told_to_continue() {
+        let dispatch = |continue_on_error| {
+            let dispatch = super::QueryWorkflowDispatch::execute(
+                None,
+                None,
+                "SELECT 1; SELECT 2",
+                None,
+                QuerySqlSource::FullBuffer,
+                false,
+                "run query",
+            );
+            match continue_on_error {
+                Some(value) => dispatch.with_continue_on_error(value),
+                None => dispatch,
+            }
+        };
+        let flag = |dispatch: super::QueryWorkflowDispatch| match dispatch.request {
+            super::QueryWorkflowRequest::Execute {
+                continue_on_error, ..
+            } => continue_on_error,
+            super::QueryWorkflowRequest::Explain { .. } => panic!("expected execute dispatch"),
+        };
+
+        assert!(!flag(dispatch(None)));
+        assert!(flag(dispatch(Some(true))));
+        assert!(!flag(dispatch(Some(false))));
+    }
+
+    #[test]
+    fn skipped_statements_do_not_count_as_success() {
+        let statement = |error: Option<&str>, skipped| crate::view_models::StatementResult {
+            sql: "SELECT 1".to_string(),
+            duration_ms: 0,
+            duration_micros: 0,
+            result: None,
+            error: error.map(str::to_string),
+            affected_rows: 0,
+            warnings: Vec::new(),
+            skipped,
+        };
+        let outcome = super::build_query_execution_outcome(
+            Ok(crate::view_models::QueryExecution {
+                sql: "SELECT 1; bad; SELECT 3".to_string(),
+                duration_ms: 1,
+                duration_micros: 1,
+                statements: vec![
+                    statement(None, false),
+                    statement(Some("boom"), false),
+                    statement(None, true),
+                ],
+            }),
+            String::new(),
+            super::QueryDisplayContext::default(),
+            chrono::Utc::now(),
+        );
+
+        assert!(!outcome.success);
+        assert_eq!(outcome.execution.success_count(), 1);
+        assert_eq!(outcome.execution.error_count(), 1);
+        assert_eq!(outcome.execution.skipped_count(), 1);
+        assert!(outcome.execution.statements[2].skipped);
     }
 
     #[test]

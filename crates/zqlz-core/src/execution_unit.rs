@@ -1,5 +1,6 @@
 use crate::{
-    SqlStatementSpan, SyntaxDriverCapabilities, SyntaxExecutionUnitMode, sql_statement_span_at,
+    SqlLexDialect, SqlStatementSpan, SyntaxDriverCapabilities, SyntaxExecutionUnitMode,
+    sql_statement_span_at_for_dialect,
     uses_command_syntax, uses_sql_syntax_overlays,
 };
 
@@ -27,7 +28,7 @@ pub fn execution_unit_for_profile(
         };
     }
 
-    sql_execution_unit(source, cursor_offset)
+    sql_execution_unit(source, cursor_offset, SqlLexDialect::from_profile(syntax_profile))
 }
 
 pub fn execution_unit_for_capabilities(
@@ -38,7 +39,11 @@ pub fn execution_unit_for_capabilities(
     match capabilities.execution_unit {
         SyntaxExecutionUnitMode::CommandLine => command_execution_unit(source, cursor_offset),
         SyntaxExecutionUnitMode::WholeDocument => whole_document_execution_unit(source),
-        SyntaxExecutionUnitMode::SqlStatement => sql_execution_unit(source, cursor_offset),
+        SyntaxExecutionUnitMode::SqlStatement => sql_execution_unit(
+            source,
+            cursor_offset,
+            SqlLexDialect::from_profile(capabilities.profile),
+        ),
     }
 }
 
@@ -67,8 +72,12 @@ fn command_execution_unit(source: &str, cursor_offset: usize) -> ExecutionUnit {
     }
 }
 
-fn sql_execution_unit(source: &str, cursor_offset: usize) -> ExecutionUnit {
-    let Some(span) = sql_statement_span_at(source, cursor_offset) else {
+fn sql_execution_unit(
+    source: &str,
+    cursor_offset: usize,
+    dialect: SqlLexDialect,
+) -> ExecutionUnit {
+    let Some(span) = sql_statement_span_at_for_dialect(source, cursor_offset, dialect) else {
         return ExecutionUnit {
             source: source.to_string(),
             sql_span: None,
@@ -163,5 +172,21 @@ mod tests {
             source.find("select 2").expect("second select")..source.len() - 1
         );
         assert!(unit.sql_span.is_some());
+    }
+
+    #[test]
+    fn mysql_profile_current_statement_follows_delimiter_scripts() {
+        let source = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END//\nSELECT 3//\n";
+        let cursor = source.find("SELECT 2").expect("inner select");
+        let unit = execution_unit_for_profile(source, cursor, "mysql");
+
+        assert_eq!(unit.source, "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END");
+        assert_eq!(&source[unit.byte_range.clone()], unit.source);
+        assert_eq!(unit.sql_span.expect("span").line, 1);
+
+        let capabilities = crate::get_syntax_driver_capabilities("mysql");
+        let cursor = source.find("SELECT 3").expect("last select");
+        let unit = execution_unit_for_capabilities(source, cursor, &capabilities);
+        assert_eq!(unit.source, "SELECT 3");
     }
 }

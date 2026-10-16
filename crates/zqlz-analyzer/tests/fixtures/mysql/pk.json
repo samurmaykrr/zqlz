@@ -1,0 +1,50 @@
+{
+  "query_block": {
+    "select_id": 1,
+    "cost_info": {
+      "query_cost": "1.00"
+    },
+    "table": {
+      "table_name": "orders_orders",
+      "access_type": "const",
+      "possible_keys": [
+        "PRIMARY"
+      ],
+      "key": "PRIMARY",
+      "used_key_parts": [
+        "order_id"
+      ],
+      "key_length": "144",
+      "ref": [
+        "const"
+      ],
+      "rows_examined_per_scan": 1,
+      "rows_produced_per_join": 1,
+      "filtered": "100.00",
+      "cost_info": {
+        "read_cost": "0.00",
+        "eval_cost": "0.10",
+        "prefix_cost": "0.00",
+        "data_read_per_join": "1K"
+      },
+      "used_columns": [
+        "order_id",
+        "tenant_id",
+        "account_id",
+        "contact_id",
+        "legal_entity_id",
+        "order_number",
+        "status_code",
+        "order_timestamp",
+        "order_valid_from",
+        "order_valid_to",
+        "subtotal_amount",
+        "tax_amount",
+        "shipping_amount",
+        "total_amount",
+        "currency_code",
+        "metadata"
+      ]
+    }
+  }
+}

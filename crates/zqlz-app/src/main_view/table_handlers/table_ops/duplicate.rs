@@ -5,9 +5,8 @@ use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
-use zqlz_core::ConnectionScope;
+use zqlz_core::TableRef;
 use zqlz_services::{DuplicateTableOperation, DuplicateTablesRequest};
-use zqlz_table_workflows::DuplicateTablesDecision;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
     checkbox::Checkbox,
@@ -22,54 +21,15 @@ use crate::main_view::table_handlers_utils::validation::validate_table_name;
 use crate::workspace_state::RefreshScope;
 
 impl MainView {
-    /// Duplicates a table (creates a copy with a new name)
-    pub(in crate::main_view) fn duplicate_table(
-        &mut self,
-        connection_id: Uuid,
-        table_name: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!(
-            "Duplicate table: {} on connection {}",
-            table_name,
-            connection_id
-        );
-
-        let Some(decision) =
-            self.decide_duplicate_tables_workflow(connection_id, vec![table_name], window, cx)
-        else {
-            return;
-        };
-
-        let single_decision = match decision {
-            DuplicateTablesDecision::Single(single_decision) => single_decision,
-            DuplicateTablesDecision::Batch(_) => {
-                tracing::warn!(
-                    connection_id = %connection_id,
-                    "Single-table duplicate request produced a batch decision"
-                );
-                return;
-            }
-        };
-
-        self.open_duplicate_table_dialog(
-            single_decision.connection_id,
-            single_decision.source_table_name,
-            single_decision.suggested_table_name,
-            window,
-            cx,
-        );
-    }
-
     fn open_duplicate_table_dialog(
         &mut self,
         connection_id: Uuid,
-        source_table_name: String,
-        suggested_table_name: String,
+        source: TableRef,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let source_table_name = source.name.clone();
+        let suggested_table_name = format!("{source_table_name}_copy");
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
             return;
@@ -80,11 +40,6 @@ impl MainView {
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let source_table_name_for_dialog = source_table_name.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
 
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New table name"));
         name_input.update(cx, |input, cx| {
@@ -119,7 +74,7 @@ impl MainView {
                 let main_view = main_view.clone();
                 let table_service = table_service.clone();
                 let source_table_name = source_table_name.clone();
-                let target_database = target_database.clone();
+                let source = source.clone();
                 let name_input = name_input.clone();
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
@@ -172,14 +127,11 @@ impl MainView {
                         let main_view = main_view.clone();
                         let table_service = table_service.clone();
                         let source_table_name = source_table_name.clone();
-                        let target_database = target_database.clone();
+                        let source = source.clone();
 
                         cx.spawn(async move |cx| {
-                            let scope = target_database
-                                .map(ConnectionScope::Database)
-                                .unwrap_or(ConnectionScope::Default);
                             let resolved_connection = match connection_service
-                                .resolve_connection(connection_id, scope)
+                                .resolve_connection(connection_id, source.scope())
                                 .await
                             {
                                 Ok(resolved_connection) => resolved_connection,
@@ -202,11 +154,10 @@ impl MainView {
                                     resolved_connection.connection,
                                     DuplicateTablesRequest {
                                         operations: vec![DuplicateTableOperation {
-                                            source_table_name: source_table_name.clone(),
+                                            source,
                                             target_table_name: new_table_name,
                                         }],
                                         continue_on_error: false,
-                                        namespace: resolved_connection.effective_namespace,
                                     },
                                 )
                                 .await;
@@ -271,32 +222,19 @@ impl MainView {
     pub(in crate::main_view) fn duplicate_tables(
         &mut self,
         connection_id: Uuid,
-        table_names: Vec<String>,
+        tables: Vec<TableRef>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(decision) =
-            self.decide_duplicate_tables_workflow(connection_id, table_names, window, cx)
-        else {
+        if let [table] = tables.as_slice() {
+            self.open_duplicate_table_dialog(connection_id, table.clone(), window, cx);
+            return;
+        }
+        // ponytail: one connection per batch; the objects panel lists one database at a time.
+        let Some(scope) = tables.first().map(TableRef::scope) else {
             return;
         };
-
-        let batch_decision = match decision {
-            DuplicateTablesDecision::Single(single_decision) => {
-                self.open_duplicate_table_dialog(
-                    single_decision.connection_id,
-                    single_decision.source_table_name,
-                    single_decision.suggested_table_name,
-                    window,
-                    cx,
-                );
-                return;
-            }
-            DuplicateTablesDecision::Batch(batch_decision) => batch_decision,
-        };
-
-        let connection_id = batch_decision.connection_id;
-        let table_names = batch_decision.source_table_names;
+        let table_names: Vec<String> = tables.iter().map(|table| table.name.clone()).collect();
         let count = table_names.len();
         tracing::info!(
             "Duplicate {} tables: {:?} on connection {}",
@@ -315,13 +253,8 @@ impl MainView {
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
-        let suggested_suffix = batch_decision.suggested_suffix;
-        let continue_on_error = Rc::new(RefCell::new(batch_decision.continue_on_error_default));
+        let suggested_suffix = "_copy".to_string();
+        let continue_on_error = Rc::new(RefCell::new(true));
         let new_names: Vec<String> = table_names
             .iter()
             .map(|name| format!("{}{}", name, suggested_suffix))
@@ -334,7 +267,8 @@ impl MainView {
             let table_service = table_service.clone();
             let schema_service = schema_service.clone();
             let table_names = table_names.clone();
-            let target_database = target_database.clone();
+            let tables = tables.clone();
+            let scope = scope.clone();
             let dialog_suggested_suffix = suggested_suffix.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
@@ -359,7 +293,7 @@ impl MainView {
                             let continue_on_error = continue_on_error.clone();
                             Checkbox::new("continue-on-error")
                                 .label("Continue on error")
-                                .checked(batch_decision.continue_on_error_default)
+                                .checked(true)
                                 .on_click(move |checked, _window, _cx| {
                                     *continue_on_error.borrow_mut() = *checked;
                                 })
@@ -371,22 +305,20 @@ impl MainView {
                     let table_service = table_service.clone();
                     let schema_service = schema_service.clone();
                     let table_names = table_names.clone();
-                    let target_database = target_database.clone();
+                    let tables = tables.clone();
+                    let scope = scope.clone();
                     let suggested_suffix = dialog_suggested_suffix.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
                     cx.spawn(async move |cx| {
-                        let operations: Vec<DuplicateTableOperation> = table_names
-                            .iter()
-                            .map(|table_name| DuplicateTableOperation {
-                                source_table_name: table_name.clone(),
-                                target_table_name: format!("{}{}", table_name, suggested_suffix),
+                        let operations: Vec<DuplicateTableOperation> = tables
+                            .into_iter()
+                            .map(|source| DuplicateTableOperation {
+                                target_table_name: format!("{}{}", source.name, suggested_suffix),
+                                source,
                             })
                             .collect();
 
-                        let scope = target_database
-                            .map(ConnectionScope::Database)
-                            .unwrap_or(ConnectionScope::Default);
                         let resolved_connection = match connection_service
                             .resolve_connection(connection_id, scope)
                             .await
@@ -409,7 +341,6 @@ impl MainView {
                                 DuplicateTablesRequest {
                                     operations,
                                     continue_on_error,
-                                    namespace: resolved_connection.effective_namespace,
                                 },
                             )
                             .await;
